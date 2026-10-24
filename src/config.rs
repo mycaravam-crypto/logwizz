@@ -26,6 +26,8 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub const MIN_RECONCILE_MS: u64 = 50;
 pub const MAX_RECONCILE_MS: u64 = 600_000;
 pub const MAX_QUEUE_CAPACITY: usize = 1 << 20;
+pub const MIN_QUEUE_BYTES: usize = 64 * 1024;
+pub const MAX_QUEUE_BYTES: usize = 1 << 30;
 pub const MAX_FILES: usize = 1024;
 pub const MAX_RULES: usize = 1024;
 pub const MAX_PATTERN_BYTES: usize = 4096;
@@ -133,6 +135,9 @@ pub struct Output {
     pub format: OutputFormat,
     pub destination: Destination,
     pub queue_capacity: usize,
+    /// Upper bound on the memory held by queued events. The queue counts as
+    /// full when either limit is reached.
+    pub max_queue_bytes: usize,
     pub on_full: OnFull,
     /// Maximum number of bytes of the matching line included in an event.
     /// Unset means the whole (already length-limited) line.
@@ -145,6 +150,7 @@ impl Default for Output {
             format: OutputFormat::Json,
             destination: Destination::Stdout,
             queue_capacity: 4096,
+            max_queue_bytes: 8 * 1024 * 1024,
             on_full: OnFull::Block,
             max_excerpt_bytes: None,
         }
@@ -329,6 +335,13 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         output.queue_capacity,
         1,
         MAX_QUEUE_CAPACITY,
+    );
+    check_range(
+        &mut problems,
+        "output.max_queue_bytes",
+        output.max_queue_bytes,
+        MIN_QUEUE_BYTES,
+        MAX_QUEUE_BYTES,
     );
     if let Some(n) = output.max_excerpt_bytes {
         check_range(
@@ -557,6 +570,7 @@ mod tests {
         assert_eq!(cfg.output.format, OutputFormat::Json);
         assert_eq!(cfg.output.destination, Destination::Stdout);
         assert_eq!(cfg.output.on_full, OnFull::Block);
+        assert_eq!(cfg.output.max_queue_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.limits.rate_limit_events, 0);
         assert_eq!(cfg.files, vec![PathBuf::from("/var/log/syslog")]);
         assert_eq!(cfg.rules.len(), 1);
@@ -684,10 +698,12 @@ mod tests {
 
             [output]
             queue_capacity = 0
+            max_queue_bytes = 1024
             "
         );
         let p = problems(&text);
-        assert_eq!(p.len(), 3, "{p:?}");
+        assert_eq!(p.len(), 4, "{p:?}");
+        assert!(p.iter().any(|m| m.starts_with("output.max_queue_bytes")));
     }
 
     #[test]
