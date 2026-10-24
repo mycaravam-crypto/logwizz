@@ -5,8 +5,9 @@
 # transient and reads it through SupplementaryGroups), then:
 #   systemctl daemon-reload && systemctl enable --now logwizz
 #
-# Events go to stdout and therefore to the journal:
-#   journalctl -u logwizz -o cat
+# Events go to stdout and therefore to the journal, in the separate
+# "logwizz" namespace (see LogNamespace below):
+#   journalctl --namespace=logwizz -u logwizz -o cat
 #
 # Read access: the service runs as a transient unprivileged user
 # (DynamicUser) and gains read access to logs via SupplementaryGroups.
@@ -31,6 +32,12 @@ RestartSec=5s
 # logwizz stops reading, flushes queued events and exits 0 on SIGTERM.
 KillSignal=SIGTERM
 TimeoutStopSec=15s
+
+# Own journal namespace (systemd >= 245). Without it, events reach the main
+# journal, rsyslog copies them into /var/log/syslog, and a watched syslog file
+# would match logwizz's own events again. Retention for the namespace is set
+# in /etc/systemd/journald@logwizz.conf.
+LogNamespace=logwizz
 
 # Identity and privileges
 DynamicUser=yes

@@ -160,7 +160,7 @@ impl LineSplitter {
             self.count_skipped(&seg[fill..], true, m);
             emit_truncated(&self.pending, m, on_line);
         }
-        self.pending.clear();
+        self.reset_pending();
     }
 
     /// `seg` is a non-empty tail with no newline yet.
@@ -183,7 +183,7 @@ impl LineSplitter {
         let fill = self.cut_pending(seg);
         self.count_skipped(&seg[fill..], false, m);
         emit_truncated(&self.pending, m, on_line);
-        self.pending.clear();
+        self.reset_pending();
         self.skip = Skip::Oversize;
     }
 
@@ -223,13 +223,17 @@ impl LineSplitter {
         if !self.pending.is_empty() {
             metrics::inc(&m.partial_lines_flushed);
             emit(&self.pending, self.max, m, on_line);
-            self.pending.clear();
         }
+        self.reset_pending();
         if self.held_cr {
             metrics::inc(&m.bytes_skipped);
             self.held_cr = false;
         }
         self.skip = Skip::None;
+    }
+
+    fn reset_pending(&mut self) {
+        self.pending.clear();
         // Do not keep a large allocation around after a single long line.
         if self.pending.capacity() > READ_BUF_BYTES {
             self.pending = Vec::new();
@@ -859,6 +863,88 @@ mod tests {
         s.flush(&m, &mut |l| out.push(l.bytes.to_vec()));
         assert_eq!(out, [b"abcd".to_vec()]);
         assert_eq!(m.snapshot().bytes_skipped, 3);
+    }
+
+    #[test]
+    fn long_line_buffer_is_released() {
+        let m = Metrics::default();
+        let max = 4 * READ_BUF_BYTES;
+        let mut s = LineSplitter::new(max);
+        let long = vec![b'x'; max - 1];
+        s.feed(&long, &m, &mut |_| {});
+        assert!(s.pending.capacity() >= long.len());
+        s.feed(b"\n", &m, &mut |_| {});
+        assert!(s.pending.capacity() <= READ_BUF_BYTES);
+    }
+
+    /// Whole-stream reference: split on `\n`, strip one `\r`, cut at `max`.
+    /// An unterminated tail is treated as a line, as `flush` does; if it is
+    /// cut, a trailing `\r` is content and counted as skipped.
+    fn reference(max: usize, data: &[u8]) -> (Vec<(Vec<u8>, bool)>, u64) {
+        let mut out = Vec::new();
+        let mut skipped = 0;
+        let terminated = data.ends_with(b"\n");
+        let mut parts: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
+        if parts.last().is_some_and(|p| p.is_empty()) {
+            parts.pop();
+        }
+        let n = parts.len();
+        for (i, p) in parts.into_iter().enumerate() {
+            let c = strip_cr(p);
+            if c.len() > max {
+                let tail = i + 1 == n && !terminated;
+                let len = if tail { p.len() } else { c.len() };
+                skipped += (len - max) as u64;
+                out.push((c[..max].to_vec(), true));
+            } else {
+                out.push((c.to_vec(), false));
+            }
+        }
+        (out, skipped)
+    }
+
+    fn strip_cr(line: &[u8]) -> &[u8] {
+        line.strip_suffix(b"\r").unwrap_or(line)
+    }
+
+    #[test]
+    fn matches_reference_under_arbitrary_chunking() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut rand = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for case in 0..20_000 {
+            let max = 1 + rand(6);
+            let len = rand(40);
+            let data: Vec<u8> = (0..len).map(|_| b"aab\r\n"[rand(5)]).collect();
+            let m = Metrics::default();
+            let mut s = LineSplitter::new(max);
+            let mut out = Vec::new();
+            let mut rest = &data[..];
+            while !rest.is_empty() {
+                let n = 1 + rand(rest.len().min(8));
+                s.feed(&rest[..n], &m, &mut |l| {
+                    out.push((l.bytes.to_vec(), l.truncated))
+                });
+                rest = &rest[n..];
+                assert!(s.pending.len() <= max + 1);
+            }
+            s.flush(&m, &mut |l| out.push((l.bytes.to_vec(), l.truncated)));
+            let (want, skipped) = reference(max, &data);
+            let ctx = format!(
+                "case {case}: max={max} data={:?}",
+                String::from_utf8_lossy(&data)
+            );
+            assert_eq!(out, want, "{ctx}");
+            let snap = m.snapshot();
+            assert_eq!(snap.bytes_skipped, skipped, "{ctx}");
+            assert_eq!(snap.lines_processed, want.len() as u64, "{ctx}");
+            let truncated = want.iter().filter(|l| l.1).count() as u64;
+            assert_eq!(snap.lines_truncated, truncated, "{ctx}");
+        }
     }
 
     #[test]

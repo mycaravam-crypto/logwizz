@@ -42,6 +42,11 @@ inside and prints one `RESULT` line per check: `PASS`, `FAIL`, or `KNOWN` for a 
 | Clean stop | PASS | 0.32 s, exit 0, `Result=success`, the last event was flushed |
 | Self-matching through journald and rsyslog | **FAIL** | 77 events re-matched logwizz's own output, see finding 2 |
 
+**After the #21 fix (`LogNamespace=logwizz`), on a fresh VM:** 20 checks pass, none fail, and one is known (the
+copytruncate race). `syslog_feedback_loop` reports 0 self-matches, and the new `syslog_isolation` check finds no
+logwizz lines in `/var/log/syslog`. The online rating is still 0.4 SAFE. There are no sandbox denials in 126 failed
+syscalls, and the no-warnings check passes.
+
 The no-warnings check also failed in the final run, but that was the check itself. It counted logwizz's expected
 "file truncated" warning from the copytruncate step. The script now excludes that warning.
 
@@ -58,7 +63,7 @@ exited 2 with `Permission denied`, and the unit crash-looped.
 `chgrp`. `LoadCredential=` was considered, but it copies the file once at start, which conflicts with the planned
 SIGHUP reload (#11).
 
-### 2. logwizz matches its own events through journald and rsyslog (#21, open)
+### 2. logwizz matches its own events through journald and rsyslog (#21, fixed)
 
 Events go to stdout and from there to the journal. rsyslog forwards the journal to `/var/log/syslog`. That file is in
 the example config, so logwizz reads its own event lines back, and the rules match the embedded original line again.
@@ -69,8 +74,12 @@ Each round nests the previous event, and the line grows about 1.6× per round:
 ```
 
 The loop ends only because rsyslog cuts messages at 8 KiB. One real match therefore produces about 7 spurious events
-and extra syslog volume. The README now warns about this. The recommended fix is `LogNamespace=` in the unit, plus
-`kern.log` in the example config; see #21.
+and extra syslog volume.
+
+**Fix (#21):** the unit sets `LogNamespace=logwizz`. The service's output goes to a separate journald instance that
+rsyslog does not read, and events are read with `journalctl --namespace=logwizz -u logwizz`. This needs systemd 245
+or newer. The example config now watches `/var/log/kern.log` instead of `/var/log/syslog`, so it is also safe outside
+the unit. Verified on the host: no self-matches, and no logwizz lines in `/var/log/syslog`.
 
 ### 3. Transient EACCES on files that are created and then chowned (#22, open)
 
@@ -90,7 +99,7 @@ misleading.
 
 | # | Improvement | Tracking |
 |---|---|---|
-| 1 | Stop the syslog feedback loop (`LogNamespace=`, and `kern.log` in the example config) | #21 |
+| 1 | ~~Stop the syslog feedback loop~~ (done: `LogNamespace=`, and `kern.log` in the example config) | #21 |
 | 2 | Retry a fresh `EACCES` once before warning and counting it | #22 |
 | 3 | Run `tests/host/run-vm.sh` in CI; GitHub runners have KVM, so a run takes about a minute | #24 |
 | 4 | Run the host check on RHEL-family images together with the drop-in | #13 |

@@ -36,6 +36,9 @@ format = "json"
 destination = "stdout"
 # Maximum number of events buffered between readers and the output writer.
 queue_capacity = 4096
+# Maximum memory held by buffered events, in bytes. The queue is full when
+# either this or queue_capacity is reached.
+max_queue_bytes = 8388608
 # When the queue is full: "block" pauses reading (no loss while running);
 # "drop" discards the event and counts it.
 on_full = "block"
@@ -55,8 +58,11 @@ dedup_max_entries = 4096
 path = "/var/log/auth.log"
 enabled = true
 
+# Kernel messages. On Debian/Ubuntu /var/log/syslog also has them, but it
+# receives logwizz's own output too unless the service runs in its own journal
+# namespace (as the packaged unit does).
 [[files]]
-path = "/var/log/syslog"
+path = "/var/log/kern.log"
 enabled = true
 
 [[files]]

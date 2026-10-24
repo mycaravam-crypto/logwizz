@@ -2,8 +2,13 @@
 //! deduplication.
 //!
 //! The monitor thread produces [`Event`]s and hands them to a single output
-//! thread through a bounded channel of `output.queue_capacity` events. When
-//! the queue is full, `output.on_full` decides:
+//! thread through a bounded channel of `output.queue_capacity` events, which
+//! together may hold at most `output.max_queue_bytes` (see [`event_cost`]).
+//! The byte limit keeps memory bounded when lines are long: without it, the
+//! default 4096 events of up to 64 KiB each could hold 256 MiB. An event is
+//! always accepted into an empty queue, so a single event larger than the
+//! limit cannot stall the daemon. When either limit is reached, the queue is
+//! full and `output.on_full` decides:
 //!
 //! * `block`: the monitor waits (re-checking the shutdown flag every few
 //!   milliseconds). Unread data stays in the log files, so nothing is lost
@@ -19,13 +24,13 @@
 //! that saved offsets (see `state`) never run ahead of the output.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
+use std::collections::{HashSet, VecDeque};
 use std::hash::BuildHasher;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -172,13 +177,27 @@ pub fn format_event(
     Ok(())
 }
 
+/// Characters escaped in human output: controls, plus invisible characters
+/// that can reorder or hide text (bidi controls, zero-width characters,
+/// BOM) and Unicode line separators that some viewers render as a newline.
+fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
+}
+
 fn escape(s: &str) -> Cow<'_, str> {
-    if !s.chars().any(char::is_control) {
+    if !s.chars().any(needs_escape) {
         return Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
-        if c.is_control() {
+        if needs_escape(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -187,9 +206,19 @@ fn escape(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Bytes an event is charged against `max_queue_bytes`: its line plus the
+/// fixed part of the struct.
+pub fn event_cost(ev: &Event) -> usize {
+    std::mem::size_of::<Event>() + ev.line.len()
+}
+
 /// Producer side of the output queue.
 pub struct Dispatcher {
     tx: Option<SyncSender<Event>>,
+    /// Sum of [`event_cost`] over events queued or being written. Only the
+    /// monitor thread adds to it and only the output thread subtracts.
+    queued_bytes: Arc<AtomicUsize>,
+    max_queue_bytes: usize,
     on_full: OnFull,
     metrics: Arc<Metrics>,
     shutdown: Arc<AtomicBool>,
@@ -211,15 +240,17 @@ impl Dispatcher {
         waker: Waker,
     ) -> io::Result<Self> {
         let (tx, rx) = sync_channel(cfg.output.queue_capacity);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
         let format = cfg.output.format;
         let m = Arc::clone(&metrics);
         let flag = Arc::clone(&shutdown);
+        let in_flight = Arc::clone(&queued_bytes);
         let progress = Arc::new(Progress::default());
         let flushed = Arc::clone(&progress);
         let handle = thread::Builder::new()
             .name("output".into())
             .spawn(move || {
-                let result = write_loop(rx, format, &tables, writer, &flushed);
+                let result = write_loop(rx, &in_flight, format, &tables, writer, &flushed);
                 if let Err(e) = &result {
                     metrics::inc(&m.output_errors);
                     error!(error = %e, "writing events failed; shutting down");
@@ -230,6 +261,8 @@ impl Dispatcher {
             })?;
         Ok(Dispatcher {
             tx: Some(tx),
+            queued_bytes,
+            max_queue_bytes: cfg.output.max_queue_bytes,
             on_full: cfg.output.on_full,
             metrics,
             shutdown,
@@ -255,7 +288,7 @@ impl Dispatcher {
             self.lost();
             return;
         };
-        let mut ev = match tx.try_send(ev) {
+        let mut ev = match self.try_enqueue(tx, ev) {
             Ok(()) => {
                 self.queued();
                 return;
@@ -277,7 +310,7 @@ impl Dispatcher {
                 return;
             }
             thread::sleep(BLOCK_RETRY);
-            ev = match tx.try_send(ev) {
+            ev = match self.try_enqueue(tx, ev) {
                 Ok(()) => {
                     self.queued();
                     return;
@@ -296,6 +329,19 @@ impl Dispatcher {
     fn lost(&mut self) {
         self.progress.sent.fetch_add(1, Ordering::Relaxed);
         self.dropped(1);
+    }
+
+    /// Queues `ev` if both the event count and the byte budget allow it.
+    fn try_enqueue(&self, tx: &SyncSender<Event>, ev: Event) -> Result<(), TrySendError<Event>> {
+        let cost = event_cost(&ev);
+        let before = self.queued_bytes.fetch_add(cost, Ordering::Relaxed);
+        if before > 0 && before + cost > self.max_queue_bytes {
+            self.queued_bytes.fetch_sub(cost, Ordering::Relaxed);
+            return Err(TrySendError::Full(ev));
+        }
+        tx.try_send(ev).inspect_err(|_| {
+            self.queued_bytes.fetch_sub(cost, Ordering::Relaxed);
+        })
     }
 
     fn dropped(&mut self, n: u64) {
@@ -329,6 +375,7 @@ impl Dispatcher {
 
 fn write_loop(
     rx: Receiver<Event>,
+    queued_bytes: &AtomicUsize,
     format: OutputFormat,
     tables: &Tables,
     writer: Box<dyn Write + Send>,
@@ -351,6 +398,7 @@ fn write_loop(
             line.clear();
             format_event(format, tables, &ev, &mut ts, &mut line)?;
             w.write_all(&line)?;
+            queued_bytes.fetch_sub(event_cost(&ev), Ordering::Relaxed);
             written += 1;
             if last_flush.elapsed() >= MAX_FLUSH_DELAY {
                 last_flush = flush(&mut w, written)?;
@@ -383,10 +431,19 @@ struct Window {
 
 /// Per-rule rate limiting (fixed windows) and (rule, line) deduplication.
 ///
+/// Only emitted events are remembered for deduplication: a line suppressed
+/// by the rate limit has not been reported, so a repeat of it is not a
+/// duplicate.
+///
 /// Memory is bounded by the number of rules plus `dedup_max_entries`. When
 /// the dedup table is full and nothing in it has expired, new lines are
 /// *not* remembered, so they pass through: the limiter errs towards
 /// emitting events, never towards wrongly suppressing them.
+///
+/// Entries expire in insertion order, because every entry lives for the
+/// same window and `now` never goes backwards. Expiry pops them from the
+/// front of a queue, so the cost per event is constant however large the
+/// table is.
 #[derive(Debug)]
 pub struct Limiter {
     rate_limit: u32,
@@ -397,8 +454,13 @@ pub struct Limiter {
     // Keyed with per-process random keys so that log content cannot be
     // crafted to collide with, and thereby suppress, another line.
     hasher: RandomState,
-    seen: HashMap<(usize, u64), Instant>,
+    seen: HashSet<DedupKey>,
+    /// The entries of `seen` with their insertion times, oldest first.
+    expiry: VecDeque<(DedupKey, Instant)>,
 }
+
+/// (rule index, keyed hash of the line).
+type DedupKey = (usize, u64);
 
 impl Limiter {
     pub fn new(limits: &Limits, rules: usize) -> Self {
@@ -410,62 +472,79 @@ impl Limiter {
                 .then(|| Duration::from_secs(limits.dedup_window_secs)),
             dedup_max: limits.dedup_max_entries,
             hasher: RandomState::new(),
-            seen: HashMap::new(),
+            seen: HashSet::new(),
+            expiry: VecDeque::new(),
         }
     }
 
     /// Decides whether an event for `rule` on `line` should be emitted.
     /// `rule_id` is only used in diagnostics.
     pub fn admit(&mut self, rule: usize, rule_id: &str, line: &[u8], now: Instant) -> Admit {
-        if let Some(window) = self.dedup_window {
-            let key = (rule, self.hasher.hash_one(line));
-            match self.seen.get(&key) {
-                Some(&t) if now.duration_since(t) < window => return Admit::Duplicate,
-                _ => {
-                    if self.seen.len() >= self.dedup_max && !self.seen.contains_key(&key) {
-                        self.seen.retain(|_, t| now.duration_since(*t) < window);
+        let key = match self.dedup_window {
+            Some(window) => {
+                while let Some(&(old, t)) = self.expiry.front() {
+                    if now.saturating_duration_since(t) < window {
+                        break;
                     }
-                    if self.seen.len() < self.dedup_max || self.seen.contains_key(&key) {
-                        self.seen.insert(key, now);
-                    }
+                    self.seen.remove(&old);
+                    self.expiry.pop_front();
                 }
+                let key = (rule, self.hasher.hash_one(line));
+                if self.seen.contains(&key) {
+                    return Admit::Duplicate;
+                }
+                Some(key)
+            }
+            None => None,
+        };
+        if self.rate_limit > 0 && !self.within_rate(rule, rule_id, now) {
+            return Admit::RateLimited;
+        }
+        if let Some(key) = key {
+            if self.seen.len() < self.dedup_max {
+                self.seen.insert(key);
+                self.expiry.push_back((key, now));
             }
         }
-        if self.rate_limit > 0 {
-            let w = self.windows[rule].get_or_insert(Window {
+        Admit::Yes
+    }
+
+    /// Counts an event against `rule`'s current window; `false` if the
+    /// window's budget is already used up.
+    fn within_rate(&mut self, rule: usize, rule_id: &str, now: Instant) -> bool {
+        let w = self.windows[rule].get_or_insert(Window {
+            start: now,
+            count: 0,
+            suppressed: 0,
+        });
+        if now.saturating_duration_since(w.start) >= self.rate_window {
+            if w.suppressed > 0 {
+                info!(
+                    rule = rule_id,
+                    suppressed = w.suppressed,
+                    "rate limit window ended"
+                );
+            }
+            *w = Window {
                 start: now,
                 count: 0,
                 suppressed: 0,
-            });
-            if now.duration_since(w.start) >= self.rate_window {
-                if w.suppressed > 0 {
-                    info!(
-                        rule = rule_id,
-                        suppressed = w.suppressed,
-                        "rate limit window ended"
-                    );
-                }
-                *w = Window {
-                    start: now,
-                    count: 0,
-                    suppressed: 0,
-                };
-            }
-            if w.count >= self.rate_limit {
-                if w.suppressed == 0 {
-                    warn!(
-                        rule = rule_id,
-                        limit = self.rate_limit,
-                        window_secs = self.rate_window.as_secs(),
-                        "rate limit reached; suppressing further events for this rule"
-                    );
-                }
-                w.suppressed += 1;
-                return Admit::RateLimited;
-            }
-            w.count += 1;
+            };
         }
-        Admit::Yes
+        if w.count >= self.rate_limit {
+            if w.suppressed == 0 {
+                warn!(
+                    rule = rule_id,
+                    limit = self.rate_limit,
+                    window_secs = self.rate_window.as_secs(),
+                    "rate limit reached; suppressing further events for this rule"
+                );
+            }
+            w.suppressed += 1;
+            return false;
+        }
+        w.count += 1;
+        true
     }
 }
 
@@ -548,6 +627,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn human_format_escapes_bidi_and_line_separators() {
+        let s = render(
+            OutputFormat::Human,
+            &event("Failed \u{202E}gpj.exe\u{2028}x\u{200B}".as_bytes(), false),
+        );
+        assert!(
+            s.ends_with("Failed \\u{202e}gpj.exe\\u{2028}x\\u{200b}\n"),
+            "{s}"
+        );
+        // Ordinary non-ASCII text is left alone.
+        let s = render(
+            OutputFormat::Human,
+            &event("Failed für €".as_bytes(), false),
+        );
+        assert!(s.ends_with("Failed für €\n"), "{s}");
+    }
+
     fn limits(rate: u32, dedup_secs: u64, max: usize) -> Limits {
         Limits {
             rate_limit_events: rate,
@@ -607,11 +704,41 @@ mod tests {
         assert_eq!(l.admit(0, "a", b"3", t0), Admit::Yes);
         assert_eq!(l.admit(0, "a", b"3", t0), Admit::Yes);
         assert_eq!(l.admit(0, "a", b"1", t0), Admit::Duplicate);
-        assert!(l.seen.len() <= 2);
+        assert!(l.seen.len() <= 2 && l.expiry.len() == l.seen.len());
         // After expiry, space is reclaimed.
         let t1 = t0 + Duration::from_secs(61);
         assert_eq!(l.admit(0, "a", b"3", t1), Admit::Yes);
         assert_eq!(l.admit(0, "a", b"3", t1), Admit::Duplicate);
+    }
+
+    #[test]
+    fn rate_limited_line_is_not_remembered_as_duplicate() {
+        let mut l = Limiter::new(&limits(1, 300, 100), 1);
+        let t0 = Instant::now();
+        assert_eq!(l.admit(0, "a", b"A", t0), Admit::Yes);
+        assert_eq!(l.admit(0, "a", b"B", t0), Admit::RateLimited);
+        // B was never reported, so after the rate window it must be.
+        let t1 = t0 + Duration::from_secs(10);
+        assert_eq!(l.admit(0, "a", b"B", t1), Admit::Yes);
+        assert_eq!(l.admit(0, "a", b"B", t1), Admit::Duplicate);
+        // A is still a duplicate of the event emitted at t0.
+        assert_eq!(l.admit(0, "a", b"A", t1), Admit::Duplicate);
+    }
+
+    #[test]
+    fn dedup_entries_expire_oldest_first() {
+        let mut l = Limiter::new(&limits(0, 10, 100), 1);
+        let t0 = Instant::now();
+        for (i, line) in [b"1", b"2", b"3"].iter().enumerate() {
+            l.admit(0, "a", *line, t0 + Duration::from_secs(i as u64 * 4));
+        }
+        // At t0+10 only "1" (seen at t0) has expired.
+        let t = t0 + Duration::from_secs(10);
+        assert_eq!(l.admit(0, "a", b"1", t), Admit::Yes);
+        assert_eq!(l.admit(0, "a", b"2", t), Admit::Duplicate);
+        assert_eq!(l.admit(0, "a", b"3", t), Admit::Duplicate);
+        assert_eq!(l.seen.len(), 3);
+        assert_eq!(l.expiry.len(), 3);
     }
 
     struct FailingWriter;
@@ -674,9 +801,13 @@ mod tests {
     }
 
     fn stalled(on_full: &str) -> (Dispatcher, Arc<Metrics>, Arc<AtomicBool>, Gate) {
-        let cfg = test_cfg(&format!(
+        stalled_with(&format!(
             "[output]\nqueue_capacity = 2\non_full = \"{on_full}\"\n"
-        ));
+        ))
+    }
+
+    fn stalled_with(extra: &str) -> (Dispatcher, Arc<Metrics>, Arc<AtomicBool>, Gate) {
+        let cfg = test_cfg(extra);
         let m = Arc::new(Metrics::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
@@ -714,6 +845,41 @@ mod tests {
         assert_eq!(s.events_emitted + s.events_dropped, MANY as u64);
         release(&gate);
         d.finish().unwrap();
+    }
+
+    #[test]
+    fn byte_budget_bounds_queued_memory() {
+        // The count limit alone would admit all events; the byte budget must
+        // make the queue full long before that.
+        let (mut d, m, _shutdown, gate) = stalled_with(
+            "[output]\nqueue_capacity = 100000\nmax_queue_bytes = 65536\non_full = \"drop\"\n",
+        );
+        let line = [b'x'; 1000];
+        for _ in 0..MANY {
+            d.send(event(&line, false));
+        }
+        assert!(d.queued_bytes.load(Ordering::Relaxed) <= 65536);
+        let s = m.snapshot();
+        // Queued events plus those absorbed by the writer's 64 KiB buffer.
+        assert!(s.events_emitted < 200, "{s}");
+        assert_eq!(s.events_emitted + s.events_dropped, MANY as u64);
+        release(&gate);
+        let queued = Arc::clone(&d.queued_bytes);
+        d.finish().unwrap();
+        assert_eq!(queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn event_larger_than_budget_is_accepted_into_empty_queue() {
+        let (mut d, m, _shutdown, gate) =
+            stalled_with("[output]\nmax_queue_bytes = 65536\non_full = \"drop\"\n");
+        release(&gate);
+        d.send(event(&[b'x'; 200_000], false));
+        let queued = Arc::clone(&d.queued_bytes);
+        d.finish().unwrap();
+        assert_eq!(m.snapshot().events_emitted, 1);
+        assert_eq!(m.snapshot().events_dropped, 0);
+        assert_eq!(queued.load(Ordering::Relaxed), 0);
     }
 
     #[test]
