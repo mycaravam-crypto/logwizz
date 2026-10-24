@@ -1,0 +1,114 @@
+# Unified SemVer policy: Git tags are authoritative; merged PR labels select bump (release:patch|minor|major|none,
+# patch by default). Each release attaches the static Linux x64 binary (musl, runs on any distribution), the systemd
+# unit, the example configuration and their SHA-256 to the GitHub release.
+name: release
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  version:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check versioning policy
+        run: bash .github/scripts/semver-next.test.sh
+      - name: Calculate next version
+        id: version
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          RELEASE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          git fetch --force origin '+refs/tags/*:refs/tags/*'
+          latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | head -n 1 || true)
+          # An earlier queued workflow must never re-release a commit already covered by a newer release.
+          if [[ -n "$latest" ]] && git merge-base --is-ancestor "$RELEASE_SHA" "$latest"; then
+            echo "Already covered by $latest"
+            exit 0
+          fi
+          version=$(bash .github/scripts/semver-next.sh "$latest" "$LABELS" "0.1.0")
+          [[ -n "$version" ]] || exit 0
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  # Builds without write access: dependency build scripts never see a token that can push.
+  build:
+    needs: version
+    if: needs.version.outputs.value != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --target x86_64-unknown-linux-musl && rustup default stable
+      # Only the tests need a musl C compiler (a dev-dependency builds C code); the daemon itself is pure Rust.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Stamp version
+        env:
+          VERSION: ${{ needs.version.outputs.value }}
+        # The tag is the source of truth; Cargo.toml's version is stamped only for this build (shown by --version).
+        # `cargo update --workspace` rewrites only logwizz's own Cargo.lock entry, so the build below stays --locked.
+        run: |
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml && grep -m1 '^version' Cargo.toml
+          cargo update --workspace
+      - name: Test and build release
+        run: |
+          cargo test --release --locked --target x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.value }}
+        run: |
+          mkdir dist
+          cp target/x86_64-unknown-linux-musl/release/logwizz "dist/logwizz-v$VERSION-linux-x64"
+          strip "dist/logwizz-v$VERSION-linux-x64"
+          "dist/logwizz-v$VERSION-linux-x64" --version | grep -Fx "logwizz $VERSION"
+          cp packaging/logwizz.service dist/logwizz.service
+          cp config/logwizz.example.toml dist/logwizz.example.toml
+          cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: dist, path: dist }
+      - name: Tag and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.value }}
+          RELEASE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          tag="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "Refusing to overwrite existing tag $tag" >&2
+            exit 1
+          fi
+          git tag "$tag" "$RELEASE_SHA"
+          git push origin "refs/tags/$tag"
+          gh release create "$tag" --verify-tag --generate-notes --title "$tag" dist/*
