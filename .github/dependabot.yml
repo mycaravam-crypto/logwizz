@@ -1,0 +1,19 @@
+# Weekly update PRs for this repository's dependencies, so fixes for the CVEs security.yml reports arrive as PRs instead
+# of waiting for someone to bump them. Minor and patch bumps are grouped into one PR per ecosystem; majors come one by
+# one. The cooldown waits a few days after a release before proposing it, so a hijacked or broken release is likely
+# pulled before it reaches a PR. Security updates (from Dependabot alerts) skip the cooldown and the schedule.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    cooldown: { default-days: 7 }
+    groups:
+      cargo: { patterns: ['*'], update-types: [minor, patch] }
+  # Actions are pinned by commit SHA; Dependabot bumps the SHA and its version comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    cooldown: { default-days: 7 }
+    groups:
+      actions: { patterns: ['*'] }

@@ -19,6 +19,7 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 
 ## Contents
 
+- [Installing](#installing)
 - [Building](#building)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -29,6 +30,25 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 - [Security](#security)
 - [Compatibility and limitations](#compatibility-and-limitations)
 - [Development](#development)
+- [CI and releases](#ci-and-releases)
+
+## Installing
+
+Each [GitHub release](https://github.com/mycaravam-crypto/logwizz/releases)
+has a static Linux x64 binary (musl, no runtime dependencies, any
+distribution), the systemd unit, the example configuration and
+`SHA256SUMS.txt`:
+
+```sh
+v=X.Y.Z   # the release to install
+base=https://github.com/mycaravam-crypto/logwizz/releases/download/v$v
+curl -fL -O "$base/logwizz-v$v-linux-x64" -O "$base/SHA256SUMS.txt"
+sha256sum --ignore-missing -c SHA256SUMS.txt
+install -m 0755 "logwizz-v$v-linux-x64" /usr/bin/logwizz
+logwizz --version
+```
+
+Then continue with [Deployment with systemd](#deployment-with-systemd).
 
 ## Building
 
@@ -78,7 +98,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | Key | Default | Range | Meaning |
 |---|---|---|---|
 | `startup_mode` | `"tail"` | `tail`, `beginning` | Where reading starts for files that exist at startup. `tail` skips existing content, including the remainder of a line still being written. Files that appear later are always read from the beginning. |
-| `max_line_bytes` | `65536` | 256 – 16 MiB | Lines whose content (excluding the `\n` or `\r\n` terminator) is longer are cut to this length, flagged `truncated`, and counted. This is also the cap on buffered incomplete-line data per file (plus one byte for a possible `\r`). |
+| `max_line_bytes` | `65536` | 256 – 16 MiB | Longer lines are cut to this length, flagged `truncated`, and counted. This is also the cap on buffered incomplete-line data per file (plus one byte for a trailing `\r`). |
 | `reconcile_interval_ms` | `1000` | 50 – 600000 | Every file is re-checked at this interval regardless of notifications. |
 | `rotation_drain_ms` | `5000` | 0 – 600000 | After rotation, keep reading the old file until it has been idle this long. |
 | `diagnostics` | `"warn"` | `error` … `trace` | Verbosity of logwizz's own messages on stderr. |
@@ -185,6 +205,11 @@ wakeup, and on every reconciliation tick, logwizz checks the file itself
   `reconcile_interval_ms`.
 - a directory that is missing at startup, or deleted and recreated, is
   watched again within one reconciliation interval.
+- if a configured path is a symlink whose target is in another directory,
+  that directory is watched too, so writes to the target are detected just
+  as quickly. When the link is retargeted, the watch moves with it, right
+  after the rotation is detected. Intermediate links in a chain are only
+  re-checked on reconciliation.
 - if inotify is unavailable altogether (for example,
   `fs.inotify.max_user_instances` is exhausted), logwizz warns and
   continues with reconciliation only.
@@ -215,14 +240,15 @@ tick, within the drain window.
 
 ### Lines
 
-- Lines end at `\n`. A `\r` immediately before it is part of the terminator:
-  it is stripped and never counts towards `max_line_bytes`.
-- An incomplete trailing line is held, up to `max_line_bytes`, until its
-  newline arrives. If its file is truncated, rotated or deleted first, it is
-  emitted as is and counted in `partial_lines_flushed`.
-- A line whose content is longer than `max_line_bytes` is emitted cut to that
-  length with `truncated: true`. The excess content bytes are counted in
-  `bytes_skipped`. Lines are never silently dropped.
+- Lines end at `\n`. A trailing `\r` is stripped, and does not count towards
+  `max_line_bytes`.
+- An incomplete trailing line is held, up to `max_line_bytes` (plus one byte
+  for a possible `\r` terminator), until its newline arrives. If its file is
+  truncated, rotated or deleted first, it is emitted as is and counted in
+  `partial_lines_flushed`.
+- A line longer than `max_line_bytes` is emitted cut to that length with
+  `truncated: true`. The excess bytes, not counting the terminator, are counted
+  in `bytes_skipped`. Lines are never silently dropped.
 
 ### Backpressure
 
@@ -390,7 +416,8 @@ your own log locations before relying on it.
   requires Linux 3.2 or newer, and other distributions and kernels are
   expected to work, but only the configuration above has been tested.
 - **inotify limits:** logwizz uses one inotify instance and one watch per
-  distinct parent directory. Overflows of `fs.inotify.max_queued_events` are
+  distinct parent directory, plus at most one per configured symlink whose
+  target is in another directory. Overflows of `fs.inotify.max_queued_events` are
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
@@ -405,15 +432,16 @@ your own log locations before relying on it.
 Quality gates (also run in CI):
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
 cargo build --release --locked
+bash .github/scripts/semver-next.test.sh
 ```
 
-CI also builds the release binary with the MSRV toolchain
-(`cargo +1.85 build --release --locked`). Raising the MSRV is a deliberate
-change: update `rust-version` in `Cargo.toml`, the CI job and this README
+The `msrv` CI job builds the release binary with the toolchain named by
+`rust-version` in `Cargo.toml` (locally: `cargo +1.85 build --release --locked`).
+Raising the MSRV is a deliberate change: update `rust-version` and this README
 together.
 
 Benchmarks and load tests are run separately:
@@ -438,6 +466,22 @@ Layout:
 | `src/metrics.rs` | Atomic counters |
 | `tests/` | Config, reader, rotation, monitoring loop, end-to-end and load tests |
 | `benches/` | Criterion benchmarks |
+
+## CI and releases
+
+GitHub Actions run on every pull request and on `main`:
+
+- **test**: `fmt`, `clippy -D warnings`, `cargo test`, the release build and the systemd unit check
+  (`systemd-analyze verify` and a `security` threshold); the `msrv` job builds the release binary on the
+  `rust-version` from `Cargo.toml`.
+- **security**: Trivy scans `Cargo.lock` for CVEs (weekly too). A fixable CRITICAL fails the job.
+- **codeql**: CodeQL `security-and-quality` analysis of the Rust code and the workflows (weekly too).
+- **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has
+  `logwizz-vX.Y.Z-linux-x64` (static, musl), `logwizz.service`, `logwizz.example.toml` and `SHA256SUMS.txt`, with
+  generated release notes. Git tags are the source of truth. A PR label picks the bump: `release:patch` (the default),
+  `release:minor`, `release:major`, or `release:none` to skip the release. The version shows in `logwizz --version`.
+
+Dependabot proposes weekly dependency and action updates (pinned by SHA) after a 7-day cooldown.
 
 ## License
 

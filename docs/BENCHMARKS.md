@@ -106,7 +106,7 @@ rules stay well above the throughput target, so combining rules into a
 ## Review fixes (2026-10-24)
 
 Same reference system and toolchain as above, measured before and after the
-changes to the line splitter, the limiter and the output queue. Only the
+changes to the limiter and the output queue. Only the
 numbers within one table are comparable: the VM's load differed from the
 runs above.
 
@@ -130,18 +130,6 @@ At 1.35 ms per event, the limiter capped a burst of unique matching lines at
 about 740 events/s. That cost is paid per *matching* line, so it only shows
 up when deduplication is enabled.
 
-### Read pipeline (line splitter change)
-
-```sh
-cargo bench --bench rule_engine -- pipeline --save-baseline before   # at the old commit
-cargo bench --bench rule_engine -- pipeline --baseline before        # after
-```
-
-| Benchmark | Before | After | Criterion verdict |
-|---|---|---|---|
-| pipeline/literal/10 | 36.9 ms | 38.0 ms | no change detected (p = 0.11) |
-| pipeline/regex/10 | 105.9 ms | 107.8 ms | +1.4 % (p < 0.05), within run-to-run variance on this VM |
-
 ### Memory with a stalled consumer
 
 Default configuration, one literal rule, stdout connected to a FIFO that is
@@ -160,9 +148,9 @@ the `MemoryMax=128M` of the shipped systemd unit.
 
 | Test | Result |
 |---|---|
-| 1 literal rule | 11.3 M lines/s, peak RSS 4.7 MiB |
-| 1 literal + 10 regex | 2.1 M lines/s, peak RSS 5.9 MiB |
-| Latency (1000 samples) | p50 0.56 ms, p95 0.92 ms, p99 1.06 ms, max 4.8 ms |
+| 1 literal rule | 11.1 M lines/s, peak RSS 4.7 MiB |
+| 1 literal + 10 regex | 1.96 M lines/s, peak RSS 6.2 MiB |
+| Latency (1000 samples) | p50 0.59 ms, p95 0.97 ms, p99 1.13 ms, max 3.7 ms |
 | Idle, 10 s | 0 clock ticks, RSS 5.6 MiB |
 
 These numbers are from one run each.
