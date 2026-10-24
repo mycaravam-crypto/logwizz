@@ -1,0 +1,119 @@
+//! Rule matching and read-pipeline throughput.
+//!
+//! * `match/*` measures rule evaluation only, over an in-memory set of
+//!   realistic syslog-style lines (~100 bytes each).
+//! * `pipeline/*` measures reading a page-cached file, splitting lines and
+//!   evaluating rules: everything except event formatting and output.
+//!
+//! Run with `cargo bench --bench rule_engine`.
+
+use std::hint::black_box;
+use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
+
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+
+use logwizz::config::{self, StartupMode};
+use logwizz::engine::Engine;
+use logwizz::metrics::Metrics;
+use logwizz::reader::{READ_BUF_BYTES, ReaderOptions, TailedFile};
+
+const LINES: &[&str] = &[
+    "Oct 24 08:15:30 host sshd[1234]: Accepted publickey for deploy from 10.0.0.5 port 52144 ssh2",
+    "Oct 24 08:15:31 host systemd[1]: Started Session 42 of user deploy.",
+    "Oct 24 08:15:32 host CRON[5678]: (root) CMD (/usr/local/bin/backup --incremental)",
+    "Oct 24 08:15:33 host kernel: [12345.678901] eth0: link up, 1000Mbps, full-duplex",
+    "Oct 24 08:15:34 host nginx[910]: 10.0.0.9 - - \"GET /healthz HTTP/1.1\" 200 2 \"-\" \"probe\"",
+    "Oct 24 08:15:35 host sshd[1240]: Failed password for invalid user admin from 192.0.2.7",
+    "Oct 24 08:15:36 host postfix/smtpd[2222]: connect from mail.example.org[198.51.100.3]",
+    "Oct 24 08:15:37 host dbus-daemon[700]: [system] Successfully activated service 'org.x'",
+];
+
+fn engine(n: usize, kind: &str) -> Engine {
+    let mut text = String::from("[[files]]\npath = \"/x\"\n");
+    for i in 0..n {
+        let pattern = match kind {
+            "literal" => format!("no such token {i}"),
+            _ => format!(r"(?i)error code \d+ in module{i}\b"),
+        };
+        text.push_str(&format!(
+            "[[rules]]\nid = \"r{i}\"\nmatch_type = \"{kind}\"\npattern = '{pattern}'\nseverity = \"info\"\n"
+        ));
+    }
+    // One rule that hits 1 in 8 lines, so match cost is represented too.
+    text.push_str(
+        "[[rules]]\nid = \"hit\"\nmatch_type = \"literal\"\npattern = \"Failed password\"\nseverity = \"warning\"\n",
+    );
+    Engine::new(config::parse(&text, Path::new("bench")).unwrap().rules)
+}
+
+fn bench_match(c: &mut Criterion) {
+    let lines: Vec<&[u8]> = LINES.iter().map(|l| l.as_bytes()).collect();
+    let bytes: usize = lines.iter().map(|l| l.len()).sum();
+    let mut g = c.benchmark_group("match");
+    g.throughput(Throughput::Elements(lines.len() as u64));
+    for kind in ["literal", "regex"] {
+        for n in [1, 10, 50] {
+            let e = engine(n, kind);
+            g.bench_with_input(BenchmarkId::new(kind, n), &e, |b, e| {
+                b.iter(|| {
+                    let mut hits = 0;
+                    for l in &lines {
+                        e.for_each_match(black_box(l), |_| hits += 1);
+                    }
+                    hits
+                })
+            });
+        }
+    }
+    g.finish();
+    let _ = bytes;
+}
+
+fn bench_pipeline(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bench.log");
+    let mut f = std::fs::File::create(&path).unwrap();
+    let mut total_lines = 0u64;
+    let mut total_bytes = 0u64;
+    while total_bytes < 32 * 1024 * 1024 {
+        for l in LINES {
+            f.write_all(l.as_bytes()).unwrap();
+            f.write_all(b"\n").unwrap();
+            total_bytes += l.len() as u64 + 1;
+            total_lines += 1;
+        }
+    }
+    drop(f);
+
+    let mut g = c.benchmark_group("pipeline");
+    g.throughput(Throughput::Elements(total_lines));
+    g.sample_size(10);
+    g.measurement_time(Duration::from_secs(10));
+    for (kind, n) in [("literal", 10), ("regex", 10)] {
+        let e = engine(n, kind);
+        g.bench_function(BenchmarkId::new(kind, n), |b| {
+            let mut buf = vec![0; READ_BUF_BYTES];
+            b.iter(|| {
+                let m = Metrics::default();
+                let opts = ReaderOptions {
+                    max_line_bytes: 64 * 1024,
+                    read_budget: usize::MAX,
+                    drain_grace: Duration::from_secs(1),
+                };
+                let mut tf = TailedFile::new(path.clone(), StartupMode::Beginning, opts);
+                let mut hits = 0u64;
+                tf.poll(std::time::Instant::now(), &mut buf, &m, &mut |line| {
+                    e.for_each_match(line.bytes, |_| hits += 1)
+                });
+                assert_eq!(m.snapshot().lines_processed, total_lines);
+                hits
+            })
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, bench_match, bench_pipeline);
+criterion_main!(benches);
