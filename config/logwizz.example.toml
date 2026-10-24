@@ -1,0 +1,74 @@
+# logwizz example configuration.
+#
+# Every key outside [[files]] and [[rules]] is optional; the values shown are
+# the defaults unless noted otherwise. Unknown keys are rejected.
+
+[general]
+# "tail": start at the end of files that exist at startup (only new lines).
+# "beginning": process existing content first.
+# Files that appear later are always read from the beginning.
+startup_mode = "tail"
+# Lines longer than this are cut, emitted with "truncated": true, and counted.
+max_line_bytes = 65536
+# Every file is re-checked at this interval, independent of inotify. This
+# recovers missed notifications and is the only detection mechanism on
+# filesystems without inotify support (e.g. NFS).
+reconcile_interval_ms = 1000
+# After a rotation (the path now refers to a new file), keep reading the old
+# file until it has produced no new data for this long.
+rotation_drain_ms = 5000
+# Verbosity of logwizz's own diagnostics on stderr:
+# error, warn, info, debug, trace.
+diagnostics = "warn"
+# Log a statistics snapshot at "info" level at this interval. 0 disables.
+stats_interval_secs = 0
+
+[output]
+# "json" (JSON Lines) or "human".
+format = "json"
+# "stdout" or "stderr".
+destination = "stdout"
+# Maximum number of events buffered between readers and the output writer.
+queue_capacity = 4096
+# When the queue is full: "block" pauses reading (no loss while running);
+# "drop" discards the event and counts it.
+on_full = "block"
+# Uncomment to include at most this many bytes of the matching line.
+# max_excerpt_bytes = 512
+
+[limits]
+# Maximum events per rule per window. 0 means unlimited.
+rate_limit_events = 0
+rate_limit_window_secs = 60
+# Suppress repeats of the same (rule, line) within this many seconds. 0 disables.
+dedup_window_secs = 0
+dedup_max_entries = 4096
+
+# Paths must be absolute. Log locations vary between distributions.
+[[files]]
+path = "/var/log/auth.log"
+enabled = true
+
+[[files]]
+path = "/var/log/syslog"
+enabled = true
+
+[[files]]
+path = "/var/log/messages"
+enabled = false
+
+[[rules]]
+id = "ssh_failed_login"
+description = "Failed SSH authentication"
+enabled = true
+match_type = "literal"     # case-sensitive substring
+pattern = "Failed password"
+severity = "warning"       # debug, info, notice, warning, error, critical
+
+[[rules]]
+id = "kernel_error"
+description = "Kernel error messages"
+enabled = true
+match_type = "regex"       # Rust regex syntax; guaranteed linear-time matching
+pattern = "(?i)(kernel panic|out of memory)"
+severity = "critical"
