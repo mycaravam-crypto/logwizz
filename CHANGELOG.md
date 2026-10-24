@@ -26,8 +26,8 @@ and emits an event for every line matching a rule.
   change. The old file is drained before the new one is read from offset 0.
   copytruncate restarts at offset 0, and deleted files are drained and
   closed. Files that appear after startup are read from the beginning.
-- **Monitoring:** inotify watches on each file's parent directory, plus
-  periodic reconciliation (`reconcile_interval_ms`). Reconciliation recovers
+- **Monitoring:** inotify watches on each file's parent directory (and on the
+  target's directory for symlinked paths), plus periodic reconciliation (`reconcile_interval_ms`). Reconciliation recovers
   missed or overflowed events and covers filesystems without inotify.
 - **Rules:** literal (`memchr`) and linear-time regex (`regex`) rules,
   compiled at load time and evaluated without per-line allocation. Severities
