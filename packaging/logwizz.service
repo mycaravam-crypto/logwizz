@@ -1,7 +1,8 @@
 # systemd unit for logwizz.
 #
 # Install the binary as /usr/bin/logwizz and the configuration as
-# /etc/logwizz/logwizz.toml (mode 0640 or stricter), then:
+# /etc/logwizz/logwizz.toml, mode 0640 and group adm (the service user is
+# transient and reads it through SupplementaryGroups), then:
 #   systemctl daemon-reload && systemctl enable --now logwizz
 #
 # Events go to stdout and therefore to the journal:

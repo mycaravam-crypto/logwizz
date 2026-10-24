@@ -354,12 +354,18 @@ filesystem, no capabilities, no network, and a `@system-service` system call
 filter. Events go to the journal through stdout.
 
 ```sh
-install -D -m 0640 config/logwizz.example.toml /etc/logwizz/logwizz.toml
+install -D -m 0640 -g adm config/logwizz.example.toml /etc/logwizz/logwizz.toml
 install -m 0644 packaging/logwizz.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now logwizz
 journalctl -u logwizz -o cat -f
 ```
+
+The service user only exists while the service runs, so it reads the
+configuration through its supplementary group: keep the file group-owned by
+`adm` (or the group from your drop-in) and not world-writable. A config that
+only root can read makes `--check-config` fail with "Permission denied" and the
+service never starts.
 
 The unit provides `/var/lib/logwizz` (`StateDirectory=`) for
 `state_file = "/var/lib/logwizz/offsets.json"`.
@@ -371,15 +377,25 @@ an ACL. For example, `/var/log/secure` on RHEL-family systems is root-only:
 ```sh
 groupadd -r logwizz
 setfacl -m g:logwizz:r /var/log/secure
+chgrp logwizz /etc/logwizz/logwizz.toml
 # Then set SupplementaryGroups=logwizz in a drop-in (systemctl edit logwizz).
 ```
 
 The unit passes `systemd-analyze verify`, and `systemd-analyze security`
 rates it **0.4 SAFE**. The remaining findings are deliberate:
 `SupplementaryGroups` provides log access, and `PrivateUsers=yes` would unmap
-that group and break it. The hardening has been verified statically only. It
-has not yet been exercised on a booted systemd host, so check it against
-your own log locations before relying on it.
+that group and break it. The unit has also been exercised on a booted Ubuntu
+24.04 host (systemd 255): reading `auth.log` and `syslog` through `adm`, real
+logrotate runs, no sandbox denials, restart on failure and a clean stop. See
+[docs/HOST-VERIFICATION.md](docs/HOST-VERIFICATION.md), and rerun it with
+`tests/host/run-vm.sh`.
+
+> **Do not watch a file that receives logwizz's own output.** On Debian and
+> Ubuntu, rsyslog copies the journal, and with it every event logwizz writes,
+> into `/var/log/syslog`. If that file is watched, matching events are matched
+> again (bounded only by rsyslog's message size). Until this is fixed (#21),
+> watch narrower files such as `/var/log/kern.log`, or keep rules from matching
+> logwizz's own lines.
 
 ## Security
 
