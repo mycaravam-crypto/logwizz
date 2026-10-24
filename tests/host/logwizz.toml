@@ -1,0 +1,41 @@
+# Host check configuration: the example config plus a test file and rule.
+[general]
+startup_mode = "tail"
+max_line_bytes = 65536
+reconcile_interval_ms = 1000
+rotation_drain_ms = 5000
+diagnostics = "info"
+stats_interval_secs = 0
+
+[output]
+format = "json"
+destination = "stdout"
+queue_capacity = 4096
+on_full = "block"
+
+[[files]]
+path = "/var/log/auth.log"
+
+[[files]]
+path = "/var/log/syslog"
+
+[[files]]
+path = "/var/log/lwtest.log"
+
+[[rules]]
+id = "ssh_failed_login"
+match_type = "literal"
+pattern = "Failed password"
+severity = "warning"
+
+[[rules]]
+id = "kernel_error"
+match_type = "regex"
+pattern = "(?i)(kernel panic|out of memory)"
+severity = "critical"
+
+[[rules]]
+id = "lwtest"
+match_type = "literal"
+pattern = "LWZ-T"
+severity = "info"
