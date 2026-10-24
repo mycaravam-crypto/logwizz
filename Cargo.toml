@@ -1,0 +1,27 @@
+[package]
+name = "logwizz"
+version = "0.1.0"
+edition = "2024"
+description = "Minimalist, high-performance Linux log monitoring daemon"
+license = "Apache-2.0"
+repository = "https://github.com/mycaravam-crypto/logwizz"
+readme = "README.md"
+keywords = ["log", "monitoring", "daemon", "inotify"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+memchr = "2.8.3"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "ansi"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
