@@ -36,6 +36,17 @@ jobs:
           # Fails if the exposure score (0-100 scale; 4 = "0.4 SAFE") exceeds 10.
           systemd-analyze security --offline=yes --threshold=10 packaging/logwizz.service
 
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      # Tests and benches are not built here: the criterion dev-dependency
+      # needs 1.86. The MSRV covers building and installing the daemon.
+      - name: Release build (MSRV)
+        run: cargo build --release --locked
+
   audit:
     runs-on: ubuntu-24.04
     steps:

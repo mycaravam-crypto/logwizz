@@ -530,7 +530,10 @@ impl TailedFile {
             Some(cur) => matches!(cur.file.metadata(), Ok(meta) if meta.nlink() == 0),
             None => false,
         };
-        if deleted && let Some(mut cur) = self.current.take() {
+        if !deleted {
+            return;
+        }
+        if let Some(mut cur) = self.current.take() {
             cur.splitter.flush(m, on_line);
             metrics::dec(&m.files_monitored);
             info!(path = %self.path.display(), "file deleted; closed after reading to the end");
