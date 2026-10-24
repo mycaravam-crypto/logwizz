@@ -48,6 +48,9 @@ AmbientCapabilities=
 UMask=0077
 
 # Filesystem: everything read-only, no home directories, private /tmp.
+# /var/lib/logwizz stays writable for general.state_file.
+StateDirectory=logwizz
+StateDirectoryMode=0700
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

@@ -19,6 +19,9 @@
 //! A failed write to the output (including a closed pipe) is counted and
 //! shuts the daemon down: there is no point in matching lines nobody can
 //! receive, and silently continuing would hide the loss.
+//!
+//! [`Progress`] counts events queued and events written and flushed, so
+//! that saved offsets (see `state`) never run ahead of the output.
 
 use std::borrow::Cow;
 use std::collections::hash_map::RandomState;
@@ -27,7 +30,7 @@ use std::hash::BuildHasher;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -44,6 +47,33 @@ use crate::watcher::Waker;
 const DROP_WARN_INTERVAL: Duration = Duration::from_secs(10);
 /// Backoff while waiting for queue space in `block` mode.
 const BLOCK_RETRY: Duration = Duration::from_millis(2);
+/// Under sustained load the queue never runs empty; flush at least this
+/// often anyway so that `Progress::flushed` keeps advancing.
+const MAX_FLUSH_DELAY: Duration = Duration::from_millis(200);
+
+/// Events queued and events written and flushed, in queue order.
+#[derive(Debug, Default)]
+pub struct Progress {
+    sent: AtomicU64,
+    flushed: AtomicU64,
+}
+
+impl Progress {
+    /// Events queued so far (only the monitor thread queues events),
+    /// including events lost because the output failed or shutdown
+    /// interrupted a blocked send: those are never flushed, so no offset
+    /// past them is saved. Events dropped by `on_full = "drop"` are not
+    /// counted; that loss is by configuration.
+    pub fn sent(&self) -> u64 {
+        self.sent.load(Ordering::Relaxed)
+    }
+
+    /// Events written and flushed to the output so far. Since the queue is
+    /// FIFO, these are exactly the first `flushed()` events queued.
+    pub fn flushed(&self) -> u64 {
+        self.flushed.load(Ordering::Acquire)
+    }
+}
 
 /// Process-wide values included in every event.
 #[derive(Debug, Clone)]
@@ -194,6 +224,7 @@ pub struct Dispatcher {
     shutdown: Arc<AtomicBool>,
     last_drop_warning: Option<Instant>,
     drops_since_warning: u64,
+    progress: Arc<Progress>,
     handle: Option<JoinHandle<io::Result<()>>>,
 }
 
@@ -214,10 +245,12 @@ impl Dispatcher {
         let m = Arc::clone(&metrics);
         let flag = Arc::clone(&shutdown);
         let in_flight = Arc::clone(&queued_bytes);
+        let progress = Arc::new(Progress::default());
+        let flushed = Arc::clone(&progress);
         let handle = thread::Builder::new()
             .name("output".into())
             .spawn(move || {
-                let result = write_loop(rx, &in_flight, format, &tables, writer);
+                let result = write_loop(rx, &in_flight, format, &tables, writer, &flushed);
                 if let Err(e) = &result {
                     metrics::inc(&m.output_errors);
                     error!(error = %e, "writing events failed; shutting down");
@@ -235,24 +268,34 @@ impl Dispatcher {
             shutdown,
             last_drop_warning: None,
             drops_since_warning: 0,
+            progress,
             handle: Some(handle),
         })
+    }
+
+    pub fn progress(&self) -> Arc<Progress> {
+        Arc::clone(&self.progress)
+    }
+
+    fn queued(&self) {
+        metrics::inc(&self.metrics.events_emitted);
+        self.progress.sent.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Queues an event according to the `on_full` policy.
     pub fn send(&mut self, ev: Event) {
         let Some(tx) = &self.tx else {
-            self.dropped(1);
+            self.lost();
             return;
         };
         let mut ev = match self.try_enqueue(tx, ev) {
             Ok(()) => {
-                metrics::inc(&self.metrics.events_emitted);
+                self.queued();
                 return;
             }
             Err(TrySendError::Disconnected(_)) => {
                 // Output thread has exited; its error is already reported.
-                self.dropped(1);
+                self.lost();
                 return;
             }
             Err(TrySendError::Full(ev)) => ev,
@@ -263,22 +306,29 @@ impl Dispatcher {
         }
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
-                self.dropped(1);
+                self.lost();
                 return;
             }
             thread::sleep(BLOCK_RETRY);
             ev = match self.try_enqueue(tx, ev) {
                 Ok(()) => {
-                    metrics::inc(&self.metrics.events_emitted);
+                    self.queued();
                     return;
                 }
                 Err(TrySendError::Disconnected(_)) => {
-                    self.dropped(1);
+                    self.lost();
                     return;
                 }
                 Err(TrySendError::Full(ev)) => ev,
             };
         }
+    }
+
+    /// Dropped although the policy is to deliver: counts as sent but will
+    /// never be flushed, which holds back saved offsets.
+    fn lost(&mut self) {
+        self.progress.sent.fetch_add(1, Ordering::Relaxed);
+        self.dropped(1);
     }
 
     /// Queues `ev` if both the event count and the byte budget allow it.
@@ -329,27 +379,39 @@ fn write_loop(
     format: OutputFormat,
     tables: &Tables,
     writer: Box<dyn Write + Send>,
+    progress: &Progress,
 ) -> io::Result<()> {
     let mut w = BufWriter::with_capacity(64 * 1024, writer);
     let mut line = Vec::with_capacity(1024);
     let mut ts = String::with_capacity(32);
+    let mut written = 0u64;
+    let flush = |w: &mut BufWriter<_>, written: u64| -> io::Result<Instant> {
+        w.flush()?;
+        progress.flushed.store(written, Ordering::Release);
+        Ok(Instant::now())
+    };
     // Block for the next event; flush whenever the queue runs empty so that
     // output is batched under load but prompt when idle.
     while let Ok(mut ev) = rx.recv() {
+        let mut last_flush = Instant::now();
         loop {
             line.clear();
             format_event(format, tables, &ev, &mut ts, &mut line)?;
             w.write_all(&line)?;
             queued_bytes.fetch_sub(event_cost(&ev), Ordering::Relaxed);
+            written += 1;
+            if last_flush.elapsed() >= MAX_FLUSH_DELAY {
+                last_flush = flush(&mut w, written)?;
+            }
             match rx.try_recv() {
                 Ok(next) => ev = next,
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return w.flush(),
+                Err(TryRecvError::Disconnected) => return flush(&mut w, written).map(drop),
             }
         }
-        w.flush()?;
+        flush(&mut w, written)?;
     }
-    w.flush()
+    flush(&mut w, written).map(drop)
 }
 
 /// Outcome of [`Limiter::admit`].

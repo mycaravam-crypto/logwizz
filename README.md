@@ -103,6 +103,8 @@ Only `[[files]]` and `[[rules]]` are required.
 | `rotation_drain_ms` | `5000` | 0 – 600000 | After rotation, keep reading the old file until it has been idle this long. |
 | `diagnostics` | `"warn"` | `error` … `trace` | Verbosity of logwizz's own messages on stderr. |
 | `stats_interval_secs` | `0` | 0 – 86400 | Log a statistics line at `info` level at this interval. `0` disables it. |
+| `state_file` | unset | absolute path | Persist read offsets here, so a restart resumes where it stopped (at-least-once delivery). Unset keeps offsets in memory only. See [Delivery guarantees](#delivery-guarantees). |
+| `state_flush_ms` | `1000` | 100 – 600000 | Minimum time between writes of `state_file`. |
 
 ### `[output]`
 
@@ -269,8 +271,8 @@ exits with status 1. Continuing would only hide the loss.
 
 ### Delivery guarantees
 
-logwizz provides **best-effort, at-most-once delivery within one process
-lifetime**. It does **not** provide durable or exactly-once processing:
+Without `state_file`, logwizz provides **best-effort, at-most-once delivery
+within one process lifetime**:
 
 - Offsets are kept in memory only. After a restart, `startup_mode` decides
   where reading resumes: `tail` skips anything written while logwizz was
@@ -280,6 +282,36 @@ lifetime**. It does **not** provide durable or exactly-once processing:
   waits for the output to accept the data, so with a stalled consumer the
   process does not exit until it is killed (the systemd unit does so after
   `TimeoutStopSec`).
+
+With `state_file`, delivery across restarts is **at-least-once**:
+
+- For each file, logwizz saves the offset just past the last complete line,
+  but only once every event from the lines before it has been written and
+  flushed to the output. After a crash or SIGKILL, reading resumes from the
+  last saved offset, so events since then are emitted again, but no line is
+  skipped. After SIGTERM/SIGINT the final offsets are saved once the queue
+  has been flushed, so nothing is repeated.
+- On startup, a saved offset is used only if the file at the path is still
+  the same file (`dev`, `ino`), is at least as long as the offset, and still
+  starts with the same bytes (a fingerprint of the first 256 bytes, which
+  detects a reused inode). Otherwise the file changed while logwizz was
+  stopped: it is read from the beginning, with a warning. Files without a
+  saved offset follow `startup_mode`.
+- The state file is written atomically (temporary file, `fsync`, rename,
+  directory `fsync`), at most every `state_flush_ms`, with mode `0600`. If
+  it is missing, unreadable or invalid, logwizz warns and falls back to
+  `startup_mode`; it never refuses to start. Failed writes are counted in
+  `state_save_errors` and retried.
+- Not covered: a file rotated away while logwizz was stopped is not read
+  again, so lines appended to it after the last save and before the
+  rotation are missed; the same applies to a file that was still being
+  drained after a rotation at shutdown. A line still incomplete at a
+  restart is read again from its start.
+- `on_full = "drop"` does not hold back saved offsets: events it drops
+  are lost, as configured.
+
+In both modes:
+
 - Incomplete trailing lines (no newline yet) are not emitted at shutdown.
 - `copytruncate` is inherently racy. Lines written between the copy and the
   truncation are lost for every reader. Lines written after the truncation
@@ -304,7 +336,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -379,6 +411,9 @@ configuration through its supplementary group: keep the file group-owned by
 only root can read makes `--check-config` fail with "Permission denied" and the
 service never starts.
 
+The unit provides `/var/lib/logwizz` (`StateDirectory=`) for
+`state_file = "/var/lib/logwizz/offsets.json"`.
+
 Read access to logs comes from `SupplementaryGroups=adm`, which is right for
 Debian and Ubuntu. On other distributions, grant read access with a group or
 an ACL. For example, `/var/log/secure` on RHEL-family systems is root-only:
@@ -439,7 +474,7 @@ logwizz's own output.** The namespace has its own retention settings in
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
-- Not supported in 0.1.0: glob patterns, persistent offsets, runtime
+- Not supported in 0.1.0: glob patterns, runtime
   configuration reload, compressed or rotated-file catch-up, multi-line
   records.
 - Rule evaluation is sequential per line. Throughput falls roughly linearly

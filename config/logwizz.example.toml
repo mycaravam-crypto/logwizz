@@ -22,6 +22,12 @@ rotation_drain_ms = 5000
 diagnostics = "warn"
 # Log a statistics snapshot at "info" level at this interval. 0 disables.
 stats_interval_secs = 0
+# Persist read offsets so that a restart resumes where logwizz stopped
+# (at-least-once delivery). Unset (the default) keeps offsets in memory only.
+# The systemd unit provides /var/lib/logwizz for this.
+#state_file = "/var/lib/logwizz/offsets.json"
+# Minimum time between writes of the state file.
+state_flush_ms = 1000
 
 [output]
 # "json" (JSON Lines) or "human".

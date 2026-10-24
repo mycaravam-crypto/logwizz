@@ -67,6 +67,10 @@ counters! {
     notify_overflows,
     rotations,
     truncations,
+    /// Successful writes of the offset state file.
+    state_saves,
+    /// Failed writes of the offset state file (retried later).
+    state_save_errors,
 }
 
 #[inline]

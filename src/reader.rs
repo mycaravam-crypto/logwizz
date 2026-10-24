@@ -41,11 +41,12 @@ use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use memchr::memchr;
+use memchr::{memchr, memrchr};
 use tracing::{debug, info, warn};
 
 use crate::config::StartupMode;
 use crate::metrics::{self, Metrics};
+use crate::state::{FINGERPRINT_BYTES, FileState, Fingerprint};
 
 /// Default size of the shared read buffer.
 pub const READ_BUF_BYTES: usize = 64 * 1024;
@@ -271,6 +272,12 @@ struct Source {
     file: File,
     id: FileId,
     offset: u64,
+    /// Just past the last newline read: where reading would restart after
+    /// a restart, so that no partially read line is lost.
+    line_end: u64,
+    /// Cached fingerprint for checkpoints; final once it covers
+    /// `FINGERPRINT_BYTES`.
+    fingerprint: Option<Fingerprint>,
     splitter: LineSplitter,
     /// Last read error kind, to report each distinct failure once.
     error: Option<ErrorKind>,
@@ -303,6 +310,8 @@ impl Source {
             metrics::inc(&m.truncations);
             self.splitter.flush(m, on_line);
             self.offset = 0;
+            self.line_end = 0;
+            self.fingerprint = None;
         }
         loop {
             if *budget == 0 {
@@ -312,10 +321,14 @@ impl Source {
             match self.file.read_at(&mut buf[..want], self.offset) {
                 Ok(0) => return Ok(ReadEnd::Eof),
                 Ok(n) => {
+                    let start = self.offset;
                     self.offset += n as u64;
                     *budget -= n;
                     metrics::add(&m.bytes_read, n as u64);
                     self.splitter.feed(&buf[..n], m, on_line);
+                    if let Some(i) = memrchr(b'\n', &buf[..n]) {
+                        self.line_end = start + i as u64 + 1;
+                    }
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
@@ -371,6 +384,9 @@ pub struct TailedFile {
     /// Start position for the very first open; later opens always start at 0
     /// because a file that appears while we run consists entirely of new data.
     startup: Option<StartupMode>,
+    /// Saved position from a previous run, used (if still valid) instead of
+    /// `startup` for the very first open.
+    resume: Option<FileState>,
     current: Option<Source>,
     draining: Option<(Source, Instant)>,
     state: PathState,
@@ -382,6 +398,7 @@ impl TailedFile {
             path,
             opts,
             startup: Some(startup),
+            resume: None,
             current: None,
             draining: None,
             state: PathState::Ok,
@@ -394,6 +411,32 @@ impl TailedFile {
 
     pub fn is_open(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// Uses `saved` for the first open if it still matches the file.
+    pub fn set_resume(&mut self, saved: FileState) {
+        self.resume = Some(saved);
+    }
+
+    /// The position to save for this file: the current source's offset just
+    /// past its last complete line. A file being drained after rotation is
+    /// not included, so a restart does not return to it.
+    pub fn checkpoint(&mut self) -> Option<FileState> {
+        let cur = self.current.as_mut()?;
+        let limit = cur.line_end.min(FINGERPRINT_BYTES);
+        let fingerprint = match cur.fingerprint {
+            Some(fp) if fp.len == limit => fp,
+            _ => {
+                let fp = Fingerprint::of(&cur.file, limit).ok()?;
+                cur.fingerprint = Some(fp);
+                fp
+            }
+        };
+        Some(FileState {
+            id: cur.id,
+            offset: cur.line_end,
+            fingerprint,
+        })
     }
 
     /// Identity of the file currently read at the path, if any.
@@ -537,21 +580,41 @@ impl TailedFile {
             return;
         }
         let mut splitter = LineSplitter::new(self.opts.max_line_bytes);
+        let id = FileId::of(&meta);
+        let size = meta.len();
+        let resume = self.resume.take();
         let offset = match self.startup.take() {
-            Some(StartupMode::Tail) => {
-                let size = meta.len();
-                if size > 0 && !ends_with_newline(&file, size) {
-                    splitter.skip = Skip::StartupPartial;
+            None => 0,
+            Some(mode) => match resume.map(|r| r.resume_offset(&file, id, size)) {
+                Some(Ok(offset)) => {
+                    info!(path = %self.path.display(), offset, "resuming from saved offset");
+                    offset
                 }
-                size
-            }
-            Some(StartupMode::Beginning) | None => 0,
+                Some(Err(why)) => {
+                    warn!(
+                        path = %self.path.display(),
+                        reason = why.as_str(),
+                        "saved offset not usable; reading from the beginning"
+                    );
+                    0
+                }
+                None if mode == StartupMode::Tail => size,
+                None => 0,
+            },
         };
+        // Starting in the middle of a line (tail mode, or a saved offset
+        // that was itself a tail-mode start position): skip to the next
+        // line start. Saved offsets are otherwise always line starts.
+        if offset > 0 && !ends_with_newline(&file, offset) {
+            splitter.skip = Skip::StartupPartial;
+        }
         debug!(path = %self.path.display(), offset, "opened");
         self.current = Some(Source {
             file,
-            id: FileId::of(&meta),
+            id,
             offset,
+            line_end: offset,
+            fingerprint: None,
             splitter,
             error: None,
         });
@@ -565,6 +628,7 @@ impl TailedFile {
         // Whatever failed, the first open attempt is over: a file that
         // appears later is read from the beginning.
         self.startup = None;
+        self.resume = None;
         if self.state != PathState::Error(e.kind()) {
             metrics::inc(&m.read_errors);
             warn!(path = %self.path.display(), error = %e, "cannot access file; will retry");
@@ -599,6 +663,7 @@ impl TailedFile {
 
     fn set_state(&mut self, state: PathState, m: &Metrics) {
         self.startup = None;
+        self.resume = None;
         if self.state == state {
             return;
         }
