@@ -26,8 +26,9 @@
 //! * A deleted file (link count 0) is drained to EOF and closed.
 //! * A file renamed away without replacement keeps being read, since its
 //!   writer usually keeps appending until it reopens its log.
-//! * Lines longer than `max_line_bytes` are cut to that length, flagged as
-//!   truncated and counted; the excess is counted in `bytes_skipped`.
+//! * Lines longer than `max_line_bytes` (not counting a `\r\n` or `\n`
+//!   terminator) are cut to that length, flagged as truncated and counted;
+//!   the excess is counted in `bytes_skipped`.
 //! * An unterminated trailing line is held until its newline arrives. If the
 //!   source ends first (truncation, rotation, deletion) it is emitted as is
 //!   and counted in `partial_lines_flushed`.
@@ -94,11 +95,19 @@ enum Skip {
 }
 
 /// Splits a byte stream into lines, holding at most `max` bytes of an
-/// incomplete line.
+/// incomplete line, plus one trailing `\r` that may turn out to be part of a
+/// CRLF terminator (so at most `max + 1` bytes per file).
+///
+/// Lengths are measured without the line terminator: a CRLF line with exactly
+/// `max` bytes of content is not truncated, and a `\r` that ends a cut line
+/// is not counted in `bytes_skipped`.
 #[derive(Debug)]
 struct LineSplitter {
     pending: Vec<u8>,
     skip: Skip,
+    /// While skipping: the last skipped byte was a `\r` that has not been
+    /// counted yet, because it may belong to the CRLF terminator.
+    held_cr: bool,
     max: usize,
 }
 
@@ -107,6 +116,7 @@ impl LineSplitter {
         LineSplitter {
             pending: Vec::new(),
             skip: Skip::None,
+            held_cr: false,
             max,
         }
     }
@@ -126,7 +136,7 @@ impl LineSplitter {
         match self.skip {
             Skip::None => {}
             Skip::Oversize => {
-                metrics::add(&m.bytes_skipped, seg.len() as u64);
+                self.count_skipped(seg, true, m);
                 self.skip = Skip::None;
                 return;
             }
@@ -139,40 +149,72 @@ impl LineSplitter {
             emit(seg, self.max, m, on_line);
             return;
         }
-        let room = self.max - self.pending.len();
-        if seg.len() > room {
-            self.pending.extend_from_slice(&seg[..room]);
-            metrics::add(&m.bytes_skipped, (seg.len() - room) as u64);
-            emit_truncated(&self.pending, m, on_line);
-        } else {
+        if self.pending.len() + seg.len() <= self.max + 1 {
+            // At most `max` bytes of content plus a possible `\r`.
             self.pending.extend_from_slice(seg);
             emit(&self.pending, self.max, m, on_line);
+        } else {
+            // More than `max + 1` bytes, so more than `max` bytes of content.
+            let fill = self.cut_pending(seg);
+            self.count_skipped(&seg[fill..], true, m);
+            emit_truncated(&self.pending, m, on_line);
         }
         self.pending.clear();
     }
 
-    /// `seg` is a tail with no newline yet.
+    /// `seg` is a non-empty tail with no newline yet.
     fn partial(&mut self, seg: &[u8], m: &Metrics, on_line: &mut dyn FnMut(Line<'_>)) {
         match self.skip {
             Skip::None => {}
             Skip::Oversize => {
-                metrics::add(&m.bytes_skipped, seg.len() as u64);
+                self.count_skipped(seg, false, m);
                 return;
             }
             Skip::StartupPartial => return,
         }
-        let room = self.max - self.pending.len();
-        if seg.len() > room {
-            // The line is already longer than allowed: emit what fits now
-            // and discard the remainder up to the next newline.
-            self.pending.extend_from_slice(&seg[..room]);
-            metrics::add(&m.bytes_skipped, (seg.len() - room) as u64);
-            emit_truncated(&self.pending, m, on_line);
-            self.pending.clear();
-            self.skip = Skip::Oversize;
-        } else {
+        let total = self.pending.len() + seg.len();
+        if total <= self.max || (total == self.max + 1 && seg.ends_with(b"\r")) {
             self.pending.extend_from_slice(seg);
+            return;
         }
+        // The line is already longer than allowed: emit what fits now and
+        // discard the remainder up to the next newline.
+        let fill = self.cut_pending(seg);
+        self.count_skipped(&seg[fill..], false, m);
+        emit_truncated(&self.pending, m, on_line);
+        self.pending.clear();
+        self.skip = Skip::Oversize;
+    }
+
+    /// Cuts `pending` + `seg` to `max` bytes in `pending`, counting a held
+    /// `\r` that is now known to be content. Returns how many bytes of `seg`
+    /// were used.
+    fn cut_pending(&mut self, seg: &[u8]) -> usize {
+        if self.pending.len() > self.max {
+            // The held trailing `\r` was not followed by a newline: it is
+            // content beyond `max`, skipped together with the rest.
+            self.pending.truncate(self.max);
+            self.held_cr = true;
+        }
+        let fill = self.max - self.pending.len();
+        self.pending.extend_from_slice(&seg[..fill]);
+        fill
+    }
+
+    /// Counts the skipped bytes `seg` of an over-long line, not counting a
+    /// trailing `\r` that is (or may still turn out to be) the terminator.
+    fn count_skipped(&mut self, seg: &[u8], ends_line: bool, m: &Metrics) {
+        let mut n = seg.len() + usize::from(self.held_cr);
+        self.held_cr = false;
+        let last_is_cr = match seg.last() {
+            Some(&b) => b == b'\r',
+            None => n > 0,
+        };
+        if last_is_cr {
+            n -= 1;
+            self.held_cr = !ends_line;
+        }
+        metrics::add(&m.bytes_skipped, n as u64);
     }
 
     /// Emits any held partial line; called when its source ends.
@@ -182,6 +224,10 @@ impl LineSplitter {
             emit(&self.pending, self.max, m, on_line);
             self.pending.clear();
         }
+        if self.held_cr {
+            metrics::inc(&m.bytes_skipped);
+            self.held_cr = false;
+        }
         self.skip = Skip::None;
         // Do not keep a large allocation around after a single long line.
         if self.pending.capacity() > READ_BUF_BYTES {
@@ -190,13 +236,15 @@ impl LineSplitter {
     }
 }
 
+/// Emits one line, without its terminator (`\n`, already removed, and a
+/// trailing `\r`), cut to `max` bytes if longer.
 fn emit(line: &[u8], max: usize, m: &Metrics, on_line: &mut dyn FnMut(Line<'_>)) {
-    if line.len() > max {
-        metrics::add(&m.bytes_skipped, (line.len() - max) as u64);
-        emit_truncated(&line[..max], m, on_line);
+    let bytes = line.strip_suffix(b"\r").unwrap_or(line);
+    if bytes.len() > max {
+        metrics::add(&m.bytes_skipped, (bytes.len() - max) as u64);
+        emit_truncated(&bytes[..max], m, on_line);
         return;
     }
-    let bytes = line.strip_suffix(b"\r").unwrap_or(line);
     metrics::inc(&m.lines_processed);
     on_line(Line {
         bytes,
@@ -668,6 +716,79 @@ mod tests {
         s.flush(&m, &mut |l| out.push(l.bytes.to_vec()));
         assert_eq!(out, [b"no newline".to_vec()]);
         assert_eq!(m.snapshot().partial_lines_flushed, 1);
+    }
+
+    /// Feeds `input` in every possible split into three chunks.
+    fn every_split(max: usize, input: &[u8], check: impl Fn(&[(Vec<u8>, bool)], &Metrics, &str)) {
+        for i in 0..=input.len() {
+            for j in i..=input.len() {
+                let (a, rest) = input.split_at(i);
+                let (b, c) = rest.split_at(j - i);
+                let (out, m) = split(max, &[a, b, c]);
+                check(&out, &m, &format!("{a:?} + {b:?} + {c:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_line_at_exact_max_is_not_truncated() {
+        every_split(4, b"abcd\r\nok\n", |out, m, how| {
+            assert_eq!(lines(out), ["abcd", "ok"], "{how}");
+            let s = m.snapshot();
+            assert_eq!(s.lines_truncated, 0, "{how}");
+            assert_eq!(s.bytes_skipped, 0, "{how}");
+        });
+    }
+
+    #[test]
+    fn crlf_terminator_is_not_counted_as_skipped() {
+        every_split(4, b"abcde\r\nok\n", |out, m, how| {
+            assert_eq!(lines(out), ["abcd~", "ok"], "{how}");
+            let s = m.snapshot();
+            assert_eq!(s.lines_truncated, 1, "{how}");
+            assert_eq!(s.bytes_skipped, 1, "{how}");
+        });
+    }
+
+    #[test]
+    fn inner_carriage_return_beyond_max_is_content() {
+        // A `\r` not followed by the newline is content, skipped and counted.
+        every_split(4, b"abcd\rx\r\nok\n", |out, m, how| {
+            assert_eq!(lines(out), ["abcd~", "ok"], "{how}");
+            assert_eq!(m.snapshot().bytes_skipped, 2, "{how}");
+        });
+        every_split(4, b"abcde\r\rz\n", |out, m, how| {
+            assert_eq!(lines(out), ["abcd~"], "{how}");
+            assert_eq!(m.snapshot().bytes_skipped, 4, "{how}");
+        });
+    }
+
+    #[test]
+    fn held_carriage_return_is_flushed_without_truncation() {
+        let m = Metrics::default();
+        let mut s = LineSplitter::new(4);
+        let mut out = Vec::new();
+        s.feed(b"abcd\r", &m, &mut |l| {
+            out.push((l.bytes.to_vec(), l.truncated))
+        });
+        assert!(out.is_empty());
+        assert_eq!(s.pending.len(), 5, "bounded by max + 1");
+        s.flush(&m, &mut |l| out.push((l.bytes.to_vec(), l.truncated)));
+        assert_eq!(lines(&out), ["abcd"]);
+        let snap = m.snapshot();
+        assert_eq!(snap.lines_truncated, 0);
+        assert_eq!(snap.bytes_skipped, 0);
+    }
+
+    #[test]
+    fn skipped_trailing_carriage_return_is_counted_on_flush() {
+        let m = Metrics::default();
+        let mut s = LineSplitter::new(4);
+        let mut out = Vec::new();
+        s.feed(b"abcdef\r", &m, &mut |l| out.push(l.bytes.to_vec()));
+        s.flush(&m, &mut |l| out.push(l.bytes.to_vec()));
+        assert_eq!(out, [b"abcd".to_vec()]);
+        assert_eq!(m.snapshot().bytes_skipped, 3);
     }
 
     #[test]
