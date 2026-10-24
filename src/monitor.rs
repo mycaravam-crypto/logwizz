@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::metrics::Metrics;
-use crate::reader::{Line, READ_BUF_BYTES, ReaderOptions, TailedFile};
+use crate::reader::{FileId, Line, READ_BUF_BYTES, ReaderOptions, TailedFile};
 use crate::watcher::{Waker, Watcher, wake_channel};
 
 /// Bytes read from one file per poll before moving on to the next file.
@@ -23,6 +23,8 @@ pub const READ_BUDGET_BYTES: usize = 1024 * 1024;
 
 pub struct Monitor {
     files: Vec<TailedFile>,
+    /// Identity each file had after its last poll.
+    ids: Vec<Option<FileId>>,
     watcher: Watcher,
     wake_rx: Receiver<()>,
     waker: Waker,
@@ -42,7 +44,7 @@ impl Monitor {
         };
         let (waker, wake_rx) = wake_channel();
         let paths: &[PathBuf] = &cfg.files;
-        let files = paths
+        let files: Vec<TailedFile> = paths
             .iter()
             .map(|p| TailedFile::new(p.clone(), cfg.general.startup_mode, opts))
             .collect();
@@ -55,6 +57,7 @@ impl Monitor {
             );
         }
         Monitor {
+            ids: vec![None; files.len()],
             files,
             watcher,
             wake_rx,
@@ -110,6 +113,7 @@ impl Monitor {
             }
 
             busy = false;
+            let mut changed = false;
             for (i, file) in self.files.iter_mut().enumerate() {
                 if !self.watcher.take_dirty(i) {
                     continue;
@@ -121,6 +125,16 @@ impl Monitor {
                     self.watcher.mark_dirty(i);
                     busy = true;
                 }
+                let id = file.current_id();
+                if id != self.ids[i] {
+                    self.ids[i] = id;
+                    changed = true;
+                }
+            }
+            if changed {
+                // A rotation may have retargeted a symlink: move its watch
+                // now rather than at the next reconciliation.
+                self.watcher.refresh_targets();
             }
         }
     }

@@ -226,3 +226,46 @@ fn multiple_files_are_attributed() {
     got.sort();
     assert_eq!(got, [(a, "from a".into()), (b, "from b".into())]);
 }
+
+#[test]
+fn symlink_target_in_other_directory_is_watched() {
+    let _g = SERIAL.lock();
+    let base = tempfile::tempdir().unwrap();
+    let (links, data1, data2) = (
+        base.path().join("links"),
+        base.path().join("data1"),
+        base.path().join("data2"),
+    );
+    for d in [&links, &data1, &data2] {
+        fs::create_dir(d).unwrap();
+    }
+    let (t1, t2) = (data1.join("2026-10-24.log"), data2.join("2026-10-25.log"));
+    write_new(&t1, "");
+    write_new(&t2, "");
+    let link = links.join("current.log");
+    std::os::unix::fs::symlink(&t1, &link).unwrap();
+
+    // Long reconcile interval: only a watch on the target's directory can
+    // explain fast detection.
+    let r = Running::start(cfg(&[&link], 60_000), true);
+    r.wait_open(1);
+    let mut worst = Duration::ZERO;
+    for i in 0..10 {
+        append(&t1, &format!("first {i}\n"));
+        worst = worst.max(r.expect(&format!("first {i}"), Duration::from_secs(2)));
+    }
+
+    // Retarget the symlink (atomically, as log managers do).
+    let tmp = links.join("current.log.tmp");
+    std::os::unix::fs::symlink(&t2, &tmp).unwrap();
+    fs::rename(&tmp, &link).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    for i in 0..10 {
+        append(&t2, &format!("second {i}\n"));
+        worst = worst.max(r.expect(&format!("second {i}"), Duration::from_secs(2)));
+    }
+    assert!(
+        worst < Duration::from_millis(500),
+        "worst latency {worst:?}"
+    );
+}

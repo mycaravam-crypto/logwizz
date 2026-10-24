@@ -392,6 +392,11 @@ impl TailedFile {
         self.current.is_some()
     }
 
+    /// Identity of the file currently read at the path, if any.
+    pub fn current_id(&self) -> Option<FileId> {
+        self.current.as_ref().map(|s| s.id)
+    }
+
     pub fn is_draining(&self) -> bool {
         self.draining.is_some()
     }

@@ -204,6 +204,11 @@ wakeup, and on every reconciliation tick, logwizz checks the file itself
   `reconcile_interval_ms`.
 - a directory that is missing at startup, or deleted and recreated, is
   watched again within one reconciliation interval.
+- if a configured path is a symlink whose target is in another directory,
+  that directory is watched too, so writes to the target are detected just
+  as quickly. When the link is retargeted, the watch moves with it, right
+  after the rotation is detected. Intermediate links in a chain are only
+  re-checked on reconciliation.
 - if inotify is unavailable altogether (for example,
   `fs.inotify.max_user_instances` is exhausted), logwizz warns and
   continues with reconciliation only.
@@ -365,7 +370,8 @@ your own log locations before relying on it.
   requires Linux 3.2 or newer, and other distributions and kernels are
   expected to work, but only the configuration above has been tested.
 - **inotify limits:** logwizz uses one inotify instance and one watch per
-  distinct parent directory. Overflows of `fs.inotify.max_queued_events` are
+  distinct parent directory, plus at most one per configured symlink whose
+  target is in another directory. Overflows of `fs.inotify.max_queued_events` are
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
