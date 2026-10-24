@@ -32,7 +32,10 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 
 ## Building
 
-Requires stable Rust (developed and tested with 1.97) on Linux.
+Requires Rust 1.85 or newer (the minimum supported Rust version, MSRV) on
+Linux. Running the tests and benchmarks needs 1.86, because of the
+`criterion` dev-dependency. Development and the full CI gates use the latest
+stable release.
 
 ```sh
 cargo build --release --locked
@@ -360,6 +363,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 cargo build --release --locked
 ```
+
+CI also builds the release binary with the MSRV toolchain
+(`cargo +1.85 build --release --locked`). Raising the MSRV is a deliberate
+change: update `rust-version` in `Cargo.toml`, the CI job and this README
+together.
 
 Benchmarks and load tests are run separately:
 
