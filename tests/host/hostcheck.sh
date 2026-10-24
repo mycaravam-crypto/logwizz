@@ -10,7 +10,7 @@ res() { # name PASS|FAIL detail
   echo "RESULT $1 $2 ${3:-}" | tee -a "$OUT"
   case $2 in PASS) pass=$((pass+1));; KNOWN) known=$((known+1));; *) fail=$((fail+1));; esac
 }
-events() { journalctl -u logwizz -o cat --no-pager; }
+events() { journalctl --namespace=logwizz -u logwizz -o cat --no-pager; }
 wait_for() { # pattern timeout_s
   local t=0
   while (( t < ${2:-10} * 10 )); do
@@ -183,5 +183,7 @@ else res clean_stop FAIL "Result=$result status=$st took ${dur}s"; fi
 
 loops=$(events | grep -c '"file":"/var/log/syslog".*logwizz\[')
 res syslog_feedback_loop $([[ $loops == 0 ]] && echo PASS || echo FAIL) "$loops events re-matched logwizz's own output in /var/log/syslog (#21)"
-echo "=== journal (tail)"; journalctl -u logwizz -o short-precise --no-pager | tail -40
+rs=$(grep -c 'logwizz\[' /var/log/syslog || true)
+res syslog_isolation $([[ $rs == 0 ]] && echo PASS || echo FAIL) "$rs logwizz lines in /var/log/syslog"
+echo "=== journal (tail)"; journalctl --namespace=logwizz -u logwizz -o short-precise --no-pager | tail -40
 echo "SUMMARY pass=$pass fail=$fail known=$known"

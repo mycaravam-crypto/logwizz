@@ -49,8 +49,11 @@ dedup_max_entries = 4096
 path = "/var/log/auth.log"
 enabled = true
 
+# Kernel messages. On Debian/Ubuntu /var/log/syslog also has them, but it
+# receives logwizz's own output too unless the service runs in its own journal
+# namespace (as the packaged unit does).
 [[files]]
-path = "/var/log/syslog"
+path = "/var/log/kern.log"
 enabled = true
 
 [[files]]

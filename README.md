@@ -319,14 +319,15 @@ same stream.
 [`packaging/logwizz.service`](packaging/logwizz.service) runs logwizz as a
 transient unprivileged user (`DynamicUser=yes`) with read-only access to the
 filesystem, no capabilities, no network, and a `@system-service` system call
-filter. Events go to the journal through stdout.
+filter. Events go to stdout, and from there to the journal in a separate
+`logwizz` namespace (`LogNamespace=logwizz`, systemd 245 or newer).
 
 ```sh
 install -D -m 0640 -g adm config/logwizz.example.toml /etc/logwizz/logwizz.toml
 install -m 0644 packaging/logwizz.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now logwizz
-journalctl -u logwizz -o cat -f
+journalctl --namespace=logwizz -u logwizz -o cat -f
 ```
 
 The service user only exists while the service runs, so it reads the
@@ -355,12 +356,13 @@ logrotate runs, no sandbox denials, restart on failure and a clean stop. See
 [docs/HOST-VERIFICATION.md](docs/HOST-VERIFICATION.md), and rerun it with
 `tests/host/run-vm.sh`.
 
-> **Do not watch a file that receives logwizz's own output.** On Debian and
-> Ubuntu, rsyslog copies the journal, and with it every event logwizz writes,
-> into `/var/log/syslog`. If that file is watched, matching events are matched
-> again (bounded only by rsyslog's message size). Until this is fixed (#21),
-> watch narrower files such as `/var/log/kern.log`, or keep rules from matching
-> logwizz's own lines.
+The namespace keeps logwizz's output out of the main journal. That matters:
+on Debian and Ubuntu, rsyslog copies the main journal into `/var/log/syslog`,
+so without the namespace a watched syslog file would contain every event
+logwizz writes, and the rules would match them again. The same applies when
+you run logwizz outside the packaged unit: **do not watch a file that receives
+logwizz's own output.** The namespace has its own retention settings in
+`/etc/systemd/journald@logwizz.conf`.
 
 ## Security
 
