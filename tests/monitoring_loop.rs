@@ -30,13 +30,14 @@ impl Running {
         let metrics = Arc::new(Metrics::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut monitor = Monitor::new(&cfg, Arc::clone(&metrics), notifications);
+        let paths = cfg.files.clone();
         let waker = monitor.waker();
         let (tx, lines) = channel();
         let flag = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
-            monitor.run(&flag, &mut |path, line| {
+            monitor.run(&flag, &mut |file, line| {
                 let text = String::from_utf8_lossy(line.bytes).into_owned();
-                let _ = tx.send((path.to_path_buf(), text));
+                let _ = tx.send((paths[file].clone(), text));
             });
         });
         Running {

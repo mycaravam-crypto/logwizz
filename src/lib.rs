@@ -5,6 +5,8 @@
 
 pub mod cli;
 pub mod config;
+pub mod daemon;
+pub mod dispatcher;
 pub mod engine;
 pub mod error;
 pub mod event;

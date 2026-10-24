@@ -5,7 +5,7 @@
 //! with a bounded read budget, so a busy file cannot starve the others and a
 //! blocking line consumer (output backpressure) simply pauses the loop.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -23,7 +23,6 @@ pub const READ_BUDGET_BYTES: usize = 1024 * 1024;
 
 pub struct Monitor {
     files: Vec<TailedFile>,
-    paths: Vec<PathBuf>,
     watcher: Watcher,
     wake_rx: Receiver<()>,
     waker: Waker,
@@ -42,12 +41,12 @@ impl Monitor {
             drain_grace: Duration::from_millis(cfg.general.rotation_drain_ms),
         };
         let (waker, wake_rx) = wake_channel();
-        let paths = cfg.files.clone();
+        let paths: &[PathBuf] = &cfg.files;
         let files = paths
             .iter()
             .map(|p| TailedFile::new(p.clone(), cfg.general.startup_mode, opts))
             .collect();
-        let watcher = Watcher::new(&paths, notifications, waker.clone(), Arc::clone(&metrics));
+        let watcher = Watcher::new(paths, notifications, waker.clone(), Arc::clone(&metrics));
         if watcher.is_active() {
             info!(
                 files = paths.len(),
@@ -57,7 +56,6 @@ impl Monitor {
         }
         Monitor {
             files,
-            paths,
             watcher,
             wake_rx,
             waker,
@@ -74,12 +72,12 @@ impl Monitor {
     }
 
     /// Runs until `shutdown` is set (and the loop is woken). Every line is
-    /// passed to `on_line` together with its configured path.
+    /// passed to `on_line` together with the index of its configured file.
     ///
     /// `on_line` may block (output backpressure); the loop then pauses.
     /// Unread data stays in the files, so pausing loses nothing unless a
     /// file is rotated away and fully removed meanwhile.
-    pub fn run(&mut self, shutdown: &AtomicBool, on_line: &mut dyn FnMut(&Path, Line<'_>)) {
+    pub fn run(&mut self, shutdown: &AtomicBool, on_line: &mut dyn FnMut(usize, Line<'_>)) {
         let mut next_reconcile = Instant::now();
         let mut busy = false;
         loop {
@@ -116,9 +114,8 @@ impl Monitor {
                 if !self.watcher.take_dirty(i) {
                     continue;
                 }
-                let path = &self.paths[i];
                 let more = file.poll(now, &mut self.buf, &self.metrics, &mut |line| {
-                    on_line(path, line)
+                    on_line(i, line)
                 });
                 if more {
                     self.watcher.mark_dirty(i);

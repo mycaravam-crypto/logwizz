@@ -45,14 +45,8 @@ fn format_problems(problems: &[String]) -> String {
 /// Errors that stop the running daemon.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-
-    #[error("filesystem watcher failed: {0}")]
-    Watcher(String),
-
-    #[error("cannot install signal handler: {0}")]
-    Signal(io::Error),
+    #[error("startup failed: {0}")]
+    Startup(io::Error),
 
     #[error("output failed: {0}")]
     Output(io::Error),
