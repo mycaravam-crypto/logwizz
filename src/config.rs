@@ -25,6 +25,7 @@ pub const MIN_LINE_BYTES: usize = 256;
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub const MIN_RECONCILE_MS: u64 = 50;
 pub const MAX_RECONCILE_MS: u64 = 600_000;
+pub const MIN_STATE_FLUSH_MS: u64 = 100;
 pub const MAX_QUEUE_CAPACITY: usize = 1 << 20;
 pub const MAX_FILES: usize = 1024;
 pub const MAX_RULES: usize = 1024;
@@ -112,6 +113,11 @@ pub struct General {
     /// After rotation, keep reading the old file until it has been idle
     /// for this long.
     pub rotation_drain_ms: u64,
+    /// Where read offsets are persisted across restarts; unset disables
+    /// persistence.
+    pub state_file: Option<PathBuf>,
+    /// Minimum time between writes of `state_file`.
+    pub state_flush_ms: u64,
 }
 
 impl Default for General {
@@ -123,6 +129,8 @@ impl Default for General {
             diagnostics: DiagnosticLevel::Warn,
             stats_interval_secs: 0,
             rotation_drain_ms: 5000,
+            state_file: None,
+            state_flush_ms: 1000,
         }
     }
 }
@@ -318,6 +326,13 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
     );
     check_range(
         &mut problems,
+        "general.state_flush_ms",
+        general.state_flush_ms,
+        MIN_STATE_FLUSH_MS,
+        MAX_RECONCILE_MS,
+    );
+    check_range(
+        &mut problems,
         "general.stats_interval_secs",
         general.stats_interval_secs,
         0,
@@ -386,6 +401,15 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
     }
     if files.is_empty() {
         problems.push("no enabled [[files]] entries".to_string());
+    }
+    if let Some(state) = &general.state_file {
+        let label = format!("general.state_file ({})", state.display());
+        if let Err(msg) = check_path(state) {
+            problems.push(format!("{label}: {msg}"));
+        }
+        if seen_paths.contains(state) {
+            problems.push(format!("{label}: must not be a monitored file"));
+        }
     }
 
     if raw_rules.len() > MAX_RULES {
@@ -629,6 +653,37 @@ mod tests {
             "
         );
         assert!(problems(&text)[0].contains("broken"));
+    }
+
+    #[test]
+    fn state_file_is_optional_and_validated() {
+        let cfg = parse_str(MINIMAL).unwrap();
+        assert_eq!(cfg.general.state_file, None);
+        assert_eq!(cfg.general.state_flush_ms, 1000);
+
+        let ok = format!(
+            "[general]\nstate_file = \"/var/lib/logwizz/offsets.json\"\nstate_flush_ms = 250\n{MINIMAL}"
+        );
+        let cfg = parse_str(&ok).unwrap();
+        assert_eq!(
+            cfg.general.state_file.as_deref(),
+            Some(Path::new("/var/lib/logwizz/offsets.json"))
+        );
+        assert_eq!(cfg.general.state_flush_ms, 250);
+
+        let bad =
+            format!("[general]\nstate_file = \"/var/log/syslog\"\nstate_flush_ms = 10\n{MINIMAL}");
+        let p = problems(&bad);
+        assert!(
+            p.iter().any(|m| m.contains("must not be a monitored file")),
+            "{p:?}"
+        );
+        assert!(
+            p.iter().any(|m| m.contains("general.state_flush_ms")),
+            "{p:?}"
+        );
+        let rel = format!("[general]\nstate_file = \"offsets.json\"\n{MINIMAL}");
+        assert!(problems(&rel)[0].contains("must be absolute"));
     }
 
     #[test]

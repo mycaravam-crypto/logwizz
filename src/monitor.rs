@@ -5,6 +5,7 @@
 //! with a bounded read budget, so a busy file cannot starve the others and a
 //! blocking line consumer (output backpressure) simply pauses the loop.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,10 +17,14 @@ use tracing::{info, warn};
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::reader::{FileId, Line, READ_BUF_BYTES, ReaderOptions, TailedFile};
+use crate::state::FileState;
 use crate::watcher::{Waker, Watcher, wake_channel};
 
 /// Bytes read from one file per poll before moving on to the next file.
 pub const READ_BUDGET_BYTES: usize = 1024 * 1024;
+
+/// Receives the result of [`Monitor::checkpoint`] in [`Monitor::run_with`].
+pub type OnCheckpoint<'a> = dyn FnMut(Vec<Option<FileState>>) + 'a;
 
 pub struct Monitor {
     files: Vec<TailedFile>,
@@ -68,6 +73,21 @@ impl Monitor {
         }
     }
 
+    /// Saved positions from a previous run; call before [`Monitor::run`].
+    /// Entries for paths that are no longer configured are ignored.
+    pub fn resume(&mut self, mut saved: HashMap<PathBuf, FileState>) {
+        for f in &mut self.files {
+            if let Some(st) = saved.remove(f.path()) {
+                f.set_resume(st);
+            }
+        }
+    }
+
+    /// The position to save for each file, by configured index.
+    pub fn checkpoint(&mut self) -> Vec<Option<FileState>> {
+        self.files.iter_mut().map(TailedFile::checkpoint).collect()
+    }
+
     /// A handle that interrupts the loop's wait, e.g. after setting the
     /// shutdown flag.
     pub fn waker(&self) -> Waker {
@@ -81,14 +101,38 @@ impl Monitor {
     /// Unread data stays in the files, so pausing loses nothing unless a
     /// file is rotated away and fully removed meanwhile.
     pub fn run(&mut self, shutdown: &AtomicBool, on_line: &mut dyn FnMut(usize, Line<'_>)) {
+        self.run_with(shutdown, on_line, None);
+    }
+
+    /// Like [`Monitor::run`], additionally passing [`Monitor::checkpoint`]
+    /// to `on_checkpoint` every `interval` (between polls, so every line
+    /// before a checkpoint has been passed to `on_line`).
+    pub fn run_with(
+        &mut self,
+        shutdown: &AtomicBool,
+        on_line: &mut dyn FnMut(usize, Line<'_>),
+        mut checkpoints: Option<(Duration, &mut OnCheckpoint<'_>)>,
+    ) {
         let mut next_reconcile = Instant::now();
+        let mut next_checkpoint = Instant::now();
         let mut busy = false;
         loop {
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
+            if let Some((interval, f)) = &mut checkpoints {
+                let now = Instant::now();
+                if now >= next_checkpoint {
+                    f(self.checkpoint());
+                    next_checkpoint = now + *interval;
+                }
+            }
             if !busy {
-                let timeout = next_reconcile.saturating_duration_since(Instant::now());
+                let deadline = match checkpoints {
+                    Some(_) => next_reconcile.min(next_checkpoint),
+                    None => next_reconcile,
+                };
+                let timeout = deadline.saturating_duration_since(Instant::now());
                 match self.wake_rx.recv_timeout(timeout) {
                     Ok(()) | Err(RecvTimeoutError::Timeout) => {}
                     // We hold a Waker ourselves, so this cannot happen;
