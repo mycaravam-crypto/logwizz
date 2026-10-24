@@ -20,8 +20,9 @@ and emits an event for every line matching a rule.
   with code 2. World-writable configuration files are refused.
 - **File reading:** incremental reads with per-file offsets, `(dev, ino)`
   identity and a bounded partial-line buffer (`max_line_bytes`). Oversized
-  lines are cut, flagged `truncated` and counted. Invalid UTF-8 is converted
-  lossily and counted.
+  lines are cut, flagged `truncated` and counted. A `\r\n` terminator never
+  counts towards `max_line_bytes`. Invalid UTF-8 is matched as raw bytes and
+  converted lossily in output.
 - **Rotation:** rename+create and replacement are detected by identity
   change. The old file is drained before the new one is read from offset 0.
   copytruncate restarts at offset 0, and deleted files are drained and
@@ -33,12 +34,14 @@ and emits an event for every line matching a rule.
   compiled at load time and evaluated without per-line allocation. Severities
   range from `debug` to `critical`.
 - **Output:** JSON Lines (schema `v: 1`) or a human format with control
-  characters escaped, written to stdout or stderr by a dedicated thread
-  behind a bounded queue. When the queue is full, `on_full = "block"` waits
+  characters, bidi controls and line separators escaped, written to stdout or stderr by a dedicated thread
+  behind a queue bounded by event count (`queue_capacity`) and by memory
+  (`max_queue_bytes`, default 8 MiB). When the queue is full, `on_full = "block"` waits
   and `on_full = "drop"` discards and counts. Output write errors, including
   `EPIPE`, shut the daemon down with exit code 1.
 - **Limits:** an optional per-rule rate limit and a bounded deduplication
-  window. Suppressed events are counted.
+  window with constant-time expiry. Only emitted events are remembered for
+  deduplication. Suppressed events are counted.
 - **Operations:** SIGTERM and SIGINT shut down gracefully and flush queued
   events. SIGUSR1 and `general.stats_interval_secs` log a statistics
   snapshot.

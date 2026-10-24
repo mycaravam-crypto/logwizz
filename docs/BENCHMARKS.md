@@ -102,3 +102,67 @@ Cost grows linearly with the number of rules, because every rule is
 evaluated against every line. Even 50 never-matching case-insensitive regex
 rules stay well above the throughput target, so combining rules into a
 `RegexSet` has not been justified yet.
+
+## Review fixes (2026-10-24)
+
+Same reference system and toolchain as above, measured before and after the
+changes to the line splitter, the limiter and the output queue. Only the
+numbers within one table are comparable: the VM's load differed from the
+runs above.
+
+### Deduplication with a full table
+
+```sh
+cargo bench --bench rule_engine -- limiter
+```
+
+`limiter/dedup_full_unique/N`: a dedup table of N entries, none expired, fed
+a stream of unique lines. Before, each event for a line not in the table
+swept the whole table looking for expired entries. Now entries expire from
+the front of a queue.
+
+| Benchmark | Before | After |
+|---|---|---|
+| limiter/dedup_full_unique/4096 (default size) | 14.3 µs | 27.0 ns |
+| limiter/dedup_full_unique/262144 | 1.35 ms | 31.5 ns |
+
+At 1.35 ms per event, the limiter capped a burst of unique matching lines at
+about 740 events/s. That cost is paid per *matching* line, so it only shows
+up when deduplication is enabled.
+
+### Read pipeline (line splitter change)
+
+```sh
+cargo bench --bench rule_engine -- pipeline --save-baseline before   # at the old commit
+cargo bench --bench rule_engine -- pipeline --baseline before        # after
+```
+
+| Benchmark | Before | After | Criterion verdict |
+|---|---|---|---|
+| pipeline/literal/10 | 36.9 ms | 38.0 ms | no change detected (p = 0.11) |
+| pipeline/regex/10 | 105.9 ms | 107.8 ms | +1.4 % (p < 0.05), within run-to-run variance on this VM |
+
+### Memory with a stalled consumer
+
+Default configuration, one literal rule, stdout connected to a FIFO that is
+opened but never read. 6000 matching lines of 65 KB each were appended to
+the log, and RSS was read from `/proc/<pid>/status` 3 s later.
+
+| | Peak RSS (VmHWM) |
+|---|---|
+| Before (queue bounded by event count only) | 258.5 MiB |
+| After (`max_queue_bytes` = 8 MiB) | 12.4 MiB |
+
+Before, the default queue could hold 4096 events of up to 64 KiB each: twice
+the `MemoryMax=128M` of the shipped systemd unit.
+
+### End-to-end load test after the changes
+
+| Test | Result |
+|---|---|
+| 1 literal rule | 11.3 M lines/s, peak RSS 4.7 MiB |
+| 1 literal + 10 regex | 2.1 M lines/s, peak RSS 5.9 MiB |
+| Latency (1000 samples) | p50 0.56 ms, p95 0.92 ms, p99 1.06 ms, max 4.8 ms |
+| Idle, 10 s | 0 clock ticks, RSS 5.6 MiB |
+
+These numbers are from one run each.

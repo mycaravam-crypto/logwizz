@@ -78,7 +78,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | Key | Default | Range | Meaning |
 |---|---|---|---|
 | `startup_mode` | `"tail"` | `tail`, `beginning` | Where reading starts for files that exist at startup. `tail` skips existing content, including the remainder of a line still being written. Files that appear later are always read from the beginning. |
-| `max_line_bytes` | `65536` | 256 – 16 MiB | Longer lines are cut to this length, flagged `truncated`, and counted. This is also the cap on buffered incomplete-line data per file. |
+| `max_line_bytes` | `65536` | 256 – 16 MiB | Lines whose content (excluding the `\n` or `\r\n` terminator) is longer are cut to this length, flagged `truncated`, and counted. This is also the cap on buffered incomplete-line data per file (plus one byte for a possible `\r`). |
 | `reconcile_interval_ms` | `1000` | 50 – 600000 | Every file is re-checked at this interval regardless of notifications. |
 | `rotation_drain_ms` | `5000` | 0 – 600000 | After rotation, keep reading the old file until it has been idle this long. |
 | `diagnostics` | `"warn"` | `error` … `trace` | Verbosity of logwizz's own messages on stderr. |
@@ -91,6 +91,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | `format` | `"json"` | `json` (JSON Lines) or `human`. |
 | `destination` | `"stdout"` | `stdout` or `stderr`. |
 | `queue_capacity` | `4096` | Maximum events buffered between the reader and the output writer (1 – 1048576). |
+| `max_queue_bytes` | `8388608` | Maximum memory held by buffered events, in bytes (64 KiB – 1 GiB): each event counts its line plus a small fixed overhead. The queue is full when either limit is reached. An event larger than this is still accepted into an empty queue. |
 | `on_full` | `"block"` | Full queue: `block` pauses reading, `drop` discards the event and counts it. See [Backpressure](#backpressure). |
 | `max_excerpt_bytes` | unset | If set (16 – 16 MiB), events include at most this many bytes of the line, cut on a UTF-8 boundary, with `truncated: true`. |
 
@@ -100,7 +101,7 @@ Only `[[files]]` and `[[rules]]` are required.
 |---|---|---|
 | `rate_limit_events` | `0` | Maximum events per rule per window. `0` means unlimited. |
 | `rate_limit_window_secs` | `60` | Length of the fixed rate-limit window. |
-| `dedup_window_secs` | `0` | Suppress an identical (rule, line) pair seen within this many seconds of its first occurrence. `0` disables it. |
+| `dedup_window_secs` | `0` | Suppress an identical (rule, line) pair within this many seconds of the event first emitted for it. `0` disables it. Lines suppressed by the rate limit are not remembered, so a line that was never reported is never treated as a duplicate. |
 | `dedup_max_entries` | `4096` | Maximum remembered pairs. When the table is full and nothing has expired, new lines are emitted but not remembered: deduplication never suppresses an event wrongly. |
 
 Suppressed events are counted (`events_rate_limited`, `events_deduplicated`).
@@ -214,19 +215,20 @@ tick, within the drain window.
 
 ### Lines
 
-- Lines end at `\n`. A trailing `\r` is stripped.
+- Lines end at `\n`. A `\r` immediately before it is part of the terminator:
+  it is stripped and never counts towards `max_line_bytes`.
 - An incomplete trailing line is held, up to `max_line_bytes`, until its
   newline arrives. If its file is truncated, rotated or deleted first, it is
   emitted as is and counted in `partial_lines_flushed`.
-- A line longer than `max_line_bytes` is emitted cut to that length with
-  `truncated: true`. The excess bytes are counted in `bytes_skipped`. Lines are
-  never silently dropped.
+- A line whose content is longer than `max_line_bytes` is emitted cut to that
+  length with `truncated: true`. The excess content bytes are counted in
+  `bytes_skipped`. Lines are never silently dropped.
 
 ### Backpressure
 
 Events pass from the monitor thread to a single output thread through a
-bounded queue (`queue_capacity`). Output is buffered and flushed whenever the
-queue runs empty.
+bounded queue (`queue_capacity` events, `max_queue_bytes` bytes). Output is
+buffered and flushed whenever the queue runs empty.
 
 - `on_full = "block"` (default): the monitor waits for queue space. Unread
   data stays in the log files, so nothing is lost while the process runs,
@@ -248,7 +250,11 @@ lifetime**. It does **not** provide durable or exactly-once processing:
   where reading resumes: `tail` skips anything written while logwizz was
   down, and `beginning` re-emits events for existing content.
 - Events still queued when the process is killed with SIGKILL, or crashes,
-  are lost. On SIGTERM/SIGINT the queue is flushed before exit.
+  are lost. On SIGTERM/SIGINT the queue is flushed before exit. Flushing
+  waits for the output to accept the data, so with a stalled consumer the
+  process does not exit until it is killed (the systemd unit does so after
+  `TimeoutStopSec`).
+- Incomplete trailing lines (no newline yet) are not emitted at shutdown.
 - `copytruncate` is inherently racy. Lines written between the copy and the
   truncation are lost for every reader. Lines written after the truncation
   but before logwizz notices it, beyond the old offset, cannot be told apart
@@ -279,6 +285,44 @@ INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 line
 being drained. All other values are counters since startup. Error counters
 count episodes: a file that stays unreadable is counted once, not once per
 retry.
+
+| Counter | Meaning |
+|---|---|
+| `bytes_read` | Bytes read from monitored files. |
+| `lines_processed` | Lines passed to the rules, including truncated ones. |
+| `lines_truncated` | Lines cut at `max_line_bytes`. |
+| `bytes_skipped` | Content bytes beyond `max_line_bytes` that were not matched. |
+| `partial_lines_flushed` | Unterminated lines emitted because their file was truncated, rotated or deleted. |
+| `rule_matches` | (line, rule) matches, before rate limiting and deduplication. |
+| `events_emitted` | Events accepted into the output queue. An event is written unless the output fails or the process is killed first. |
+| `events_dropped` | Events discarded because the queue was full (`on_full = "drop"`), the output had failed, or shutdown interrupted a blocked send. |
+| `events_rate_limited`, `events_deduplicated` | Matches suppressed by `[limits]`. |
+| `output_errors` | Output write failures (each one stops the daemon). |
+| `read_errors` | Episodes of unreadable files or paths that are not regular files. |
+| `notify_overflows` | inotify queue overflows (each one triggers a full rescan). |
+| `rotations`, `truncations` | Detected replacements and truncations. |
+
+`rule_matches` = `events_emitted` + `events_dropped` + `events_rate_limited` +
+`events_deduplicated`.
+
+### Memory use
+
+Every buffer has a configured bound. The worst case is approximately:
+
+- per monitored file: up to 2 × `max_line_bytes` of incomplete-line data
+  (the current file plus one rotated file being drained)
+- the output queue: `max_queue_bytes`, plus one event
+- the output writer: 64 KiB, plus one formatted event. Escaping can make a
+  formatted event up to about 6 × the line length (`\u0001` for each control
+  byte)
+- deduplication: about 100 bytes × `dedup_max_entries` (≈ 0.4 MiB by default)
+- a fixed 64 KiB read buffer, plus the compiled rules (at most 2 MiB each)
+
+With the defaults, this is about 9 MiB plus 128 KiB per monitored file,
+whatever the log content, on top of a baseline of roughly 5 MiB. With the
+systemd unit's `MemoryMax=128M`, that leaves room for several hundred files.
+If you raise `max_line_bytes`, `max_queue_bytes`, the number of files or
+`dedup_max_entries`, check the sum against `MemoryMax`.
 
 ### Diagnostics
 
@@ -327,12 +371,15 @@ your own log locations before relying on it.
 - Regexes use the Rust `regex` crate, which guarantees linear-time matching
   (no catastrophic backtracking), with a compiled-size limit per pattern.
 - Bounded resources: configuration size (1 MiB), line length, per-file
-  partial-line buffer, event queue, dedup table, rule and file counts.
+  partial-line buffer, event queue (by count and by bytes), dedup table, rule
+  and file counts. See [Memory use](#memory-use).
 - Configured paths are followed if they are symlinks. The identity tracked is
   the target's, and retargeting the link counts as a rotation. Paths are
   validated to be absolute and normalised.
 - A world-writable configuration file is refused.
-- Human output escapes control characters. JSON output is escaped by
+- Human output escapes control characters, Unicode bidi controls,
+  zero-width characters and line separators, so log content cannot inject
+  terminal sequences or visually reorder a line. JSON output is escaped by
   `serde_json`.
 - Diagnostics never contain log line content.
 
@@ -359,8 +406,8 @@ Quality gates (also run in CI):
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked
 cargo build --release --locked
 ```
 
