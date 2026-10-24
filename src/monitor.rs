@@ -111,6 +111,11 @@ impl Monitor {
 
             busy = false;
             for (i, file) in self.files.iter_mut().enumerate() {
+                // A pass can read up to READ_BUDGET_BYTES from every file;
+                // do not make shutdown wait for all of them.
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
                 if !self.watcher.take_dirty(i) {
                     continue;
                 }

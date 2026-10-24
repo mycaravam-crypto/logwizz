@@ -116,10 +116,9 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
 /// Signals handled by the signal thread.
 const HANDLED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGUSR1, libc::SIGHUP];
 
+/// An initialised signal set. `sigset_t` is plain data, so this is `Send`
+/// without any `unsafe impl`.
 struct SigSet(libc::sigset_t);
-
-// SAFETY: sigset_t is plain data; it is only read by sigwait.
-unsafe impl Send for SigSet {}
 
 /// Blocks the handled signals in the calling thread (and so in every thread
 /// spawned afterwards). Must be called before any other thread exists.
