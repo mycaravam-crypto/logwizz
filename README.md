@@ -317,12 +317,18 @@ filesystem, no capabilities, no network, and a `@system-service` system call
 filter. Events go to the journal through stdout.
 
 ```sh
-install -D -m 0640 config/logwizz.example.toml /etc/logwizz/logwizz.toml
+install -D -m 0640 -g adm config/logwizz.example.toml /etc/logwizz/logwizz.toml
 install -m 0644 packaging/logwizz.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now logwizz
 journalctl -u logwizz -o cat -f
 ```
+
+The service user only exists while the service runs, so it reads the
+configuration through its supplementary group: keep the file group-owned by
+`adm` (or the group from your drop-in) and not world-writable. A config that
+only root can read makes `--check-config` fail with "Permission denied" and the
+service never starts.
 
 Read access to logs comes from `SupplementaryGroups=adm`, which is right for
 Debian and Ubuntu. On other distributions, grant read access with a group or
@@ -331,6 +337,7 @@ an ACL. For example, `/var/log/secure` on RHEL-family systems is root-only:
 ```sh
 groupadd -r logwizz
 setfacl -m g:logwizz:r /var/log/secure
+chgrp logwizz /etc/logwizz/logwizz.toml
 # Then set SupplementaryGroups=logwizz in a drop-in (systemctl edit logwizz).
 ```
 
