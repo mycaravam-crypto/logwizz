@@ -9,4 +9,6 @@ pub mod engine;
 pub mod error;
 pub mod event;
 pub mod metrics;
+pub mod monitor;
 pub mod reader;
+pub mod watcher;
