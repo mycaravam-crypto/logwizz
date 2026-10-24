@@ -19,6 +19,7 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 
 ## Contents
 
+- [Installing](#installing)
 - [Building](#building)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -29,6 +30,25 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 - [Security](#security)
 - [Compatibility and limitations](#compatibility-and-limitations)
 - [Development](#development)
+- [CI and releases](#ci-and-releases)
+
+## Installing
+
+Each [GitHub release](https://github.com/mycaravam-crypto/logwizz/releases)
+has a static Linux x64 binary (musl, no runtime dependencies, any
+distribution), the systemd unit, the example configuration and
+`SHA256SUMS.txt`:
+
+```sh
+v=X.Y.Z   # the release to install
+base=https://github.com/mycaravam-crypto/logwizz/releases/download/v$v
+curl -fL -O "$base/logwizz-v$v-linux-x64" -O "$base/SHA256SUMS.txt"
+sha256sum --ignore-missing -c SHA256SUMS.txt
+install -m 0755 "logwizz-v$v-linux-x64" /usr/bin/logwizz
+logwizz --version
+```
+
+Then continue with [Deployment with systemd](#deployment-with-systemd).
 
 ## Building
 
@@ -358,15 +378,16 @@ your own log locations before relying on it.
 Quality gates (also run in CI):
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
 cargo build --release --locked
+bash .github/scripts/semver-next.test.sh
 ```
 
-CI also builds the release binary with the MSRV toolchain
-(`cargo +1.85 build --release --locked`). Raising the MSRV is a deliberate
-change: update `rust-version` in `Cargo.toml`, the CI job and this README
+The `msrv` CI job builds the release binary with the toolchain named by
+`rust-version` in `Cargo.toml` (locally: `cargo +1.85 build --release --locked`).
+Raising the MSRV is a deliberate change: update `rust-version` and this README
 together.
 
 Benchmarks and load tests are run separately:
@@ -391,6 +412,22 @@ Layout:
 | `src/metrics.rs` | Atomic counters |
 | `tests/` | Config, reader, rotation, monitoring loop, end-to-end and load tests |
 | `benches/` | Criterion benchmarks |
+
+## CI and releases
+
+GitHub Actions run on every pull request and on `main`:
+
+- **test**: `fmt`, `clippy -D warnings`, `cargo test`, the release build and the systemd unit check
+  (`systemd-analyze verify` and a `security` threshold); the `msrv` job builds the release binary on the
+  `rust-version` from `Cargo.toml`.
+- **security**: Trivy scans `Cargo.lock` for CVEs (weekly too). A fixable CRITICAL fails the job.
+- **codeql**: CodeQL `security-and-quality` analysis of the Rust code and the workflows (weekly too).
+- **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has
+  `logwizz-vX.Y.Z-linux-x64` (static, musl), `logwizz.service`, `logwizz.example.toml` and `SHA256SUMS.txt`, with
+  generated release notes. Git tags are the source of truth. A PR label picks the bump: `release:patch` (the default),
+  `release:minor`, `release:major`, or `release:none` to skip the release. The version shows in `logwizz --version`.
+
+Dependabot proposes weekly dependency and action updates (pinned by SHA) after a 7-day cooldown.
 
 ## License
 

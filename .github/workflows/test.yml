@@ -1,0 +1,45 @@
+# Format, lint and tests on every pull request and on main. Linux is the only target platform: the main job also
+# builds the release binary and verifies the systemd unit; the msrv job proves the daemon still builds on the declared
+# rust-version (tests are not built there, since the criterion dev-dependency needs a newer toolchain).
+name: test
+on:
+  pull_request:
+  push: { branches: [main] }
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --all-targets --locked
+      # The release binary, so a PR that breaks the shipping build fails here rather than after merge.
+      - run: cargo build --release --locked
+      - name: Verify systemd unit
+        run: |
+          sudo install -m 0755 target/release/logwizz /usr/bin/logwizz
+          systemd-analyze verify packaging/logwizz.service
+          # Fails if the exposure score (0-100 scale; 4 = "0.4 SAFE") exceeds 10.
+          systemd-analyze security --offline=yes --threshold=10 packaging/logwizz.service
+      - name: Check versioning policy
+        run: bash .github/scripts/semver-next.test.sh
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Install the rust-version from Cargo.toml
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal && rustup default "$msrv"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --release --locked
+        env:
+          RUSTFLAGS: -D warnings
