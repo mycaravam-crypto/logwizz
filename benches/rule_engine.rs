@@ -4,17 +4,20 @@
 //!   realistic syslog-style lines (~100 bytes each).
 //! * `pipeline/*` measures reading a page-cached file, splitting lines and
 //!   evaluating rules: everything except event formatting and output.
+//! * `limiter/*` measures deduplication with a full table whose entries
+//!   have not expired, fed a stream of unique lines (the worst case).
 //!
 //! Run with `cargo bench --bench rule_engine`.
 
 use std::hint::black_box;
 use std::io::Write;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use logwizz::config::{self, StartupMode};
+use logwizz::config::{self, Limits, StartupMode};
+use logwizz::dispatcher::Limiter;
 use logwizz::engine::Engine;
 use logwizz::metrics::Metrics;
 use logwizz::reader::{READ_BUF_BYTES, ReaderOptions, TailedFile};
@@ -115,5 +118,33 @@ fn bench_pipeline(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_match, bench_pipeline);
+fn bench_limiter(c: &mut Criterion) {
+    let mut g = c.benchmark_group("limiter");
+    g.throughput(Throughput::Elements(1));
+    for entries in [4096, 262_144] {
+        let limits = Limits {
+            rate_limit_events: 0,
+            rate_limit_window_secs: 60,
+            dedup_window_secs: 3600,
+            dedup_max_entries: entries,
+        };
+        let mut l = Limiter::new(&limits, 1);
+        let start = Instant::now();
+        let mut n = 0u64;
+        // Fill the table; nothing expires within the benchmark.
+        while (n as usize) < entries {
+            l.admit(0, "r", &n.to_le_bytes(), start);
+            n += 1;
+        }
+        g.bench_function(BenchmarkId::new("dedup_full_unique", entries), |b| {
+            b.iter(|| {
+                n += 1;
+                l.admit(0, "r", black_box(&n.to_le_bytes()), start)
+            })
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, bench_match, bench_pipeline, bench_limiter);
 criterion_main!(benches);
