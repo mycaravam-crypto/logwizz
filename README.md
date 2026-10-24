@@ -75,7 +75,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | Key | Default | Range | Meaning |
 |---|---|---|---|
 | `startup_mode` | `"tail"` | `tail`, `beginning` | Where reading starts for files that exist at startup. `tail` skips existing content, including the remainder of a line still being written. Files that appear later are always read from the beginning. |
-| `max_line_bytes` | `65536` | 256 – 16 MiB | Longer lines are cut to this length, flagged `truncated`, and counted. This is also the cap on buffered incomplete-line data per file. |
+| `max_line_bytes` | `65536` | 256 – 16 MiB | Longer lines are cut to this length, flagged `truncated`, and counted. This is also the cap on buffered incomplete-line data per file (plus one byte for a trailing `\r`). |
 | `reconcile_interval_ms` | `1000` | 50 – 600000 | Every file is re-checked at this interval regardless of notifications. |
 | `rotation_drain_ms` | `5000` | 0 – 600000 | After rotation, keep reading the old file until it has been idle this long. |
 | `diagnostics` | `"warn"` | `error` … `trace` | Verbosity of logwizz's own messages on stderr. |
@@ -211,13 +211,15 @@ tick, within the drain window.
 
 ### Lines
 
-- Lines end at `\n`. A trailing `\r` is stripped.
-- An incomplete trailing line is held, up to `max_line_bytes`, until its
-  newline arrives. If its file is truncated, rotated or deleted first, it is
-  emitted as is and counted in `partial_lines_flushed`.
+- Lines end at `\n`. A trailing `\r` is stripped, and does not count towards
+  `max_line_bytes`.
+- An incomplete trailing line is held, up to `max_line_bytes` (plus one byte
+  for a possible `\r` terminator), until its newline arrives. If its file is
+  truncated, rotated or deleted first, it is emitted as is and counted in
+  `partial_lines_flushed`.
 - A line longer than `max_line_bytes` is emitted cut to that length with
-  `truncated: true`. The excess bytes are counted in `bytes_skipped`. Lines are
-  never silently dropped.
+  `truncated: true`. The excess bytes, not counting the terminator, are counted
+  in `bytes_skipped`. Lines are never silently dropped.
 
 ### Backpressure
 
