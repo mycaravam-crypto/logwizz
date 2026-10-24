@@ -132,7 +132,9 @@ echo "=== failed syscalls (all kinds)"; sed -E 's/^[0-9]+ +//; s/\(.*\) += -1 / 
 fi
 
 # 11. No warnings or errors from logwizz itself (diagnostics go to the journal via stderr).
-bad=$(events | grep -v '^{' | grep -E ' (WARN|ERROR) ' | grep -v 'termination requested')
+# Expected: the truncation warning from the copytruncate step.
+bad=$(events | grep -v '^{' | grep -E ' (WARN|ERROR) ' | grep -v 'termination requested' |
+  grep -v 'file truncated; reading from the beginning path=/var/log/lwtest.log')
 bad_other=$(grep -v 'cannot access file; will retry path=/var/log/lwtest.log error=Permission denied' <<<"$bad")
 if [[ -n $bad && -z $bad_other ]]; then res no_warnings KNOWN "only the create-then-chown retry warning"
 elif [[ -z $bad ]]; then res no_warnings PASS; else res no_warnings FAIL "$(echo "$bad_other" | head -5 | tr '\n' ';')"; fi
@@ -180,6 +182,6 @@ if [[ $result == success && $st == 0 ]] && events | grep -q "logwizz stopped" &&
 else res clean_stop FAIL "Result=$result status=$st took ${dur}s"; fi
 
 loops=$(events | grep -c '"file":"/var/log/syslog".*logwizz\[')
-res syslog_feedback_loop $([[ $loops == 0 ]] && echo PASS || echo FAIL) "$loops events re-matched logwizz's own output in /var/log/syslog"
+res syslog_feedback_loop $([[ $loops == 0 ]] && echo PASS || echo FAIL) "$loops events re-matched logwizz's own output in /var/log/syslog (#21)"
 echo "=== journal (tail)"; journalctl -u logwizz -o short-precise --no-pager | tail -40
 echo "SUMMARY pass=$pass fail=$fail known=$known"

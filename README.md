@@ -344,9 +344,18 @@ chgrp logwizz /etc/logwizz/logwizz.toml
 The unit passes `systemd-analyze verify`, and `systemd-analyze security`
 rates it **0.4 SAFE**. The remaining findings are deliberate:
 `SupplementaryGroups` provides log access, and `PrivateUsers=yes` would unmap
-that group and break it. The hardening has been verified statically only. It
-has not yet been exercised on a booted systemd host, so check it against
-your own log locations before relying on it.
+that group and break it. The unit has also been exercised on a booted Ubuntu
+24.04 host (systemd 255): reading `auth.log` and `syslog` through `adm`, real
+logrotate runs, no sandbox denials, restart on failure and a clean stop. See
+[docs/HOST-VERIFICATION.md](docs/HOST-VERIFICATION.md), and rerun it with
+`tests/host/run-vm.sh`.
+
+> **Do not watch a file that receives logwizz's own output.** On Debian and
+> Ubuntu, rsyslog copies the journal, and with it every event logwizz writes,
+> into `/var/log/syslog`. If that file is watched, matching events are matched
+> again (bounded only by rsyslog's message size). Until this is fixed (#21),
+> watch narrower files such as `/var/log/kern.log`, or keep rules from matching
+> logwizz's own lines.
 
 ## Security
 
