@@ -17,6 +17,13 @@ pub enum ConfigError {
     #[error("configuration file {} exceeds the maximum size of {limit} bytes", path.display())]
     TooLarge { path: PathBuf, limit: u64 },
 
+    #[error(
+        "configuration file {} is writable by all users (mode {mode:o}); \
+         restrict it, e.g. chmod 0640",
+        path.display()
+    )]
+    WorldWritable { path: PathBuf, mode: u32 },
+
     #[error("configuration file {} is not valid UTF-8", path.display())]
     NotUtf8 { path: PathBuf },
 

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Test
+        run: cargo test --all-targets --locked
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Verify systemd unit
+        run: |
+          sudo install -m 0755 target/release/logwizz /usr/bin/logwizz
+          systemd-analyze verify packaging/logwizz.service
+          # Fails if the exposure score (0-100 scale; 4 = "0.4 SAFE") exceeds 10.
+          systemd-analyze security --offline=yes --threshold=10 packaging/logwizz.service
+
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit dependencies
+        run: cargo audit

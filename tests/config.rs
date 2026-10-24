@@ -103,3 +103,17 @@ fn version_and_help_work() {
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("--config") && help.contains("--check-config"));
 }
+
+#[test]
+fn world_writable_config_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("logwizz.toml");
+    fs::write(&path, VALID).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    let out = check(&path);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("writable by all users"));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+    assert!(check(&path).status.success());
+}

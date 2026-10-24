@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use memchr::memmem;
@@ -260,6 +261,15 @@ fn read_bounded(path: &Path) -> Result<String, ConfigError> {
         source,
     };
     let file = File::open(path).map_err(io_err)?;
+    // Anyone who can write the configuration controls what is monitored
+    // and reported, so a world-writable file is refused outright.
+    let mode = file.metadata().map_err(io_err)?.mode();
+    if mode & 0o002 != 0 {
+        return Err(ConfigError::WorldWritable {
+            path: path.to_path_buf(),
+            mode: mode & 0o7777,
+        });
+    }
     let mut bytes = Vec::new();
     file.take(MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut bytes)
