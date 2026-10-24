@@ -108,6 +108,9 @@ pub struct General {
     pub diagnostics: DiagnosticLevel,
     /// Interval for periodic statistics diagnostics; 0 disables them.
     pub stats_interval_secs: u64,
+    /// After rotation, keep reading the old file until it has been idle
+    /// for this long.
+    pub rotation_drain_ms: u64,
 }
 
 impl Default for General {
@@ -118,6 +121,7 @@ impl Default for General {
             reconcile_interval_ms: 1000,
             diagnostics: DiagnosticLevel::Warn,
             stats_interval_secs: 0,
+            rotation_drain_ms: 5000,
         }
     }
 }
@@ -293,6 +297,13 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         "general.reconcile_interval_ms",
         general.reconcile_interval_ms,
         MIN_RECONCILE_MS,
+        MAX_RECONCILE_MS,
+    );
+    check_range(
+        &mut problems,
+        "general.rotation_drain_ms",
+        general.rotation_drain_ms,
+        0,
         MAX_RECONCILE_MS,
     );
     check_range(

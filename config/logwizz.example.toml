@@ -14,6 +14,9 @@ max_line_bytes = 65536
 # recovers missed notifications and is the only detection mechanism on
 # filesystems without inotify support (e.g. NFS).
 reconcile_interval_ms = 1000
+# After a rotation (the path now refers to a new file), keep reading the old
+# file until it has produced no new data for this long.
+rotation_drain_ms = 5000
 # Verbosity of logwizz's own diagnostics on stderr:
 # error, warn, info, debug, trace.
 diagnostics = "warn"
