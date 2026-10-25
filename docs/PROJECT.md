@@ -28,7 +28,7 @@ Window: 12:40–12:41 UTC
 Source: 203.0.113.8
 ```
 
-This is an illustrative target format, not a claim that aggregation is already implemented. The existing notifier currently consumes event-level data; changing it to aggregate-first delivery is a separate implementation step.
+The notifier now emits this aggregate-first shape for Telegram, ntfy and webhook delivery. See [Notification operations](NOTIFICATIONS.md) for setup and delivery semantics.
 
 Design requirements:
 
@@ -54,10 +54,8 @@ Design requirements:
 
 ## Near-term priorities
 
-1. Define the summary event and aggregation window semantics.
-2. Implement and test aggregation in the notifier path.
-3. Add Telegram delivery using a bot token and chat ID, with secret-safe configuration.
-4. Update README and operational docs to describe implemented behavior accurately.
-5. Consider additional transports only after the shared summary interface is stable.
+1. Validate aggregate behavior and delivery reliability on real hosts.
+2. Improve retry observability and make pending-summary backlog easy to inspect.
+3. Consider additional transports only after the shared summary interface is stable.
 
 The README should remain a short entry point. Detailed configuration and runtime behavior belong in the [technical reference](REFERENCE.md); focused operational material belongs in the relevant guide.
