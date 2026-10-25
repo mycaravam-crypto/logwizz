@@ -81,12 +81,16 @@ rsyslog does not read, and events are read with `journalctl --namespace=logwizz 
 or newer. The example config now watches `/var/log/kern.log` instead of `/var/log/syslog`, so it is also safe outside
 the unit. Verified on the host: no self-matches, and no logwizz lines in `/var/log/syslog`.
 
-### 3. Transient EACCES on files that are created and then chowned (#22, open)
+### 3. Transient EACCES on files that are created and then chowned (#22, fixed)
 
 This was seen in 1 of 2 runs. `install -o root -g adm`, and likewise logrotate's `create`, makes the file root-only
 before changing its group. When logwizz opened the file in that window, it logged `cannot access file; will retry`
 and counted `read_errors=1`. The retry succeeded and nothing was lost, but the warning and the counter are
 misleading.
+
+Fixed: a file that appears or is rotated in while logwizz runs gets one silent retry on `EACCES`. The error is
+warned about and counted only if the next poll fails too. A file that is unreadable at startup is still reported at
+once.
 
 ### 4. Confirmed as documented
 
@@ -100,7 +104,7 @@ misleading.
 | # | Improvement | Tracking |
 |---|---|---|
 | 1 | ~~Stop the syslog feedback loop~~ (done: `LogNamespace=`, and `kern.log` in the example config) | #21 |
-| 2 | Retry a fresh `EACCES` once before warning and counting it | #22 |
+| 2 | ~~Retry a fresh `EACCES` once before warning and counting it~~ (done) | #22 |
 | 3 | Run `tests/host/run-vm.sh` in CI; GitHub runners have KVM, so a run takes about a minute | #24 |
 | 4 | Run the host check on RHEL-family images together with the drop-in | #13 |
 | 5 | Re-run the benchmarks on a dedicated machine before publishing numbers | #7, item 5 |

@@ -390,6 +390,9 @@ pub struct TailedFile {
     current: Option<Source>,
     draining: Option<(Source, Instant)>,
     state: PathState,
+    /// The file whose open was last refused with `EACCES` without being
+    /// reported; see `open`.
+    access_retried: Option<FileId>,
 }
 
 impl TailedFile {
@@ -402,6 +405,7 @@ impl TailedFile {
             current: None,
             draining: None,
             state: PathState::Ok,
+            access_retried: None,
         }
     }
 
@@ -561,6 +565,21 @@ impl TailedFile {
                 self.set_state(PathState::Missing, m);
                 return;
             }
+            // Tools such as `install -o -g` and logrotate's `create` make a new
+            // file root-only before they chown or chmod it. Opening it in
+            // that window is not a real permission problem, so a file that
+            // appeared or was rotated in while we run gets one silent retry;
+            // the next poll (its chmod or chown wakes us) reports the error if
+            // it is still there. A file present at startup is reported at once.
+            Err(e)
+                if e.kind() == ErrorKind::PermissionDenied
+                    && self.startup.is_none()
+                    && self.access_retried != Some(FileId::of(path_meta)) =>
+            {
+                self.access_retried = Some(FileId::of(path_meta));
+                debug!(path = %self.path.display(), "new file not readable yet; will retry");
+                return;
+            }
             Err(e) => {
                 self.report_open_error(&e, m);
                 return;
@@ -609,6 +628,9 @@ impl TailedFile {
             splitter.skip = Skip::StartupPartial;
         }
         debug!(path = %self.path.display(), offset, "opened");
+        // Inode numbers are reused, so a later file with this identity gets
+        // its own retry.
+        self.access_retried = None;
         self.current = Some(Source {
             file,
             id,

@@ -356,7 +356,7 @@ retry.
 | `events_dropped` | Events discarded because the queue was full (`on_full = "drop"`), the output had failed, or shutdown interrupted a blocked send. |
 | `events_rate_limited`, `events_deduplicated` | Matches suppressed by `[limits]`. |
 | `output_errors` | Output write failures (each one stops the daemon). |
-| `read_errors` | Episodes of unreadable files or paths that are not regular files. |
+| `read_errors` | Episodes of unreadable files or paths that are not regular files. A new file that is briefly unreadable while its owner or mode is set is not counted. |
 | `notify_overflows` | inotify queue overflows (each one triggers a full rescan). |
 | `rotations`, `truncations` | Detected replacements and truncations. |
 
