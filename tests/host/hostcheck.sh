@@ -104,7 +104,7 @@ class H(http.server.BaseHTTPRequestHandler):
         body = s.rfile.read(int(s.headers["Content-Length"])).decode()
         rec = {"title": s.headers["Title"], "auth": s.headers["Authorization"], "body": body}
         with open(sys.argv[1], "a") as f: f.write(json.dumps(rec) + "\n")
-        s.send_response(200); s.end_headers()
+        s.send_response(200); s.send_header("Content-Length", "0"); s.end_headers()
     def log_message(*a): pass
 srv = http.server.HTTPServer(("127.0.0.1", 8099), H)
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -118,7 +118,7 @@ systemctl daemon-reload; systemctl start logwizz-notify; sleep 2
 # The notifier's own messages, for FAIL details.
 notify_log() { journalctl -u logwizz-notify -n 15 -o cat --no-pager | tr '\n' ';'; }
 # Sum of webhook summary counts for a rule; a window boundary may split them.
-summed() { jq -rs --arg r "$1" '[.[] | .body | fromjson? | select(.rule == $r) | .count] | add // 0' /root/sink.txt 2>/dev/null || echo 0; }
+summed() { local n; n=$(jq -rs --arg r "$1" '[.[] | .body | fromjson? | select(.rule == $r) | .count] | add // 0' /root/sink.txt 2>/dev/null | head -1); echo "${n:-0}"; }
 wait_count() { local t=0; while (( t < 300 )); do (( $(summed "$1") >= $2 )) && return 0; sleep 0.1; t=$((t+1)); done; return 1; }
 logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY1 from 192.0.2.1"
 logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY1 from 192.0.2.1"
@@ -135,7 +135,8 @@ else
   res notify FAIL "ssh=$(summed ssh_failed_login) lwtest=$(summed lwtest) $(tr '\n' ' ' < /root/sink.txt) $(notify_log)"
 fi
 # ntfy format with an auth header, and log content that tries shell injection.
-: > /root/sink.txt
+# Start from an empty queue and sink so only the NOTIFY3 summary is seen.
+systemctl stop logwizz-notify; rm -f /var/lib/private/logwizz-notify/agg-*.json; : > /root/sink.txt
 printf 'NOTIFY_URL=https://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
 systemctl restart logwizz-notify; sleep 2
 logger -p auth.notice "Failed password for LWZ-NOTIFY3 '\$(touch \$STATE_DIRECTORY/pwned)' \`touch \$STATE_DIRECTORY/pwned\` from 192.0.2.1"
