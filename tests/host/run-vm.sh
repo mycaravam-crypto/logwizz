@@ -10,13 +10,15 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 work=${WORK:-$(mktemp -d)}
-image_url=https://cloud-images.ubuntu.com/noble/current
-image=noble-server-cloudimg-amd64.img
+image_url=${IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current}
+image=${IMAGE:-noble-server-cloudimg-amd64.img}
+checksum_file=${CHECKSUM_FILE:-SHA256SUMS}
+checksum_tool=${CHECKSUM_TOOL:-sha256sum}
 
 cd "$work"
 if [[ ! -f $image ]]; then
   curl -fsSL -o "$image" "$image_url/$image"
-  curl -fsSL "$image_url/SHA256SUMS" | grep " \*\?$image\$" | sha256sum -c -
+  curl -fsSL $image_url/$checksum_file | grep " \*\?$image\$" | "$checksum_tool" -c -
 fi
 
 rm -rf payload && mkdir payload
@@ -32,10 +34,15 @@ cp "$root/packaging/logwizz.service" "$root/packaging/logwizz-notify" "$root/pac
 
 cat > user-data <<'EOF'
 #cloud-config
-package_update: false
-packages: []
+package_update: true
+packages:
+  - rsyslog
+  - jq
+  - nftables
+  - nmap
+  - strace
 runcmd:
-  - [sh, -c, 'mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
+  - [sh, -c, 'systemctl enable --now rsyslog; mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
 EOF
 printf 'instance-id: lwz-hostcheck\nlocal-hostname: lwz-hostcheck\n' > meta-data
 cloud-localds seed.iso user-data meta-data
