@@ -17,21 +17,28 @@
 //! retargeted symlink moves the extra watch; unused extra watches are
 //! removed.
 //!
+//! For a `[[files]] glob`, its directory is watched, and every creation,
+//! removal or rename of a matching name marks the glob dirty, so the monitor
+//! lists the directory again. Files found that way get a slot like any other
+//! file; slots are reused when the files stop being followed.
+//!
 //! Memory use is bounded: the notify thread only sets per-file dirty flags
 //! and performs a coalescing `try_send` on a capacity-1 wake channel. There
 //! is no event queue that can grow without limit.
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 
-use notify::event::AccessKind;
+use notify::event::{AccessKind, ModifyKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use tracing::{debug, warn};
 
+use crate::config::Glob;
 use crate::metrics::{self, Metrics};
 use crate::reader::FileId;
 
@@ -53,14 +60,37 @@ pub fn wake_channel() -> (Waker, Receiver<()>) {
     (Waker(tx), rx)
 }
 
+/// Followed files by slot. The slots of files that are no longer followed
+/// are reused, so these only grow to the largest number of files followed
+/// at once.
+#[derive(Debug, Default)]
+struct Files {
+    dirty: Vec<AtomicBool>,
+    /// Followed path -> slot.
+    by_path: HashMap<PathBuf, usize>,
+    /// Watched directory -> slots of the followed files in it.
+    by_dir: HashMap<PathBuf, Vec<usize>>,
+}
+
+impl Files {
+    fn mark(&self, slots: &[usize]) {
+        for &i in slots {
+            self.dirty[i].store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// State shared with the notify thread.
 #[derive(Debug)]
 struct Shared {
-    dirty: Vec<AtomicBool>,
-    /// Configured file path -> file index.
-    by_path: HashMap<PathBuf, usize>,
-    /// Watched directory -> indices of files in it.
-    by_dir: HashMap<PathBuf, Vec<usize>>,
+    /// Changed only by the monitor thread.
+    files: RwLock<Files>,
+    globs: Vec<Glob>,
+    /// Per glob: a matching name may have appeared or disappeared, so its
+    /// directory should be listed again.
+    glob_dirty: Vec<AtomicBool>,
+    /// Directory searched by a glob -> indices of the globs.
+    glob_dirs: HashMap<PathBuf, Vec<usize>>,
     /// Set when the kernel dropped events or a watch broke; makes every
     /// file dirty and triggers re-registration of directory watches.
     rescan: AtomicBool,
@@ -73,9 +103,9 @@ struct Shared {
 /// Where events for symlink targets arrive.
 #[derive(Debug, Default)]
 struct Targets {
-    /// Event path of a target -> indices of the files that point at it.
+    /// Event path of a target -> slots of the files that point at it.
     files: HashMap<PathBuf, Vec<usize>>,
-    /// Extra watched directory -> indices of files with a target in it.
+    /// Extra watched directory -> slots of files with a target in it.
     dirs: HashMap<PathBuf, Vec<usize>>,
 }
 
@@ -91,8 +121,15 @@ struct Target {
 }
 
 impl Shared {
+    fn files(&self) -> RwLockReadGuard<'_, Files> {
+        self.files.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn mark_all(&self) {
-        for d in &self.dirty {
+        for d in &self.files().dirty {
+            d.store(true, Ordering::Relaxed);
+        }
+        for d in &self.glob_dirty {
             d.store(true, Ordering::Relaxed);
         }
     }
@@ -120,31 +157,56 @@ impl Shared {
         if matches!(event.kind, EventKind::Access(AccessKind::Open(_))) {
             return;
         }
+        // Only these can change which names exist in a directory.
+        let names_changed = matches!(
+            event.kind,
+            EventKind::Create(_)
+                | EventKind::Remove(_)
+                | EventKind::Modify(ModifyKind::Name(_))
+                | EventKind::Any
+                | EventKind::Other
+        );
+        let files = self.files();
         let targets = self.targets.read().unwrap_or_else(PoisonError::into_inner);
         let mut hit = false;
         for path in &event.paths {
-            if let Some(&i) = self.by_path.get(path) {
-                self.dirty[i].store(true, Ordering::Relaxed);
+            if let Some(&i) = files.by_path.get(path) {
+                files.dirty[i].store(true, Ordering::Relaxed);
                 hit = true;
             }
-            if let Some(files) = targets.files.get(path) {
-                for &i in files {
-                    self.dirty[i].store(true, Ordering::Relaxed);
+            if let Some(slots) = targets.files.get(path) {
+                files.mark(slots);
+                hit = true;
+            }
+            if names_changed {
+                let globs = path.parent().and_then(|d| self.glob_dirs.get(d));
+                if let (Some(globs), Some(name)) = (globs, path.file_name()) {
+                    for &g in globs {
+                        if self.globs[g].matches(name.as_bytes()) {
+                            self.glob_dirty[g].store(true, Ordering::Relaxed);
+                            hit = true;
+                        }
+                    }
                 }
+            }
+            // An event on a watched directory itself (removed, moved): its
+            // watch is likely gone and must be re-established.
+            let dir_files = files.by_dir.get(path).or_else(|| targets.dirs.get(path));
+            if let Some(slots) = dir_files {
+                files.mark(slots);
+                self.rescan.store(true, Ordering::Relaxed);
                 hit = true;
             }
-            let dir_files = self.by_dir.get(path).or_else(|| targets.dirs.get(path));
-            if let Some(files) = dir_files {
-                // An event on the watched directory itself (removed, moved):
-                // its watch is likely gone and must be re-established.
-                for &i in files {
-                    self.dirty[i].store(true, Ordering::Relaxed);
+            if let Some(globs) = self.glob_dirs.get(path) {
+                for &g in globs {
+                    self.glob_dirty[g].store(true, Ordering::Relaxed);
                 }
                 self.rescan.store(true, Ordering::Relaxed);
                 hit = true;
             }
         }
         drop(targets);
+        drop(files);
         if hit {
             self.waker.wake();
         }
@@ -164,21 +226,29 @@ struct DirWatch {
 }
 
 /// Owns the inotify watcher and the per-file dirty flags.
+///
+/// Files are identified by *slot*. Configured paths have the fixed slots
+/// `0..files.len()`; files found by globs are added and removed while
+/// running, and their slots are reused.
 pub struct Watcher {
     inner: Option<RecommendedWatcher>,
     shared: Arc<Shared>,
     dirs: Vec<DirWatch>,
-    files: Vec<PathBuf>,
-    /// Resolved symlink target of each file (`None` if not a symlink).
+    /// Followed path of each slot; `None` for a free slot.
+    files: Vec<Option<PathBuf>>,
+    free: Vec<usize>,
+    /// Resolved symlink target of each slot (`None` if not a symlink).
     targets: Vec<Option<Target>>,
 }
 
 impl Watcher {
-    /// Sets up notifications for `files`. With `notifications = false`, or
-    /// if inotify is unavailable (e.g. `fs.inotify.max_user_instances`
-    /// exhausted), only periodic reconciliation detects changes.
+    /// Sets up notifications for `files` and for the directories of
+    /// `globs`. With `notifications = false`, or if inotify is unavailable
+    /// (e.g. `fs.inotify.max_user_instances` exhausted), only periodic
+    /// reconciliation detects changes.
     pub fn new(
         files: &[PathBuf],
+        globs: &[Glob],
         notifications: bool,
         waker: Waker,
         metrics: Arc<Metrics>,
@@ -191,8 +261,13 @@ impl Watcher {
             let dir = path.parent().unwrap_or(Path::new("/")).to_path_buf();
             by_dir.entry(dir).or_default().push(i);
         }
+        let mut glob_dirs: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        for (g, glob) in globs.iter().enumerate() {
+            glob_dirs.entry(glob.dir.clone()).or_default().push(g);
+        }
         let mut dirs: Vec<DirWatch> = by_dir
             .keys()
+            .chain(glob_dirs.keys().filter(|d| !by_dir.contains_key(*d)))
             .map(|p| DirWatch {
                 path: p.clone(),
                 watched: None,
@@ -203,9 +278,14 @@ impl Watcher {
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
 
         let shared = Arc::new(Shared {
-            dirty: files.iter().map(|_| AtomicBool::new(true)).collect(),
-            by_path,
-            by_dir,
+            files: RwLock::new(Files {
+                dirty: files.iter().map(|_| AtomicBool::new(true)).collect(),
+                by_path,
+                by_dir,
+            }),
+            globs: globs.to_vec(),
+            glob_dirty: globs.iter().map(|_| AtomicBool::new(true)).collect(),
+            glob_dirs,
             rescan: AtomicBool::new(false),
             targets: RwLock::default(),
             waker,
@@ -231,7 +311,8 @@ impl Watcher {
             shared,
             dirs,
             targets: vec![None; files.len()],
-            files: files.to_vec(),
+            files: files.iter().cloned().map(Some).collect(),
+            free: Vec::new(),
         };
         watcher.reconcile_watches();
         watcher
@@ -241,17 +322,81 @@ impl Watcher {
         self.inner.is_some()
     }
 
-    /// Clears and returns the dirty flag of file `i`.
+    /// Number of slots, free ones included.
+    pub fn slots(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Starts following `path`, which must be in the directory of a glob,
+    /// and returns its slot. The new slot is dirty.
+    pub fn add(&mut self, path: PathBuf) -> usize {
+        let dir = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+        let mut files = self
+            .shared
+            .files
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let i = match self.free.pop() {
+            Some(i) => i,
+            None => {
+                files.dirty.push(AtomicBool::new(false));
+                self.files.push(None);
+                self.targets.push(None);
+                self.files.len() - 1
+            }
+        };
+        files.dirty[i].store(true, Ordering::Relaxed);
+        files.by_path.insert(path.clone(), i);
+        files.by_dir.entry(dir).or_default().push(i);
+        self.files[i] = Some(path);
+        i
+    }
+
+    /// Stops following the file in slot `i`; the slot may be reused.
+    pub fn remove(&mut self, i: usize) {
+        let Some(path) = self.files[i].take() else {
+            return;
+        };
+        let mut files = self
+            .shared
+            .files
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        files.by_path.remove(&path);
+        if let Some(slots) = path.parent().and_then(|d| files.by_dir.get_mut(d)) {
+            slots.retain(|&s| s != i);
+        }
+        files.dirty[i].store(false, Ordering::Relaxed);
+        self.free.push(i);
+        // Its symlink target, if any, is dropped by the next
+        // `refresh_targets`.
+    }
+
+    /// The slot of `path` if it is followed.
+    pub fn slot_of(&self, path: &Path) -> Option<usize> {
+        self.shared.files().by_path.get(path).copied()
+    }
+
+    /// Clears and returns the dirty flag of slot `i`.
     pub fn take_dirty(&self, i: usize) -> bool {
-        self.shared.dirty[i].swap(false, Ordering::Relaxed)
+        self.shared.files().dirty[i].swap(false, Ordering::Relaxed)
     }
 
     pub fn mark_dirty(&self, i: usize) {
-        self.shared.dirty[i].store(true, Ordering::Relaxed);
+        self.shared.files().dirty[i].store(true, Ordering::Relaxed);
     }
 
     pub fn mark_all_dirty(&self) {
         self.shared.mark_all();
+    }
+
+    /// Clears and returns the dirty flag of glob `g`.
+    pub fn take_glob_dirty(&self, g: usize) -> bool {
+        self.shared.glob_dirty[g].swap(false, Ordering::Relaxed)
+    }
+
+    pub fn mark_glob_dirty(&self, g: usize) {
+        self.shared.glob_dirty[g].store(true, Ordering::Relaxed);
     }
 
     /// Re-registers directory watches if a rescan was requested.
@@ -277,7 +422,11 @@ impl Watcher {
         if self.inner.is_none() {
             return;
         }
-        let targets: Vec<Option<Target>> = self.files.iter().map(|p| self.resolve(p)).collect();
+        let targets: Vec<Option<Target>> = self
+            .files
+            .iter()
+            .map(|p| p.as_deref().and_then(|p| self.resolve(p)))
+            .collect();
         if targets == self.targets {
             return;
         }
@@ -388,18 +537,22 @@ impl Watcher {
                     dir.watched = Some(id);
                     dir.failed = false;
                     // Anything may have happened while unwatched.
+                    let files = self.shared.files();
                     let targets = self
                         .shared
                         .targets
                         .read()
                         .unwrap_or_else(PoisonError::into_inner);
-                    let files = if dir.extra {
+                    let slots = if dir.extra {
                         targets.dirs.get(&dir.path)
                     } else {
-                        self.shared.by_dir.get(&dir.path)
+                        files.by_dir.get(&dir.path)
                     };
-                    for &i in files.into_iter().flatten() {
-                        self.shared.dirty[i].store(true, Ordering::Relaxed);
+                    files.mark(slots.map_or(&[], Vec::as_slice));
+                    if !dir.extra {
+                        for &g in self.shared.glob_dirs.get(&dir.path).into_iter().flatten() {
+                            self.shared.glob_dirty[g].store(true, Ordering::Relaxed);
+                        }
                     }
                 }
                 Err(e) => {
@@ -426,7 +579,7 @@ impl Watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{Flag, ModifyKind};
+    use notify::event::{CreateKind, Flag};
 
     fn setup() -> (Watcher, Receiver<()>, Arc<Metrics>) {
         let files = [
@@ -436,7 +589,7 @@ mod tests {
         ];
         let (waker, rx) = wake_channel();
         let metrics = Arc::new(Metrics::default());
-        let w = Watcher::new(&files, false, waker, Arc::clone(&metrics));
+        let w = Watcher::new(&files, &[], false, waker, Arc::clone(&metrics));
         for i in 0..files.len() {
             w.take_dirty(i);
         }
@@ -507,9 +660,87 @@ mod tests {
         assert!(rx.try_recv().is_ok());
     }
 
+    fn glob(text: &str, exclude: Option<&str>) -> Glob {
+        let exclude = exclude.map_or(String::new(), |e| format!("exclude = {e:?}\n"));
+        let toml = format!(
+            "[[files]]\nglob = {text:?}\n{exclude}\
+             [[rules]]\nid = \"r\"\nmatch_type = \"literal\"\npattern = \"x\"\nseverity = \"info\"\n"
+        );
+        crate::config::parse(&toml, Path::new("t"))
+            .unwrap()
+            .globs
+            .remove(0)
+    }
+
+    #[test]
+    fn added_slots_receive_events_and_are_reused() {
+        let (waker, rx) = wake_channel();
+        let globs = [glob("/logs/*.log", None)];
+        let mut w = Watcher::new(
+            &[PathBuf::from("/logs/a.log")],
+            &globs,
+            false,
+            waker,
+            Arc::new(Metrics::default()),
+        );
+        assert!(w.take_dirty(0) && w.take_glob_dirty(0), "all start dirty");
+        let b = w.add("/logs/b.log".into());
+        assert_eq!(b, 1);
+        assert!(w.take_dirty(b), "new slot is dirty");
+        assert_eq!(w.slot_of(Path::new("/logs/b.log")), Some(b));
+
+        w.shared.handle(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/logs/b.log".into())
+        ));
+        assert!(w.take_dirty(b) && !w.take_dirty(0));
+        assert!(!w.take_glob_dirty(0), "content changes need no listing");
+        assert!(rx.try_recv().is_ok());
+
+        w.remove(b);
+        assert_eq!(w.slot_of(Path::new("/logs/b.log")), None);
+        w.shared.handle(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/logs/b.log".into())
+        ));
+        assert!(!w.take_dirty(b));
+        assert_eq!(w.add("/logs/c.log".into()), b, "slot reused");
+        assert_eq!(w.slots(), 2);
+    }
+
+    #[test]
+    fn matching_name_changes_mark_the_glob() {
+        let (waker, rx) = wake_channel();
+        let globs = [glob("/logs/*.log", Some("old*"))];
+        let w = Watcher::new(&[], &globs, false, waker, Arc::new(Metrics::default()));
+        w.take_glob_dirty(0);
+        let create = |p: &str| Event::new(EventKind::Create(CreateKind::File)).add_path(p.into());
+
+        for p in ["/logs/x.txt", "/logs/old.log", "/other/new.log"] {
+            w.shared.handle(Ok(create(p)));
+            assert!(!w.take_glob_dirty(0), "{p}");
+        }
+        assert!(rx.try_recv().is_err());
+        w.shared.handle(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/logs/new.log".into())
+        ));
+        assert!(
+            !w.take_glob_dirty(0),
+            "writes to unfollowed files are ignored"
+        );
+
+        w.shared.handle(Ok(create("/logs/new.log")));
+        assert!(w.take_glob_dirty(0));
+        assert!(rx.try_recv().is_ok());
+        w.shared.handle(Ok(Event::new(EventKind::Remove(
+            notify::event::RemoveKind::Folder,
+        ))
+        .add_path("/logs".into())));
+        assert!(w.take_glob_dirty(0), "directory replaced");
+        assert!(w.shared.rescan.load(Ordering::Relaxed));
+    }
+
     fn real_watcher(files: &[PathBuf]) -> Watcher {
         let (waker, _rx) = wake_channel();
-        let w = Watcher::new(files, true, waker, Arc::new(Metrics::default()));
+        let w = Watcher::new(files, &[], true, waker, Arc::new(Metrics::default()));
         assert!(w.is_active());
         w
     }

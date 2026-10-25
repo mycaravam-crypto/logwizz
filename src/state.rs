@@ -252,16 +252,12 @@ pub fn save(path: &Path, files: &[(&Path, FileState)]) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-/// The offsets of all files at one moment, and how many events had been
-/// queued by then.
+/// The offsets of all open files at one moment, and how many events had
+/// been queued by then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub events: u64,
-    /// The configured files when the checkpoint was taken; a configuration
-    /// reload can change them while older checkpoints are still pending.
-    pub paths: Arc<[PathBuf]>,
-    /// The position of each of `paths`, by index.
-    pub files: Vec<Option<FileState>>,
+    pub files: Vec<(Arc<Path>, FileState)>,
 }
 
 /// Checkpoints recorded by the monitor and not yet saved.
@@ -272,11 +268,7 @@ pub struct Pending {
 
 impl Pending {
     pub fn push(&mut self, cp: Checkpoint) {
-        if self
-            .queue
-            .back()
-            .is_some_and(|b| b.paths == cp.paths && b.files == cp.files)
-        {
+        if self.queue.back().is_some_and(|b| b.files == cp.files) {
             // Nothing moved; keep the older (more easily flushed) one.
             return;
         }
@@ -364,27 +356,17 @@ impl StateWriter {
 
 struct Saver {
     path: PathBuf,
-    /// The last checkpoint saved, to skip rewriting an unchanged file.
-    last: Option<Checkpoint>,
+    last: Option<Vec<(Arc<Path>, FileState)>>,
     last_warning: Option<Instant>,
     metrics: Arc<Metrics>,
 }
 
 impl Saver {
     fn save(&mut self, cp: Checkpoint) {
-        if self
-            .last
-            .as_ref()
-            .is_some_and(|l| l.paths == cp.paths && l.files == cp.files)
-        {
+        if self.last.as_ref() == Some(&cp.files) {
             return;
         }
-        let entries: Vec<(&Path, FileState)> = cp
-            .paths
-            .iter()
-            .zip(&cp.files)
-            .filter_map(|(p, st)| st.map(|st| (p.as_path(), st)))
-            .collect();
+        let entries: Vec<(&Path, FileState)> = cp.files.iter().map(|(p, st)| (&**p, *st)).collect();
         match save(&self.path, &entries) {
             Ok(()) => {
                 metrics::inc(&self.metrics.state_saves);
@@ -392,7 +374,7 @@ impl Saver {
                     info!(path = %self.path.display(), "state file written again");
                 }
                 debug!(files = entries.len(), "offsets saved");
-                self.last = Some(cp);
+                self.last = Some(cp.files);
             }
             Err(e) => {
                 metrics::inc(&self.metrics.state_save_errors);
@@ -429,8 +411,7 @@ mod tests {
     fn cp(events: u64, offset: u64) -> Checkpoint {
         Checkpoint {
             events,
-            paths: [PathBuf::from("/a.log"), PathBuf::from("/b.log")].into(),
-            files: vec![Some(st(offset)), None],
+            files: vec![(Path::new("/a.log").into(), st(offset))],
         }
     }
 
@@ -509,7 +490,7 @@ mod tests {
         let mut p = Pending::default();
         p.push(cp(1, 1));
         let mut reloaded = cp(2, 1);
-        reloaded.paths = [PathBuf::from("/c.log"), PathBuf::from("/a.log")].into();
+        reloaded.files = vec![(Path::new("/c.log").into(), st(1))];
         p.push(reloaded.clone());
         assert_eq!(p.queue.len(), 2, "same offsets, other files");
         assert_eq!(p.take_flushed(2), Some(reloaded));
@@ -528,8 +509,7 @@ mod tests {
         saver.save(cp(0, 5));
         assert_eq!(load(&path)[Path::new("/a.log")], st(5));
         let mut reloaded = cp(1, 5);
-        reloaded.paths = [PathBuf::from("/c.log"), PathBuf::from("/a.log")].into();
-        reloaded.files = vec![None, Some(st(7))];
+        reloaded.files = vec![(Path::new("/a.log").into(), st(7))];
         saver.save(reloaded);
         let map = load(&path);
         assert_eq!(map.len(), 1);
