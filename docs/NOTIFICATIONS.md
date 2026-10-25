@@ -36,7 +36,7 @@ logwizz detects locally. The separate `logwizz-notify` service reads structured 
    journalctl -u logwizz-notify -f
    ```
 
-Keep `notify.env` owned by root and mode `0600`. The service writes the Telegram API URL, including the bot token, to a mode-`0600` file inside its private runtime directory. The token is not passed as a curl command-line argument. TLS verification remains enabled.
+Keep `notify.env` owned by root and mode `0600`. The service writes the Telegram API URL, including the bot token, to a mode-`0600` file inside its private runtime directory. Webhook/ntfy endpoint URLs and optional auth headers are also stored in private runtime files rather than passed as curl arguments. TLS verification remains enabled.
 
 ## Summary behavior
 
@@ -54,7 +54,7 @@ The same aggregate summary is supported by:
 - `NOTIFY_KIND=ntfy` with `NOTIFY_URL=https://ntfy.sh/your-topic`
 - `NOTIFY_KIND=webhook` with `NOTIFY_URL=https://your-endpoint.example/path`
 
-For these transports, `NOTIFY_AUTH` can contain an Authorization header value, such as `Bearer token`. It is written to a private file rather than included in curl arguments. Use HTTPS endpoints.
+For these transports, `NOTIFY_AUTH` can contain an Authorization header value, such as `Bearer token`. It is written to a private file rather than included in curl arguments. Endpoint URLs are also kept in a private curl config file rather than the process argument list. Use HTTPS endpoints.
 
 ## Delivery and failure semantics
 
