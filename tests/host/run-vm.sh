@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots a throwaway Ubuntu 24.04 cloud VM, installs logwizz and the systemd unit
+# Boots a throwaway Ubuntu/Debian cloud VM, installs logwizz and the systemd unit
 # exactly as the README documents, and runs hostcheck.sh inside it. Prints the
 # RESULT lines and exits nonzero on any FAIL. See docs/HOST-VERIFICATION.md.
 #
@@ -18,7 +18,7 @@ checksum_tool=${CHECKSUM_TOOL:-sha256sum}
 cd "$work"
 if [[ ! -f $image ]]; then
   curl -fsSL -o "$image" "$image_url/$image"
-  curl -fsSL $image_url/$checksum_file | grep " \*\?$image\$" | "$checksum_tool" -c -
+  curl -fsSL "$image_url/$checksum_file" | grep " \*\?$image\$" | "$checksum_tool" -c -
 fi
 
 rm -rf payload && mkdir payload
