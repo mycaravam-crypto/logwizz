@@ -305,6 +305,37 @@ fn sigusr1_logs_statistics_and_limits_are_counted() {
     assert!(d.stop().success());
 }
 
+#[test]
+fn excluded_sources_are_not_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    write_new(&auth, "");
+    let rule = r#"
+[[rules]]
+id = "ssh_from"
+match_type = "regex"
+pattern = 'Accepted password .* from (?P<src>\S+)'
+severity = "notice"
+[rules.exclude]
+src = ["192.0.2.0/24"]
+"#;
+    let mut d = Daemon::start(dir.path(), &config("", &[&auth], rule));
+    thread::sleep(Duration::from_millis(300));
+    append(
+        &auth,
+        "Accepted password for a from 192.0.2.7
+Accepted password for b from 198.51.100.7
+",
+    );
+    assert_eq!(d.event()["fields"]["src"], "198.51.100.7");
+    assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
+    d.signal(libc::SIGUSR1);
+    let stats = d.wait_stderr("statistics");
+    assert!(stats.contains("rule_matches=2"), "{stats}");
+    assert!(stats.contains("matches_excluded=1"), "{stats}");
+    assert!(d.stop().success());
+}
+
 const NEW_RULE: &str = r#"
 [[rules]]
 id = "new_rule"

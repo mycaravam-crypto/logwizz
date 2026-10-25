@@ -4,9 +4,10 @@
 //! [`Config`] with every rule compiled, or an error that lists every problem
 //! found. Nothing is activated from a partially valid file.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::Read;
+use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -42,6 +43,8 @@ pub const MAX_WINDOW_SECS: u64 = 86_400;
 pub const MAX_DEDUP_ENTRIES: usize = 1 << 20;
 pub const MAX_THRESHOLD_GROUPS: usize = 1 << 20;
 pub const MAX_THRESHOLD_COUNT: u32 = 10_000;
+/// Cap on the `exclude` values of one rule.
+pub const MAX_EXCLUDE_VALUES: usize = 1024;
 /// Cap on the distinct-value state one threshold rule may hold.
 pub const MAX_DISTINCT_BYTES: u64 = 64 << 20;
 /// Upper bound on the compiled size of a single regex, so that a pathological
@@ -230,6 +233,9 @@ struct RawRule {
     #[serde(default)]
     action: Action,
     threshold: Option<RawThreshold>,
+    /// Capture group name -> values whose matches are discarded.
+    #[serde(default)]
+    exclude: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,6 +269,72 @@ pub struct Threshold {
     pub count: u32,
     pub window: Duration,
     pub cooldown: Duration,
+}
+
+/// Matches whose capture group `group` has one of `values` are discarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exclusion {
+    pub group: usize,
+    pub values: Vec<ExcludeValue>,
+}
+
+/// One `exclude` value: an IP address or network, or any other exact text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExcludeValue {
+    Net(IpNet),
+    Text(String),
+}
+
+/// An IP network. A single address is a network with the full prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpNet {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl IpNet {
+    /// Parses `192.0.2.0/24`, `2001:db8::/32` or a single address. Host bits
+    /// below the prefix are cleared.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let (addr, prefix) = match text.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (text, None),
+        };
+        let addr: IpAddr = addr
+            .parse()
+            .map_err(|_| format!("`{text}` is not an IP address or network"))?;
+        let addr = addr.to_canonical();
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            None => max,
+            Some(p) => match p.parse::<u8>() {
+                Ok(p) if p <= max => p,
+                _ => return Err(format!("`{text}`: prefix length must be 0..={max}")),
+            },
+        };
+        Ok(IpNet {
+            addr: mask(addr, prefix),
+            prefix,
+        })
+    }
+
+    pub fn contains(&self, addr: IpAddr) -> bool {
+        let addr = addr.to_canonical();
+        addr.is_ipv4() == self.addr.is_ipv4() && mask(addr, self.prefix) == self.addr
+    }
+}
+
+fn mask(addr: IpAddr, prefix: u8) -> IpAddr {
+    match addr {
+        IpAddr::V4(a) => {
+            let m = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+            IpAddr::V4((u32::from(a) & m).into())
+        }
+        IpAddr::V6(a) => {
+            let m = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            IpAddr::V6((u128::from(a) & m).into())
+        }
+    }
 }
 
 /// What a matching rule does with the line.
@@ -324,6 +396,8 @@ pub struct Rule {
     pub action: Action,
     /// Set: the rule emits one event per reached threshold, not per match.
     pub threshold: Option<Threshold>,
+    /// Matches with these capture values are discarded before thresholds.
+    pub exclude: Vec<Exclusion>,
     pub matcher: Matcher,
 }
 
@@ -337,6 +411,25 @@ impl Rule {
             && self.severity == other.severity
             && self.action == other.action
             && self.threshold == other.threshold
+            && self.exclude == other.exclude
+    }
+
+    /// Whether a match with these capture values (from
+    /// [`Matcher::fields`]) is discarded by `exclude`.
+    pub fn excludes(&self, fields: &[(usize, Box<[u8]>)]) -> bool {
+        self.exclude.iter().any(|ex| {
+            let Some((_, value)) = fields.iter().find(|(g, _)| *g == ex.group) else {
+                return false;
+            };
+            let Ok(text) = std::str::from_utf8(value) else {
+                return false;
+            };
+            let ip = text.parse::<IpAddr>().ok();
+            ex.values.iter().any(|v| match v {
+                ExcludeValue::Net(net) => ip.is_some_and(|ip| net.contains(ip)),
+                ExcludeValue::Text(t) => t == text,
+            })
+        })
     }
 }
 
@@ -657,10 +750,11 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 Some(t) => Some(check_threshold(t, r.action, &matcher, &limits)?),
                 None => None,
             };
-            Ok((matcher, threshold))
+            let exclude = check_exclude(&r.exclude, r.action, &matcher)?;
+            Ok((matcher, threshold, exclude))
         });
         match compiled {
-            Ok((matcher, threshold)) if r.enabled => rules.push(Rule {
+            Ok((matcher, threshold, exclude)) if r.enabled => rules.push(Rule {
                 id: r.id,
                 description: r.description,
                 match_type: r.match_type,
@@ -668,6 +762,7 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 severity,
                 action: r.action,
                 threshold,
+                exclude,
                 matcher,
             }),
             Ok(_) => disabled_rules += 1,
@@ -848,6 +943,47 @@ fn check_threshold(
         window: Duration::from_secs(t.window_secs),
         cooldown: Duration::from_secs(t.cooldown_secs),
     })
+}
+
+fn check_exclude(
+    raw: &BTreeMap<String, Vec<String>>,
+    action: Action,
+    matcher: &Matcher,
+) -> Result<Vec<Exclusion>, String> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    if action == Action::Ignore {
+        return Err("an ignore rule emits nothing, so it takes no exclude".to_string());
+    }
+    let total: usize = raw.values().map(Vec::len).sum();
+    if total > MAX_EXCLUDE_VALUES {
+        return Err(format!(
+            "exclude: too many values: {total} (maximum {MAX_EXCLUDE_VALUES})"
+        ));
+    }
+    raw.iter()
+        .map(|(name, values)| {
+            let group = matcher.group_index(name).ok_or_else(|| {
+                format!("exclude.{name}: the pattern has no capture group named `{name}`")
+            })?;
+            let values = values
+                .iter()
+                .map(|v| {
+                    if v.is_empty() {
+                        Err(format!("exclude.{name}: values must not be empty"))
+                    } else if v.contains('/') || v.parse::<IpAddr>().is_ok() {
+                        IpNet::parse(v)
+                            .map(ExcludeValue::Net)
+                            .map_err(|msg| format!("exclude.{name}: {msg}"))
+                    } else {
+                        Ok(ExcludeValue::Text(v.clone()))
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Exclusion { group, values })
+        })
+        .collect()
 }
 
 /// Name used as the event `file` of journal entries.
@@ -1144,6 +1280,60 @@ mod tests {
             )
             .contains("too large for `distinct`")
         );
+    }
+
+    #[test]
+    fn exclude_values() {
+        let rule = |extra: &str| {
+            format!(
+                "[[files]]\npath = \"/var/log/auth.log\"\n[[rules]]\nid = \"ssh\"\n\
+                 match_type = \"regex\"\npattern = 'from (?P<src>\\S+) user (?P<user>\\S+)'\n\
+                 severity = \"warning\"\n{extra}\n"
+            )
+        };
+        let cfg = parse_str(&rule(
+            "[rules.exclude]\nsrc = [\"192.0.2.10\", \"10.0.0.0/8\", \"2001:db8::/32\"]\n\
+             user = [\"backup\"]",
+        ))
+        .unwrap();
+        let r = &cfg.rules[0];
+        let excluded = |line: &str| r.excludes(&r.matcher.fields(line.as_bytes()));
+        assert!(excluded("from 192.0.2.10 user root"));
+        assert!(excluded("from 10.200.3.4 user root"));
+        assert!(excluded("from ::ffff:10.1.1.1 user root"), "IPv4-mapped");
+        assert!(excluded("from 2001:db8:1::5 user root"));
+        assert!(excluded("from 198.51.100.1 user backup"), "text value");
+        assert!(!excluded("from 192.0.2.11 user root"));
+        assert!(!excluded("from 11.0.0.1 user root"));
+        assert!(!excluded("from 2001:db9::1 user root"));
+        assert!(!excluded("from 10.0.0.1x user root"), "not an address");
+        assert!(!excluded("from 192.0.2.11 user backups"));
+
+        // Host bits are cleared; /0 matches every address of its family.
+        let net = IpNet::parse("192.0.2.77/24").unwrap();
+        assert!(net.contains("192.0.2.1".parse().unwrap()));
+        assert!(
+            IpNet::parse("0.0.0.0/0")
+                .unwrap()
+                .contains("8.8.8.8".parse().unwrap())
+        );
+        assert!(
+            !IpNet::parse("0.0.0.0/0")
+                .unwrap()
+                .contains("::1".parse().unwrap())
+        );
+
+        let p = |extra: &str| problems(&rule(extra)).join("; ");
+        assert!(p("[rules.exclude]\nnope = [\"x\"]").contains("no capture group named `nope`"));
+        assert!(p("[rules.exclude]\nsrc = [\"10.0.0.0/33\"]").contains("prefix length"));
+        assert!(p("[rules.exclude]\nsrc = [\"10.0.0/8\"]").contains("not an IP address"));
+        assert!(p("[rules.exclude]\nsrc = [\"\"]").contains("must not be empty"));
+        let many = vec!["\"x\""; MAX_EXCLUDE_VALUES + 1].join(",");
+        assert!(p(&format!("[rules.exclude]\nsrc = [{many}]")).contains("too many values"));
+        let ignore = "[[files]]\npath = \"/x\"\n[[rules]]\nid = \"i\"\nmatch_type = \"regex\"\n\
+                      pattern = '(?P<src>x)'\naction = \"ignore\"\n[rules.exclude]\nsrc = [\"x\"]\n\
+                      [[rules]]\nid = \"e\"\nmatch_type = \"literal\"\npattern = \"y\"\nseverity = \"info\"\n";
+        assert!(problems(ignore).join("; ").contains("takes no exclude"));
     }
 
     #[test]

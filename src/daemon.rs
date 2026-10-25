@@ -199,6 +199,10 @@ impl Pipeline {
             let r = &engine.rules()[rule];
             let now = Instant::now();
             let fields = r.matcher.fields(line.bytes);
+            if r.excludes(&fields) {
+                metrics::inc(&metrics.matches_excluded);
+                return;
+            }
             let threshold = match &r.threshold {
                 None => None,
                 Some(t) => match thresholds.observe(rule, &r.id, t, file, &fields, now) {
