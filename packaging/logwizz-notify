@@ -49,12 +49,12 @@ flush_file() {
   count=$(jq -r '.retry_count // 0' "$file" 2>/dev/null) || count=0
   if (( count > 7 )); then delay=300; else delay=$(( 2 ** (count + 1) )); (( delay > 300 )) && delay=300; fi
   retry_after=$(( $(date -u +%s) + delay ))
-  tmp="$file.tmp.$"
+  tmp="$file.tmp.$$"
   if jq --argjson count "$((count + 1))" --argjson retry_after "$retry_after" '.retry_count=$count | .retry_after=$retry_after' "$file" > "$tmp"; then mv -f "$tmp" "$file"; else rm -f "$tmp"; fi
   log "delivery failed; summary retained for retry in about ${delay}s"
   return 1
 }
-flush_due() { local now file bucket failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; retry_after=$(jq -r '.retry_after // 0' "$file") || retry_after=0
+flush_due() { local now file bucket retry_after failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; retry_after=$(jq -r '.retry_after // 0' "$file") || retry_after=0
     if (( bucket + window <= now && retry_after <= now )); then flush_file "$file" false || failed=1; fi; done; return "$failed"; }
 flush_all() { local now file bucket partial failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; partial=false; (( bucket + window > now )) && partial=true; flush_file "$file" "$partial" || failed=1; done; return "$failed"; }
 flush_progress() { local file bucket failed=0; for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { failed=1; continue; }; if (( bucket < latest_bucket )); then flush_file "$file" false || failed=1; fi; done; return "$failed"; }
