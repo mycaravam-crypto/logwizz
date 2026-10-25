@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use memchr::memmem;
 use regex::bytes::RegexBuilder;
@@ -36,6 +37,10 @@ pub const MAX_RULE_ID_BYTES: usize = 64;
 pub const MIN_EXCERPT_BYTES: usize = 16;
 pub const MAX_WINDOW_SECS: u64 = 86_400;
 pub const MAX_DEDUP_ENTRIES: usize = 1 << 20;
+pub const MAX_THRESHOLD_GROUPS: usize = 1 << 20;
+pub const MAX_THRESHOLD_COUNT: u32 = 10_000;
+/// Cap on the distinct-value state one threshold rule may hold.
+pub const MAX_DISTINCT_BYTES: u64 = 64 << 20;
 /// Upper bound on the compiled size of a single regex, so that a pathological
 /// pattern cannot consume unbounded memory at load time.
 pub const REGEX_SIZE_LIMIT: usize = 2 * 1024 * 1024;
@@ -179,6 +184,8 @@ pub struct Limits {
     pub dedup_window_secs: u64,
     /// Upper bound on remembered (rule, line) pairs for deduplication.
     pub dedup_max_entries: usize,
+    /// Upper bound on the groups each threshold rule tracks.
+    pub threshold_max_groups: usize,
 }
 
 impl Default for Limits {
@@ -188,6 +195,7 @@ impl Default for Limits {
             rate_limit_window_secs: 60,
             dedup_window_secs: 0,
             dedup_max_entries: 4096,
+            threshold_max_groups: 4096,
         }
     }
 }
@@ -213,6 +221,40 @@ struct RawRule {
     severity: Option<Severity>,
     #[serde(default)]
     action: Action,
+    threshold: Option<RawThreshold>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawThreshold {
+    group_by: Option<String>,
+    distinct: Option<String>,
+    count: u32,
+    window_secs: u64,
+    #[serde(default)]
+    cooldown_secs: u64,
+}
+
+/// What a threshold rule groups its matches by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupBy {
+    /// One group for all matches.
+    All,
+    /// One group per monitored file.
+    File,
+    /// One group per value of this capture group (index).
+    Capture(usize),
+}
+
+/// A validated `[rules.threshold]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Threshold {
+    pub group_by: GroupBy,
+    /// Count distinct values of this capture group instead of matches.
+    pub distinct: Option<usize>,
+    pub count: u32,
+    pub window: Duration,
+    pub cooldown: Duration,
 }
 
 /// What a matching rule does with the line.
@@ -255,6 +297,8 @@ pub struct Rule {
     /// Unused for `Action::Ignore` rules, which emit nothing.
     pub severity: Severity,
     pub action: Action,
+    /// Set: the rule emits one event per reached threshold, not per match.
+    pub threshold: Option<Threshold>,
     pub matcher: Matcher,
 }
 
@@ -267,6 +311,7 @@ impl Rule {
             && self.pattern == other.pattern
             && self.severity == other.severity
             && self.action == other.action
+            && self.threshold == other.threshold
     }
 }
 
@@ -419,6 +464,13 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         1,
         MAX_DEDUP_ENTRIES,
     );
+    check_range(
+        &mut problems,
+        "limits.threshold_max_groups",
+        limits.threshold_max_groups,
+        1,
+        MAX_THRESHOLD_GROUPS,
+    );
 
     if raw_files.len() > MAX_FILES {
         problems.push(format!(
@@ -492,14 +544,22 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         };
         // Disabled rules are still compiled so that mistakes surface now,
         // not when someone later flips `enabled = true`.
-        match compile(r.match_type, &r.pattern) {
-            Ok(matcher) if r.enabled => rules.push(Rule {
+        let compiled = compile(r.match_type, &r.pattern).and_then(|matcher| {
+            let threshold = match &r.threshold {
+                Some(t) => Some(check_threshold(t, r.action, &matcher, &limits)?),
+                None => None,
+            };
+            Ok((matcher, threshold))
+        });
+        match compiled {
+            Ok((matcher, threshold)) if r.enabled => rules.push(Rule {
                 id: r.id,
                 description: r.description,
                 match_type: r.match_type,
                 pattern: r.pattern,
                 severity,
                 action: r.action,
+                threshold,
                 matcher,
             }),
             Ok(_) => disabled_rules += 1,
@@ -583,6 +643,68 @@ fn check_rule_id(id: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn check_threshold(
+    t: &RawThreshold,
+    action: Action,
+    matcher: &Matcher,
+    limits: &Limits,
+) -> Result<Threshold, String> {
+    if action == Action::Ignore {
+        return Err("an ignore rule emits nothing, so it takes no threshold".to_string());
+    }
+    let capture = |key: &str, name: &str| {
+        matcher.group_index(name).ok_or_else(|| {
+            format!("threshold.{key}: the pattern has no capture group named `{name}`")
+        })
+    };
+    let group_by = match t.group_by.as_deref() {
+        None => GroupBy::All,
+        Some("file") => GroupBy::File,
+        Some(name) => GroupBy::Capture(capture("group_by", name)?),
+    };
+    let distinct = t
+        .distinct
+        .as_deref()
+        .map(|n| capture("distinct", n))
+        .transpose()?;
+    if !(1..=MAX_THRESHOLD_COUNT).contains(&t.count) {
+        return Err(format!(
+            "threshold.count must be between 1 and {MAX_THRESHOLD_COUNT}, got {}",
+            t.count
+        ));
+    }
+    if !(1..=MAX_WINDOW_SECS).contains(&t.window_secs) {
+        return Err(format!(
+            "threshold.window_secs must be between 1 and {MAX_WINDOW_SECS}, got {}",
+            t.window_secs
+        ));
+    }
+    if t.cooldown_secs > MAX_WINDOW_SECS {
+        return Err(format!(
+            "threshold.cooldown_secs must be at most {MAX_WINDOW_SECS}, got {}",
+            t.cooldown_secs
+        ));
+    }
+    // Distinct values are kept as 8-byte hashes in hash sets: about 16 bytes
+    // each, for up to `count` values per group.
+    let distinct_bytes = limits.threshold_max_groups as u64 * u64::from(t.count) * 16;
+    if distinct.is_some() && distinct_bytes > MAX_DISTINCT_BYTES {
+        return Err(format!(
+            "threshold.count × limits.threshold_max_groups is too large for `distinct` \
+             (about {} MiB of state; maximum {} MiB)",
+            distinct_bytes >> 20,
+            MAX_DISTINCT_BYTES >> 20
+        ));
+    }
+    Ok(Threshold {
+        group_by,
+        distinct,
+        count: t.count,
+        window: Duration::from_secs(t.window_secs),
+        cooldown: Duration::from_secs(t.cooldown_secs),
+    })
 }
 
 fn compile(match_type: MatchType, pattern: &str) -> Result<Matcher, String> {
@@ -777,6 +899,67 @@ mod tests {
         let cfg = parse_str(&ok).unwrap();
         assert_eq!(cfg.rules[0].action, Action::Ignore);
         assert_eq!(cfg.rules[1].action, Action::Emit);
+    }
+
+    #[test]
+    fn threshold_validation() {
+        let rule = |pattern: &str, extra: &str, threshold: &str| {
+            format!(
+                "[[files]]\npath = \"/var/log/kern.log\"\n[[rules]]\nid = \"scan\"\n\
+                 match_type = \"regex\"\npattern = '{pattern}'\n{extra}\n[rules.threshold]\n{threshold}\n\
+                 [[rules]]\nid = \"other\"\nmatch_type = \"literal\"\npattern = \"x\"\nseverity = \"info\"\n"
+            )
+        };
+        let fw = r"SRC=(?P<src>\S+) DPT=(?P<dpt>\d+)";
+        let sev = "severity = \"critical\"";
+        let cfg = parse_str(&rule(
+            fw,
+            sev,
+            "group_by = \"src\"\ndistinct = \"dpt\"\ncount = 20\nwindow_secs = 10\ncooldown_secs = 300",
+        ))
+        .unwrap();
+        let t = cfg.rules[0].threshold.as_ref().unwrap();
+        assert_eq!(
+            (t.group_by, t.distinct, t.count),
+            (GroupBy::Capture(1), Some(2), 20)
+        );
+        assert_eq!(
+            (t.window, t.cooldown),
+            (Duration::from_secs(10), Duration::from_secs(300))
+        );
+        let file = parse_str(&rule(
+            "^",
+            sev,
+            "group_by = \"file\"\ncount = 1\nwindow_secs = 1",
+        ))
+        .unwrap();
+        assert_eq!(
+            file.rules[0].threshold.as_ref().unwrap().group_by,
+            GroupBy::File
+        );
+
+        let p = |pattern: &str, extra: &str, t: &str| problems(&rule(pattern, extra, t)).join("; ");
+        let base = "count = 5\nwindow_secs = 10";
+        assert!(
+            p(fw, sev, &format!("group_by = \"nope\"\n{base}"))
+                .contains("no capture group named `nope`")
+        );
+        assert!(p(fw, sev, &format!("distinct = \"x\"\n{base}")).contains("threshold.distinct"));
+        assert!(p(fw, sev, "count = 0\nwindow_secs = 10").contains("threshold.count"));
+        assert!(p(fw, sev, "count = 10001\nwindow_secs = 10").contains("threshold.count"));
+        assert!(p(fw, sev, "count = 5\nwindow_secs = 0").contains("threshold.window_secs"));
+        assert!(p(fw, sev, &format!("{base}\ncooldown_secs = 86401")).contains("cooldown_secs"));
+        assert!(p(fw, "action = \"ignore\"", base).contains("takes no threshold"));
+        assert!(parse_str(&rule(fw, sev, &format!("{base}\nbogus = 1"))).is_err());
+        // distinct state is bounded: 4096 groups × 10000 values is too much.
+        assert!(
+            p(
+                fw,
+                sev,
+                "group_by = \"src\"\ndistinct = \"dpt\"\ncount = 10000\nwindow_secs = 10"
+            )
+            .contains("too large for `distinct`")
+        );
     }
 
     #[test]

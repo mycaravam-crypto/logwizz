@@ -486,3 +486,62 @@ fn ignore_rules_and_catch_all_report_unknown_lines() {
     assert!(stats.contains("lines_ignored=2 rule_matches=1"), "{stats}");
     assert!(d.stop().success());
 }
+
+#[test]
+fn threshold_rule_reports_a_port_scan_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let kern = dir.path().join("kern.log");
+    write_new(&kern, "");
+    let rules = r#"
+[[rules]]
+id = "port_scan"
+match_type = "regex"
+pattern = 'logwizz-drop: .*SRC=(?P<src>\S+) .*DPT=(?P<dpt>\d+)'
+severity = "critical"
+[rules.threshold]
+group_by = "src"
+distinct = "dpt"
+count = 20
+window_secs = 10
+cooldown_secs = 300
+"#;
+    let mut d = Daemon::start(dir.path(), &config("", &[&kern], rules));
+    thread::sleep(Duration::from_millis(300));
+    let fw = |src: &str, dpt: u32| {
+        format!(
+            "Oct 25 10:00:00 web1 kernel: logwizz-drop: IN=eth0 OUT= SRC={src} DST=198.51.100.1 \
+             LEN=44 PROTO=TCP SPT=40000 DPT={dpt} WINDOW=1024 RES=0x00 SYN URGP=0\n"
+        )
+    };
+    let mut lines = String::new();
+    // A busy client hitting one port many times is not a scan.
+    for _ in 0..50 {
+        lines.push_str(&fw("192.0.2.10", 443));
+    }
+    // A scanner: 100 distinct ports, reported once (then the cooldown).
+    for port in 1..=100 {
+        lines.push_str(&fw("203.0.113.66", port));
+    }
+    append(&kern, &lines);
+    let ev = d.event();
+    assert_eq!(ev["rule"], "port_scan");
+    assert_eq!(ev["severity"], "critical");
+    assert_eq!(ev["fields"]["src"], "203.0.113.66");
+    assert_eq!(ev["fields"]["dpt"], "20");
+    assert_eq!(
+        ev["threshold"],
+        serde_json::json!({"group": "203.0.113.66", "count": 20, "window_secs": 10})
+    );
+    assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
+    d.signal(libc::SIGUSR1);
+    let stats = d.wait_stderr("statistics");
+    for expected in [
+        "rule_matches=150",
+        "threshold_absorbed=149",
+        "threshold_fired=1",
+        "events_emitted=1",
+    ] {
+        assert!(stats.contains(expected), "{expected} missing: {stats}");
+    }
+    assert!(d.stop().success());
+}

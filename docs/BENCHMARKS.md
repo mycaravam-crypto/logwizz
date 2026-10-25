@@ -98,6 +98,21 @@ rules, without formatting or output. Each figure is the median estimate.
 | pipeline/literal/10 | 58.7 ms | 6.8 M lines/s |
 | pipeline/regex/10 | 151 ms | 2.6 M lines/s |
 
+`threshold/*` (2026-10-25, same system class) times one matching
+firewall-log line through capture extraction and a `group_by = "src"`,
+`distinct = "dpt"`, `count = 20` threshold:
+
+| Benchmark | Time per match | Throughput |
+|---|---|---|
+| threshold/one_scanner | 1.43 µs | 0.70 M matches/s |
+| threshold/new_sources_full_table | 1.77 µs | 0.57 M matches/s |
+
+Most of that is the capturing regex search (two `.*`), not the table.
+`new_sources_full_table` feeds a new source on every match into a full
+4096-group table: eviction of an eighth at a time keeps it within 25 % of the
+single-group case. The documented firewall rules limit logging to a few
+hundred lines per second, far below this.
+
 Cost grows linearly with the number of rules, because every rule is
 evaluated against every line. Even 50 never-matching case-insensitive regex
 rules stay well above the throughput target, so combining rules into a

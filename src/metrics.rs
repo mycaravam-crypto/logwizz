@@ -59,6 +59,13 @@ counters! {
     /// Lines that matched an `ignore` rule.
     lines_ignored,
     rule_matches,
+    /// Matches of threshold rules that did not reach their threshold, or
+    /// fell into its cooldown.
+    threshold_absorbed,
+    /// Events produced by reached thresholds.
+    threshold_fired,
+    /// Threshold groups dropped because a rule's group table was full.
+    threshold_evictions,
     events_emitted,
     /// Events dropped because the output queue was full (`on_full = "drop"`).
     events_dropped,

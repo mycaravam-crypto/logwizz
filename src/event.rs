@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
+use crate::threshold::Fired;
+
 /// Severity attached to a rule and to every event the rule produces.
 ///
 /// Ordered from least to most severe.
@@ -68,6 +70,8 @@ pub struct Event {
     pub truncated: bool,
     /// Named capture groups of the rule's regex, as (group index, value).
     pub fields: Vec<(usize, Box<[u8]>)>,
+    /// Set for an event of a threshold rule.
+    pub threshold: Option<Fired>,
 }
 
 /// Returns at most `max` bytes of `line`, backing off to a UTF-8 character

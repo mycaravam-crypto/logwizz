@@ -125,6 +125,16 @@ struct JsonEvent<'a> {
     truncated: bool,
     #[serde(skip_serializing_if = "Fields::is_empty")]
     fields: Fields<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    threshold: Option<JsonThreshold<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonThreshold<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<Cow<'a, str>>,
+    count: u32,
+    window_secs: u64,
 }
 
 /// Named capture values, serialised as a JSON object in group order.
@@ -168,6 +178,11 @@ pub fn format_event(
             .filter_map(|(i, v)| Some((rule.matcher.group_name(*i)?, String::from_utf8_lossy(v))))
             .collect(),
     );
+    let threshold = ev.threshold.as_ref().map(|f| JsonThreshold {
+        group: f.group.as_deref().map(String::from_utf8_lossy),
+        count: f.count,
+        window_secs: rule.threshold.as_ref().map_or(0, |t| t.window.as_secs()),
+    });
     if syslog_prefix {
         write!(out, "<{}>", rule.severity.syslog_priority())?;
     }
@@ -186,6 +201,7 @@ pub fn format_event(
                 line,
                 truncated: ev.truncated,
                 fields,
+                threshold,
             };
             serde_json::to_writer(&mut *out, &je)?;
         }
@@ -204,6 +220,18 @@ pub fn format_event(
             for (name, value) in &fields.0 {
                 write!(out, " {name}=")?;
                 out.extend_from_slice(escape(value).as_bytes());
+            }
+            if let Some(t) = &threshold {
+                write!(
+                    out,
+                    " [threshold count={} window={}s",
+                    t.count, t.window_secs
+                )?;
+                if let Some(group) = &t.group {
+                    out.extend_from_slice(b" group=");
+                    out.extend_from_slice(escape(group).as_bytes());
+                }
+                out.push(b']');
             }
         }
     }
@@ -248,7 +276,12 @@ pub fn event_cost(ev: &Event) -> usize {
         .iter()
         .map(|(_, v)| FIELD_OVERHEAD + v.len())
         .sum();
-    std::mem::size_of::<Event>() + ev.line.len() + fields
+    let group = ev
+        .threshold
+        .as_ref()
+        .and_then(|t| t.group.as_ref())
+        .map_or(0, |g| g.len());
+    std::mem::size_of::<Event>() + ev.line.len() + fields + group
 }
 
 /// Fixed bytes per captured field: its index and the boxed slice.
@@ -725,6 +758,7 @@ mod tests {
             line: line.into(),
             truncated,
             fields: Vec::new(),
+            threshold: None,
         }
     }
 
@@ -785,6 +819,69 @@ mod tests {
         // No named groups: no "fields" key at all.
         let plain = render_with(OutputFormat::Json, false, &event(b"Failed", false));
         assert!(!plain.contains("fields"), "{plain}");
+    }
+
+    #[test]
+    fn threshold_events_report_group_count_and_window() {
+        let cfg = config::parse(
+            r#"
+            [[files]]
+            path = "/var/log/kern.log"
+            [[rules]]
+            id = "scan"
+            match_type = "regex"
+            pattern = 'SRC=(?P<src>\S+) DPT=(?P<dpt>\d+)'
+            severity = "critical"
+            [rules.threshold]
+            group_by = "src"
+            distinct = "dpt"
+            count = 20
+            window_secs = 10
+            "#,
+            Path::new("t"),
+        )
+        .unwrap();
+        let line = b"SRC=192.0.2.7 DPT=22";
+        let ev = Event {
+            fields: cfg.rules[0].matcher.fields(line),
+            threshold: Some(crate::threshold::Fired {
+                group: Some(b"192.0.2.7"[..].into()),
+                count: 20,
+            }),
+            ..event(line, false)
+        };
+        let t = Tables {
+            files: cfg.files,
+            rules: cfg.rules,
+            meta: Meta {
+                host: "box".into(),
+                pid: 42,
+            },
+        };
+        let render = |format| {
+            let mut out = Vec::new();
+            format_event(format, false, &t, &ev, &mut String::new(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let v: serde_json::Value = serde_json::from_str(&render(OutputFormat::Json)).unwrap();
+        assert_eq!(
+            v["threshold"],
+            serde_json::json!({"group": "192.0.2.7", "count": 20, "window_secs": 10})
+        );
+        let human = render(OutputFormat::Human);
+        assert!(
+            human.ends_with(" [threshold count=20 window=10s group=192.0.2.7]\n"),
+            "{human}"
+        );
+        assert!(
+            event_cost(&ev)
+                > event_cost(&Event {
+                    threshold: None,
+                    ..ev.clone()
+                })
+        );
+        let plain = render_with(OutputFormat::Json, false, &event(b"Failed", false));
+        assert!(!plain.contains("threshold"), "{plain}");
     }
 
     #[test]
@@ -855,6 +952,7 @@ mod tests {
             rate_limit_window_secs: 10,
             dedup_window_secs: dedup_secs,
             dedup_max_entries: max,
+            ..Limits::default()
         }
     }
 

@@ -155,6 +155,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | `rate_limit_events` | `0` | Maximum events per rule per window. `0` means unlimited. |
 | `rate_limit_window_secs` | `60` | Length of the fixed rate-limit window. |
 | `dedup_window_secs` | `0` | Suppress an identical (rule, line) pair within this many seconds of the event first emitted for it. `0` disables it. Lines suppressed by the rate limit are not remembered, so a line that was never reported is never treated as a duplicate. |
+| `threshold_max_groups` | `4096` | Maximum groups each [threshold rule](#threshold-rules) tracks (1 – 1048576). See there for what happens when the table is full. |
 | `dedup_max_entries` | `4096` | Maximum remembered pairs. When the table is full and nothing has expired, new lines are emitted but not remembered: deduplication never suppresses an event wrongly. |
 
 Suppressed events are counted (`events_rate_limited`, `events_deduplicated`).
@@ -210,6 +211,72 @@ severity = "notice"
 
 Rule order matters: put the rules that must see every line (for example
 `ssh_failed_login`) before the `ignore` rules, and the catch-all last.
+
+#### Threshold rules
+
+Some things only show across many lines: a port scan is many firewall-log
+lines from one source to many ports, a brute force many failed logins from
+one source, a flood many lines in a short time. A `[rules.threshold]` table
+turns a rule into such a detector:
+
+```toml
+[[rules]]
+id = "port_scan"
+description = "One source probed many ports"
+match_type = "regex"
+pattern = 'logwizz-drop: .*SRC=(?P<src>\S+) .*DPT=(?P<dpt>\d+)'
+severity = "critical"
+[rules.threshold]
+group_by = "src"       # a named capture group, or "file"; omitted: one group
+distinct = "dpt"       # optional: count distinct values instead of matches
+count = 20             # report when a group reaches this count...
+window_secs = 10       # ...within this many seconds
+cooldown_secs = 300    # then stay silent for that group this long
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `group_by` | unset | Count separately per value of this named capture group, or per monitored file (`"file"`). Unset: all matches form one group. |
+| `distinct` | unset | Count distinct values of this named capture group instead of matches. 100 hits on port 22 count once. |
+| `count` | required | 1 – 10000. |
+| `window_secs` | required | 1 – 86400. The window is fixed and starts at a group's first match, so a burst that straddles two windows can need up to 2 × `count` matches. |
+| `cooldown_secs` | `0` | 0 – 86400. Matches of the group in this time after a report are not counted. |
+
+- A threshold rule emits **no** event per line. When a group reaches `count`,
+  it emits one event: the line that reached it, its `fields`, and
+  `"threshold": {"group": "203.0.113.66", "count": 20, "window_secs": 10}`
+  (`group` is left out for `"file"` and for no grouping). The group then
+  starts counting again after the cooldown.
+- A match whose `group_by` or `distinct` group did not take part is not
+  counted.
+- `rate_limit_events` and dedup apply to threshold events as to any other.
+- Each rule tracks at most `limits.threshold_max_groups` groups. When the
+  table is full, a new group first drops every group whose window and
+  cooldown are over, or else the least recently seen eighth of the table.
+  Dropped groups are counted in `threshold_evictions` and logged as a
+  warning at most every 10 seconds. A flood of spoofed sources can
+  therefore push a real scanner's partial count out of the table, but never
+  makes logwizz drop lines or grow beyond its limits.
+- Distinct values are kept as 8-byte keyed hashes, about 16 bytes each,
+  so a `distinct` rule may hold up to `threshold_max_groups` × `count` × 16
+  bytes. A rule whose bound exceeds 64 MiB is rejected.
+
+Volume spikes ("too many new lines") are a catch-all with `group_by = "file"`:
+
+```toml
+[[rules]]
+id = "log_flood"
+match_type = "regex"
+pattern = "^"
+severity = "warning"
+[rules.threshold]
+group_by = "file"
+count = 5000
+window_secs = 60
+cooldown_secs = 600
+```
+
+Placed after `ignore` rules, the same catch-all counts only unknown lines.
 
 Limits: the configuration file may be at most 1 MiB and must not be
 world-writable.
@@ -422,7 +489,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -438,7 +505,10 @@ retry.
 | `bytes_skipped` | Content bytes beyond `max_line_bytes` that were not matched. |
 | `partial_lines_flushed` | Unterminated lines emitted because their file was truncated, rotated or deleted. |
 | `lines_ignored` | Lines that matched an `ignore` rule. |
-| `rule_matches` | (line, rule) matches of emitting rules, before rate limiting and deduplication. |
+| `rule_matches` | (line, rule) matches of emitting rules, before thresholds, rate limiting and deduplication. |
+| `threshold_absorbed` | Matches of threshold rules that did not reach their threshold, fell into its cooldown, or lacked the grouping capture. |
+| `threshold_fired` | Thresholds reached (each one is an event before rate limiting and deduplication). |
+| `threshold_evictions` | Threshold groups dropped because a rule's group table was full. |
 | `events_emitted` | Events accepted into the output queue. An event is written unless the output fails or the process is killed first. |
 | `events_dropped` | Events discarded because the queue was full (`on_full = "drop"`), the output had failed, or shutdown interrupted a blocked send. |
 | `events_rate_limited`, `events_deduplicated` | Matches suppressed by `[limits]`. |
@@ -448,8 +518,8 @@ retry.
 | `rotations`, `truncations` | Detected replacements and truncations. |
 | `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
-`rule_matches` = `events_emitted` + `events_dropped` + `events_rate_limited` +
-`events_deduplicated`.
+`rule_matches` = `threshold_absorbed` + `events_emitted` + `events_dropped` +
+`events_rate_limited` + `events_deduplicated`.
 
 ### Memory use
 
@@ -462,6 +532,9 @@ Every buffer has a configured bound. The worst case is approximately:
   formatted event up to about 6 × the line length (`\u0001` for each control
   byte)
 - deduplication: about 100 bytes × `dedup_max_entries` (≈ 0.4 MiB by default)
+- per threshold rule: about 300 bytes × `threshold_max_groups` (≈ 1.2 MiB by
+  default), plus for `distinct` up to `threshold_max_groups` × `count` × 16
+  bytes (≈ 1.3 MiB for `count = 20`)
 - a fixed 64 KiB read buffer, plus the compiled rules (at most 2 MiB each)
 
 With the defaults, this is about 9 MiB plus 128 KiB per monitored file,
