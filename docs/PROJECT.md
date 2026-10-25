@@ -28,7 +28,7 @@ Window: 12:40–12:41 UTC
 Source: 203.0.113.8
 ```
 
-The `logwizz-notify` binary emits this aggregate-first shape for Telegram, ntfy and webhook delivery; when several sources match, it lists the most frequent ones instead of a single `Source`. See [Notification operations](NOTIFICATIONS.md) for setup and delivery semantics.
+The `logwizz-notify` binary emits this aggregate-first shape for ntfy and webhook delivery, and a compact HTML version of it for Telegram; when several sources match, it lists the most frequent ones instead of a single `Source`. See [Notification operations](NOTIFICATIONS.md) for setup and delivery semantics.
 
 Design requirements:
 

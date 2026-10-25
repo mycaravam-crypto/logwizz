@@ -61,7 +61,11 @@ impl Curl {
                     &format!("https://api.telegram.org/bot{token}/sendMessage"),
                 );
                 opt("data-urlencode", &format!("chat_id={chat_id}"));
-                opt("data-urlencode", &format!("text={}", s.to_text(partial)));
+                opt(
+                    "data-urlencode",
+                    &format!("text={}", s.to_telegram_html(partial)),
+                );
+                opt("data-urlencode", "parse_mode=HTML");
                 opt("data-urlencode", "disable_web_page_preview=true");
                 opt("max-filesize", MAX_RESPONSE_BYTES);
             }
@@ -239,7 +243,11 @@ mod tests {
         let r = tg.request(&s, false);
         assert!(r.contains("url = \"https://api.telegram.org/bot123:ABC/sendMessage\"\n"));
         assert!(r.contains("data-urlencode = \"chat_id=-100123\"\n"));
-        assert!(r.contains("data-urlencode = \"text=logwizz alert - web1\\nRule: ssh"));
+        assert!(
+            r.contains("data-urlencode = \"text=🔵 <b>say \\\"hi\\\"\\\\</b>\\n"),
+            "{r}"
+        );
+        assert!(r.contains("data-urlencode = \"parse_mode=HTML\"\n"));
         assert_eq!(
             format!("{:?}", tg.kind),
             "telegram",

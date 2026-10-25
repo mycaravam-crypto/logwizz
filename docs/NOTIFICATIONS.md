@@ -59,6 +59,25 @@ Keep `notify.env` owned by root and mode `0600`. The bot token, endpoint URLs an
 
 Invalid settings stop the notifier with exit code 2 and a message that names the variable but never its value.
 
+## Telegram message format
+
+Telegram messages use HTML formatting: the rule's description as a headline
+with a severity marker (🔴 critical, 🟠 error, 🟡 warning, 🔵 notice), the rule,
+severity and host, the count with its sources (tap a source to copy it) and the
+window in UTC:
+
+```text
+🟡 SSH connection without a valid client banner
+ssh_probe · warning · web1
+
+3× from 203.0.113.8
+🕐 2026-10-25 13:40–13:41 UTC
+```
+
+With several sources, the five most frequent are listed one per line with
+their counts. ntfy receives the plain-text form shown under
+[Other transports](#other-transports).
+
 ## Summary behavior
 
 - Events are grouped by **rule and fixed event-time window**: a window starts at a multiple of `NOTIFY_WINDOW_SECS` since the epoch, in the event's own `ts`.
