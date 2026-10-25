@@ -568,6 +568,9 @@ GitHub Actions run on every pull request and on `main`:
   `main`, and weekly. The check's output and the VM's console log are uploaded as an artifact.
 - **security**: Trivy scans `Cargo.lock` for CVEs (weekly too). A fixable CRITICAL fails the job.
 - **codeql**: CodeQL `security-and-quality` analysis of the Rust code and the workflows (weekly too).
+- **smartwizz**: [SmartWizz](https://github.com/mycaravam-crypto/smartwizz) AI review of each PR (bugs, security, missing
+  tests) as inline comments; a high or critical finding fails the check. Pinned to a commit; bump the SHA in both places
+  of `.github/workflows/smartwizz.yml` to upgrade.
 - **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has
   `logwizz-vX.Y.Z-linux-x64` (static, musl), `logwizz.service`, `logwizz.example.toml` and `SHA256SUMS.txt`, with
   generated release notes. Git tags are the source of truth. A PR label picks the bump: `release:patch` (the default),
