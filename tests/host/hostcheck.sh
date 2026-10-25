@@ -189,8 +189,15 @@ else res reload FAIL "no 'configuration reloaded' in the journal"; fi
 # one port_scan and one tcp_flag_scan event (the rules come from config/detection.toml, see run-vm.sh).
 if command -v nmap >/dev/null && command -v nft >/dev/null ||
    { apt-get update -q && apt-get install -qy nmap nftables; } >/dev/null 2>&1; then
-  awk '/^```nft/{f=1;next} /^```/{f=0} f' "$P/DETECTION.md" > /root/logwizz.nft
-  if nft -f /root/logwizz.nft; then
+  # Load a dedicated test fixture, never executable rules extracted from Markdown.
+  # Compare the documented example for drift, but do not execute documentation content.
+  awk '/^```nft/{f=1;next} /^```/{f=0} f' "$P/DETECTION.md" > /root/logwizz-doc.nft
+  if cmp -s /root/logwizz-doc.nft "$P/logwizz.nft"; then
+    res detection_docs_sync PASS "documented nftables example matches test fixture"
+  else
+    res detection_docs_sync FAIL "docs/DETECTION.md nftables example differs from tests/host/logwizz.nft"
+  fi
+  if nft -f "$P/logwizz.nft"; then
     nmap -sS -Pn -n -p 1-300 127.0.0.1 >/dev/null
     nmap -sN -Pn -n -p 1-50 127.0.0.1 >/dev/null
     wait_for '"rule":"port_scan"' 20; wait_for '"rule":"tcp_flag_scan"' 20
