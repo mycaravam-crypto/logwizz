@@ -1,4 +1,4 @@
-# systemd unit for logwizz-notify: forwards logwizz events to a webhook or ntfy.
+# systemd unit for logwizz-notify: aggregates detections and sends summaries to Telegram, ntfy or a webhook.
 #
 # Needs logwizz.service with format = "json" and syslog_prefix = true, and
 # curl and jq installed. Install the script as /usr/bin/logwizz-notify and the
