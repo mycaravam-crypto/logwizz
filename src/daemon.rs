@@ -203,6 +203,7 @@ impl Pipeline {
                 rule,
                 line: bytes.into(),
                 truncated: line.truncated || cut,
+                fields: engine.rules()[rule].matcher.fields(line.bytes),
             });
         });
     }
