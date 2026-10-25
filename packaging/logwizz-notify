@@ -14,8 +14,10 @@ latest_bucket=0
 die() { echo "logwizz-notify: $*" >&2; exit 2; }
 log() { echo "logwizz-notify: $*" >&2; }
 [[ $min == critical ]] && min=crit
-[[ $window =~ ^[0-9]+$ ]] && (( window >= 10 && window <= 3600 )) || die "NOTIFY_WINDOW_SECS must be 10..3600"
-[[ $max_pending =~ ^[0-9]+$ ]] && (( max_pending >= 1 && max_pending <= 65536 )) || die "NOTIFY_MAX_PENDING must be 1..65536"
+if [[ ! $window =~ ^[0-9]+$ ]]; then die "NOTIFY_WINDOW_SECS must be an integer"; fi
+if (( window < 10 || window > 3600 )); then die "NOTIFY_WINDOW_SECS must be 10..3600"; fi
+if [[ ! $max_pending =~ ^[0-9]+$ ]]; then die "NOTIFY_MAX_PENDING must be an integer"; fi
+if (( max_pending < 1 || max_pending > 65536 )); then die "NOTIFY_MAX_PENDING must be 1..65536"; fi
 case $kind in
 telegram) [[ -n ${TELEGRAM_BOT_TOKEN:-} ]] || die "TELEGRAM_BOT_TOKEN is not set"; [[ ${TELEGRAM_BOT_TOKEN} =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "TELEGRAM_BOT_TOKEN has invalid format"; [[ -n ${TELEGRAM_CHAT_ID:-} ]] || die "TELEGRAM_CHAT_ID is not set" ;;
 webhook|ntfy) [[ -n ${NOTIFY_URL:-} ]] || die "NOTIFY_URL is not set" ;;
