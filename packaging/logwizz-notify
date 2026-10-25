@@ -88,7 +88,13 @@ if [[ -s $cursor_file ]]; then from="--after-cursor=$(cat "$cursor_file")"; else
 shutdown() { if flush_all; then exit 0; else exit 1; fi; }
 trap shutdown TERM INT
 journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" | {
-while true; do entry=; IFS= read -r -t 1 entry; rc=$?; if (( rc == 0 )); then process_entry "$entry" || { log "could not persist event; stopping before cursor advance"; break; }; flush_progress || true; elif (( rc > 128 )); then flush_due || true; continue; else break; fi; done
+# On a read timeout bash keeps the partial line it has read so far in $entry:
+# carry it over so a line split across the timeout is not lost or misparsed.
+pending_line=
+while true; do entry=; IFS= read -r -t 1 entry; rc=$?
+if (( rc == 0 )); then entry=$pending_line$entry; pending_line=; process_entry "$entry" || { log "could not persist event; stopping before cursor advance"; break; }; flush_progress || true
+elif (( rc > 128 )); then pending_line+=$entry; flush_due || true; continue
+else entry=$pending_line$entry; if [[ -n $entry ]]; then process_entry "$entry" || log "could not persist event; stopping before cursor advance"; fi; break; fi; done
 flush_all || true
 log "journalctl exited; systemd will restart the notifier"
 exit 1
