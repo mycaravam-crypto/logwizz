@@ -1,0 +1,10 @@
+# Copy to /etc/fail2ban/jail.d/logwizz.local and review before enabling.
+[logwizz]
+enabled  = false
+filter   = logwizz
+logpath  = /var/log/logwizz/fail2ban.log
+backend  = auto
+usedns   = no
+maxretry = 1
+findtime = 600
+bantime  = 3600
