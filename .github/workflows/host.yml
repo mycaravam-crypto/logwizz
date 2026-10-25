@@ -1,0 +1,56 @@
+# Real-host check: boots an Ubuntu 24.04 cloud VM under KVM, installs the static binary and the systemd unit as the
+# README documents, and runs tests/host/hostcheck.sh against real systemd, journald, rsyslog and logrotate (see
+# docs/HOST-VERIFICATION.md). Runs when the daemon, the unit or the check change, and weekly so that updates to the
+# cloud image are covered too.
+name: host
+on:
+  pull_request:
+    paths: [src/**, packaging/**, tests/host/**, Cargo.toml, Cargo.lock, .github/workflows/host.yml]
+  push:
+    branches: [main]
+    paths: [src/**, packaging/**, tests/host/**, Cargo.toml, Cargo.lock, .github/workflows/host.yml]
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  ubuntu-24-04:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # Runners usually expose /dev/kvm, but only to root and the kvm group. Without it run-vm.sh falls back to
+      # emulation, which is slower but still well within the timeout.
+      - name: Enable KVM
+        run: |
+          if [[ -e /dev/kvm ]]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            sudo udevadm settle
+          fi
+          if [[ -w /dev/kvm ]]; then echo "KVM available"; else echo "::warning::no usable /dev/kvm; the VM runs emulated"; fi
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+      - run: rustup toolchain install stable --profile minimal --target x86_64-unknown-linux-musl && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run the host check
+        env:
+          WORK: ${{ runner.temp }}/hostcheck
+        run: mkdir -p "$WORK" && bash tests/host/run-vm.sh
+      - name: Show the check's output and the end of the guest console
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/hostcheck/hostcheck.log" || true
+          tail -n 100 "$RUNNER_TEMP/hostcheck/serial.log" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: hostcheck-logs
+          path: |
+            ${{ runner.temp }}/hostcheck/hostcheck.log
+            ${{ runner.temp }}/hostcheck/serial.log
+          if-no-files-found: ignore

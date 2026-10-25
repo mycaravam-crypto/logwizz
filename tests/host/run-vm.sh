@@ -29,12 +29,12 @@ cat > user-data <<'EOF'
 package_update: false
 packages: []
 runcmd:
-  - [sh, -c, 'mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS0 2>&1; echo HOSTCHECK-DONE > /dev/ttyS0; poweroff']
+  - [sh, -c, 'mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
 EOF
 printf 'instance-id: lwz-hostcheck\nlocal-hostname: lwz-hostcheck\n' > meta-data
 cloud-localds seed.iso user-data meta-data
 genisoimage -quiet -V PAYLOAD -r -J -o payload.iso payload
-rm -f disk.qcow2 serial.log
+rm -f disk.qcow2 serial.log hostcheck.log
 qemu-img create -q -f qcow2 -F qcow2 -b "$image" disk.qcow2 8G
 
 accel=tcg,thread=multi
@@ -43,8 +43,10 @@ timeout 3000 qemu-system-x86_64 -accel "$accel" -cpu max -smp 4 -m 3072 -nograph
   -drive file=disk.qcow2,if=virtio \
   -drive file=seed.iso,media=cdrom,readonly=on \
   -drive file=payload.iso,media=cdrom,readonly=on \
-  -nic user,model=virtio -serial file:serial.log -monitor none -display none >/dev/null
+  -nic user,model=virtio -serial file:serial.log -serial file:hostcheck.log -monitor none -display none >/dev/null
 
-grep -a -E '^(RESULT|SUMMARY)' serial.log
-echo "full log: $work/serial.log"
-grep -a -q '^HOSTCHECK-DONE' serial.log && ! grep -a -q '^RESULT [^ ]* FAIL' serial.log
+# The check writes to its own port (ttyS1): ttyS0 carries the kernel console, which interleaves with it, and a
+# serial getty, whose hangup on start cuts off writers that already have it open.
+grep -a -E '^(RESULT|SUMMARY)' hostcheck.log
+echo "full log: $work/hostcheck.log (guest console: $work/serial.log)"
+grep -a -q '^HOSTCHECK-DONE' hostcheck.log && ! grep -a -q '^RESULT [^ ]* FAIL' hostcheck.log

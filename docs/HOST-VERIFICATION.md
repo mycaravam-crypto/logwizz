@@ -16,7 +16,8 @@ systemd host: item 1 of #7, the last check before 0.1.0. Until then the unit had
 | Watched files | `/var/log/auth.log`, `/var/log/syslog` (example config), `/var/log/lwtest.log` (test file) |
 
 Reproduce with `tests/host/run-vm.sh`. It boots the VM, runs [`tests/host/hostcheck.sh`](../tests/host/hostcheck.sh)
-inside and prints one `RESULT` line per check: `PASS`, `FAIL`, or `KNOWN` for a documented limitation.
+inside and prints one `RESULT` line per check: `PASS`, `FAIL`, or `KNOWN` for a documented limitation. CI runs the
+same script in the `host` workflow; any `FAIL` fails the job.
 
 ## Results (final run)
 
@@ -105,7 +106,7 @@ once.
 |---|---|---|
 | 1 | ~~Stop the syslog feedback loop~~ (done: `LogNamespace=`, and `kern.log` in the example config) | #21 |
 | 2 | ~~Retry a fresh `EACCES` once before warning and counting it~~ (done) | #22 |
-| 3 | Run `tests/host/run-vm.sh` in CI; GitHub runners have KVM, so a run takes about a minute | #24 |
+| 3 | ~~Run `tests/host/run-vm.sh` in CI~~ (done: the `host` workflow) | #24 |
 | 4 | Run the host check on RHEL-family images together with the drop-in | #13 |
 | 5 | Re-run the benchmarks on a dedicated machine before publishing numbers | #7, item 5 |
 
