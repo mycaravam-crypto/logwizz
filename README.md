@@ -2,7 +2,7 @@
 
 A small, high-performance Linux log monitoring tool written in Rust. It follows local log files and the systemd journal, matches new entries against configurable rules, and detects suspicious events and activity spikes without becoming a full SIEM or log shipper.
 
-The core daemon stays local and network-free. It emits structured detection events; a separate notifier handles delivery. The intended notification model is **summaries of detections grouped by rule and time window**, not forwarding raw log lines. Telegram is the first channel to focus on.
+The core daemon stays local and network-free. A separate notifier groups detections by rule and event-time window, then sends compact summaries through Telegram, ntfy or a webhook. Notifications contain counts and minimal metadata, never raw log lines.
 
 ## Install
 
@@ -68,10 +68,10 @@ logwizz emits a structured event for the matching rule. Use `config/logwizz.exam
 ## Project boundaries
 
 - **Detection:** local inputs, rules and thresholds; no network access in the core daemon.
-- **Notifications:** a separate, replaceable delivery component. The target is to aggregate detections by rule and time window and send compact summaries. Raw log content should not be part of default outbound notifications.
+- **Notifications:** a separate, replaceable delivery component. The notifier aggregates by rule and time window; outbound summaries exclude raw log content.
 - **Scope:** a lightweight host-level detector, not a SIEM, long-term log store or general-purpose log forwarder.
 
-The notifier currently has an event-based interface; aggregate-first delivery and Telegram are the next design focus, not a promise that every existing notifier path already behaves that way. See [project direction](docs/PROJECT.md).
+Notification setup, window semantics, retry behavior and Telegram configuration are documented in [the notification guide](docs/NOTIFICATIONS.md). See [project direction](docs/PROJECT.md) for design boundaries.
 
 ## Documentation
 
