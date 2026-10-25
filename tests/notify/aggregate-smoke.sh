@@ -56,6 +56,7 @@ set -e
 [[ $(wc -l < "$tmp/webhook.jsonl") -eq 1 ]] || { echo "expected exactly one aggregate webhook" >&2; exit 1; }
 jq -e '.schema == "logwizz.notification/v1" and .count == 3 and .rule == "ssh_failed_login" and .source == "multiple" and .partial == true and (.line == null)' "$tmp/webhook.jsonl" >/dev/null
 if grep -F 'RAW-SECRET-SHOULD-NOT-LEAVE-HOST' "$tmp/webhook.jsonl"; then echo "raw log content leaked into webhook summary" >&2; exit 1; fi
+if grep -F 'https://example.invalid/logwizz' "$tmp/webhook.args"; then echo "webhook URL leaked into curl arguments" >&2; exit 1; fi
 set +e
 PATH="$tmp/bin:$PATH" JOURNAL_FIXTURE="$tmp/events.jsonl" CAPTURE_FILE="$tmp/telegram.txt" CURL_ARGS_FILE="$tmp/telegram.args" STATE_DIRECTORY="$tmp/state-telegram" RUNTIME_DIRECTORY="$tmp/runtime-telegram" NOTIFY_KIND=telegram TELEGRAM_BOT_TOKEN=123456:ABC_def-123 TELEGRAM_CHAT_ID=-100123 NOTIFY_WINDOW_SECS=60 bash "$root/packaging/logwizz-notify"
 status=$?
