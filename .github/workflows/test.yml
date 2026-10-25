@@ -40,6 +40,13 @@ jobs:
           systemd-analyze verify packaging/logwizz-notify.service
           # The notifier needs network access, so it scores higher (13 = "1.3 OK").
           systemd-analyze security --offline=yes --threshold=20 packaging/logwizz-notify.service
+      # Keep the optional Fail2ban integration covered when the notifier changes.
+      - name: Test optional Fail2ban bridge
+        run: python3 packaging/fail2ban/test_bridge.py
+      - name: Verify optional Fail2ban systemd unit
+        run: |
+          sudo install -D -m 0755 packaging/fail2ban/logwizz-fail2ban-bridge /usr/local/libexec/logwizz-fail2ban-bridge
+          systemd-analyze verify packaging/fail2ban/logwizz-fail2ban-bridge.service
       - name: Check versioning policy
         run: bash .github/scripts/semver-next.test.sh
   msrv:
