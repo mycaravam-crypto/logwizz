@@ -431,8 +431,8 @@ rates it **0.4 SAFE**. The remaining findings are deliberate:
 that group and break it. The unit has also been exercised on a booted Ubuntu
 24.04 host (systemd 255): reading `auth.log` and `syslog` through `adm`, real
 logrotate runs, no sandbox denials, restart on failure and a clean stop. See
-[docs/HOST-VERIFICATION.md](docs/HOST-VERIFICATION.md), and rerun it with
-`tests/host/run-vm.sh`.
+[docs/HOST-VERIFICATION.md](docs/HOST-VERIFICATION.md). CI reruns it (the
+**host** workflow), and `tests/host/run-vm.sh` runs it locally.
 
 The namespace keeps logwizz's output out of the main journal. That matters:
 on Debian and Ubuntu, rsyslog copies the main journal into `/var/log/syslog`,
@@ -527,6 +527,9 @@ GitHub Actions run on every pull request and on `main`:
 - **test**: `fmt`, `clippy -D warnings`, `cargo test`, the release build and the systemd unit check
   (`systemd-analyze verify` and a `security` threshold); the `msrv` job builds the release binary on the
   `rust-version` from `Cargo.toml`.
+- **host**: boots an Ubuntu 24.04 VM under KVM and runs the real-host check of the installed unit
+  (`tests/host/run-vm.sh`). Runs on PRs that change `src/`, `packaging/`, `tests/host/` or the Cargo files, on
+  `main`, and weekly. The VM's serial log is uploaded as an artifact.
 - **security**: Trivy scans `Cargo.lock` for CVEs (weekly too). A fixable CRITICAL fails the job.
 - **codeql**: CodeQL `security-and-quality` analysis of the Rust code and the workflows (weekly too).
 - **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has

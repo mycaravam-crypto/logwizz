@@ -124,7 +124,7 @@ if [[ -z $STRACE ]]; then
 else
 kill "$STRACE" 2>/dev/null; wait "$STRACE" 2>/dev/null
 denied=$(grep -E '= -1 (EPERM|EACCES)' /root/strace.txt | sort | uniq -c | sort -rn)
-if [[ -n $denied ]] && ! grep -E '= -1 (EPERM|EACCES)' /root/strace.txt | grep -vq 'open("/var/log/lwtest.log"'; then
+if [[ -n $denied ]] && ! grep -E '= -1 (EPERM|EACCES)' /root/strace.txt | grep -vqE 'open(at)?\((AT_FDCWD, )?"/var/log/lwtest.log"'; then
   res sandbox_denials KNOWN "only EACCES opening lwtest.log while install(1) still had it root-only: $(echo $denied | head -c 120)"
 elif [[ -z $denied ]]; then res sandbox_denials PASS "no EPERM/EACCES in $(wc -l < /root/strace.txt) failed calls"
 else res sandbox_denials FAIL "$(echo "$denied" | head -5 | tr '\n' ';')"; fi
