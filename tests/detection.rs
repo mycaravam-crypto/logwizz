@@ -44,7 +44,8 @@ fn rules_match_real_log_lines() {
         hits(&cfg, fw),
         [
             "port_scan src=203.0.113.66 dpt=8080",
-            "fast_scan src=203.0.113.66 dpt=8080"
+            "fast_scan src=203.0.113.66 dpt=8080",
+            "slow_scan src=203.0.113.66 dpt=8080"
         ]
     );
     let fw6 = "Oct 25 10:00:00 web1 kernel: logwizz-drop: IN=eth0 OUT= SRC=2001:0db8:0000:0000:0000:0000:0000:0042 \
@@ -195,6 +196,10 @@ fn every_detector_fires_at_its_count_and_then_cools_down() {
         (
             "fast_scan",
             "kernel: logwizz-drop: IN=eth0 SRC=203.0.113.2 DST=198.51.100.1 PROTO=TCP DPT={n} SYN",
+        ),
+        (
+            "slow_scan",
+            "kernel: logwizz-drop: IN=eth0 SRC=203.0.113.7 DST=198.51.100.1 PROTO=TCP DPT={n} SYN",
         ),
         (
             "tcp_flag_scan",

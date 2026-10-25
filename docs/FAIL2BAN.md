@@ -14,6 +14,7 @@ explicit allowlist of rules with a valid source IP:
 
 - `port_scan`
 - `fast_scan`
+- `slow_scan`
 - `tcp_flag_scan`
 - `ssh_bruteforce`
 - `ssh_probe`

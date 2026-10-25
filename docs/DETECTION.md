@@ -8,6 +8,7 @@ makes scans visible, and the rules in
 |---|---|---|
 | `port_scan` | One source probing 20+ closed ports within a minute (nmap `-sS`/`-sT`/`-sU`, masscan) | the firewall rules below |
 | `fast_scan` | 100+ closed ports within 2 seconds (masscan-like rates) | the firewall rules below |
+| `slow_scan` | 50+ closed ports within an hour (background scanners below `port_scan`'s rate) | the firewall rules below |
 | `tcp_flag_scan` | TCP NULL, FIN and Xmas scans (nmap `-sN`, `-sF`, `-sX`) | the firewall rules below |
 | `ssh_bruteforce` | 10+ failed or invalid-user SSH logins from one source within a minute, including key-only hosts that log no `Failed` line | `auth.log` |
 | `ssh_probe` | A connection to sshd that never sends an SSH banner (nmap `-sV`, banner grabbers) | `auth.log` |
