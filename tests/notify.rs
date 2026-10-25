@@ -320,11 +320,15 @@ fn closed_windows_are_sent_without_stopping() {
     let form = value(&reqs[0], "data-urlencode");
     assert!(form.contains(&"chat_id=-100123"));
     let text = form.iter().find_map(|f| f.strip_prefix("text=")).unwrap();
+    assert!(form.contains(&"parse_mode=HTML"));
     assert!(
-        text.starts_with("logwizz alert - test-host\nRule: ssh\n"),
+        text.contains("\n<code>ssh</code> · warning · test-host\n\n"),
         "{text}"
     );
-    assert!(text.contains("\nMatches: 2\n") && text.contains("\nSource: 192.0.2.1"));
+    assert!(
+        text.contains("\n<b>2×</b> from <code>192.0.2.1</code>\n"),
+        "{text}"
+    );
     assert!(!text.contains("Partial"), "{text}");
     assert!(!w.all_args().contains(TOKEN));
 }

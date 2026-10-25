@@ -301,6 +301,75 @@ impl Summary {
         }
         s
     }
+
+    /// The summary as Telegram HTML (`parse_mode=HTML`): headline, rule line,
+    /// counts with tap-to-copy sources, and a short UTC window.
+    pub fn to_telegram_html(&self, partial: bool) -> String {
+        let icon = match self.severity {
+            Severity::Critical => "🔴",
+            Severity::Error => "🟠",
+            Severity::Warning => "🟡",
+            Severity::Notice => "🔵",
+            Severity::Info | Severity::Debug => "⚪",
+        };
+        let headline = if self.description.is_empty() {
+            &self.rule
+        } else {
+            &self.description
+        };
+        let mut s = format!(
+            "{icon} <b>{}</b>\n<code>{}</code> · {} · {}\n\n",
+            html(headline),
+            html(&self.rule),
+            self.severity,
+            html(&self.host),
+        );
+        if let Some(src) = self.single_source() {
+            s.push_str(&format!(
+                "<b>{}×</b> from <code>{}</code>",
+                self.count,
+                html(src)
+            ));
+        } else if self.sources.is_empty() {
+            s.push_str(&format!("<b>{}×</b>", self.count));
+        } else {
+            let top = self.top_sources();
+            let approx = if self.sources_overflowed { "~" } else { "" };
+            let n = self.sources.len();
+            let noun = if n == 1 { "source" } else { "sources" };
+            s.push_str(&format!("<b>{}×</b> from {approx}{n} {noun}", self.count));
+            for t in &top {
+                s.push_str(&format!("\n<code>{}</code>  {}", html(&t.source), t.count));
+            }
+            if self.sources_overflowed {
+                s.push_str("\n… and more (approximate counts)");
+            } else if self.sources.len() > top.len() {
+                s.push_str(&format!("\n… and {} more", self.sources.len() - top.len()));
+            }
+        }
+        // "2026-10-25T13:20:00Z" -> "2026-10-25 13:20–13:21 UTC"
+        let (start, end) = (
+            format_rfc3339_secs(self.bucket),
+            format_rfc3339_secs(self.window_end()),
+        );
+        s.push_str(&format!(
+            "\n🕐 {} {}–{} UTC",
+            &start[..10],
+            &start[11..16],
+            &end[11..16]
+        ));
+        if partial {
+            s.push_str("\n⚠️ <i>Partial window (shutdown or delayed delivery)</i>");
+        }
+        s
+    }
+}
+
+/// Escapes text for Telegram HTML.
+fn html(v: &str) -> String {
+    v.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Identifies a summary: window start, window length, rule.
@@ -546,6 +615,42 @@ mod tests {
         none.add(&det(0, "a", None));
         assert_eq!(none.source_field(), "");
         assert!(!none.to_text(false).contains("Source"));
+    }
+
+    #[test]
+    fn telegram_html_layout_and_escaping() {
+        let t = 1_792_935_600; // 2026-10-25T13:40:00Z
+        let mut d = det(t, "ssh_probe", Some("203.0.113.8"));
+        d.description = "Probe <script> & co".into();
+        let mut s = Summary::new(&d, t, 60);
+        s.add(&d);
+        assert_eq!(
+            s.to_telegram_html(false),
+            "🟡 <b>Probe &lt;script&gt; &amp; co</b>\n<code>ssh_probe</code> · warning · web1\n\n\
+             <b>1×</b> from <code>203.0.113.8</code>\n🕐 2026-10-25 13:40–13:41 UTC"
+        );
+        let other = det(t, "ssh_probe", Some("<b>"));
+        for _ in 0..4 {
+            s.add(&other);
+        }
+        let multi = s.to_telegram_html(true);
+        assert!(
+            multi.contains(
+                "<b>5×</b> from 2 sources\n<code>&lt;b&gt;</code>  4\n<code>203.0.113.8</code>  1"
+            ),
+            "{multi}"
+        );
+        assert!(
+            multi.ends_with("\n⚠️ <i>Partial window (shutdown or delayed delivery)</i>"),
+            "{multi}"
+        );
+        let mut none = Summary::new(&det(t, "log_flood", None), t, 60);
+        none.add(&det(t, "log_flood", None));
+        assert!(
+            none.to_telegram_html(false).contains("\n\n<b>1×</b>\n🕐"),
+            "{}",
+            none.to_telegram_html(false)
+        );
     }
 
     #[test]
