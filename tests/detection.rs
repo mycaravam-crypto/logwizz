@@ -100,7 +100,9 @@ fn port_scan_fires_once_per_source() {
                 "kernel: logwizz-drop: IN=eth0 SRC={src} DST=198.51.100.1 PROTO=TCP DPT={dpt} SYN"
             );
             let fields = rule.matcher.fields(line.as_bytes());
-            if let Some(f) = th.observe(i, &rule.id, t, 0, &fields, now) {
+            if let Some(f) =
+                th.observe(i, &rule.id, t, Path::new("/var/log/kern.log"), &fields, now)
+            {
                 fired.push((
                     String::from_utf8_lossy(&f.group.unwrap()).into_owned(),
                     port,
