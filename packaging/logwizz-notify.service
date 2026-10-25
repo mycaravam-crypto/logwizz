@@ -8,7 +8,7 @@
 # logwizz itself has no network access; this unit is the only part that does.
 
 [Unit]
-Description=logwizz event notifications
+Description=logwizz aggregated detection notifications
 Documentation=https://github.com/mycaravam-crypto/logwizz
 After=logwizz.service network-online.target
 Wants=network-online.target
@@ -19,7 +19,7 @@ EnvironmentFile=/etc/logwizz/notify.env
 ExecStart=/usr/bin/logwizz-notify
 Restart=on-failure
 RestartSec=10s
-TimeoutStopSec=15s
+TimeoutStopSec=50s
 
 # Identity: reads the journal through systemd-journal, nothing else.
 DynamicUser=yes
@@ -56,7 +56,7 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 RemoveIPC=yes
 
-# Network: outbound HTTP(S) to NOTIFY_URL.
+# Network: outbound HTTPS to Telegram or the configured notification endpoint.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 SystemCallArchitectures=native
