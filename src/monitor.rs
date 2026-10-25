@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
-use crate::config::{Config, Glob, StartupMode};
+use crate::config::{self, Config, Glob, StartupMode};
+use crate::journal::{Journal, Start};
 use crate::metrics::{self, Metrics};
 use crate::reader::{FileId, Line, READ_BUF_BYTES, ReaderOptions, TailedFile};
 use crate::state::FileState;
@@ -36,7 +37,8 @@ pub const READ_BUDGET_BYTES: usize = 1024 * 1024;
 const REFUSED_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Receives the result of [`Monitor::checkpoint`] in [`Monitor::run_with`].
-pub type OnCheckpoint<'a> = dyn FnMut(Vec<(Arc<Path>, FileState)>) + 'a;
+/// The second argument is the journal cursor, if the journal is read.
+pub type OnCheckpoint<'a> = dyn FnMut(Vec<(Arc<Path>, FileState)>, Option<Arc<str>>) + 'a;
 
 /// Receives every line, together with the path of the file it came from.
 pub type OnLine<'a> = dyn FnMut(&Arc<Path>, Line<'_>) + 'a;
@@ -112,6 +114,8 @@ pub struct Monitor {
     carried: HashMap<PathBuf, (Arc<Path>, TailedFile)>,
     metrics: Arc<Metrics>,
     buf: Vec<u8>,
+    /// Read after the files; see [`Monitor::start_journal`].
+    journal: Option<(Arc<Path>, Journal)>,
 }
 
 impl Monitor {
@@ -160,6 +164,7 @@ impl Monitor {
             carried: HashMap::new(),
             metrics,
             buf: vec![0; READ_BUF_BYTES],
+            journal: None,
         };
         for g in 0..monitor.globs.len() {
             monitor.scan_glob(g, Some(cfg.general.startup_mode));
@@ -177,6 +182,28 @@ impl Monitor {
     /// Number of files currently followed.
     pub fn files(&self) -> usize {
         self.slots.iter().flatten().count()
+    }
+
+    /// Starts reading the journal if the configuration asks for it, after
+    /// `cursor` (saved by a previous run) or else per `startup_mode`.
+    pub fn start_journal(&mut self, cfg: &Config, cursor: Option<String>) -> std::io::Result<()> {
+        let Some(j) = &cfg.journal else {
+            return Ok(());
+        };
+        let journal = Journal::spawn(
+            j.matches.clone(),
+            Start::new(cursor, cfg.general.startup_mode),
+            cfg.general.max_line_bytes,
+            self.waker.clone(),
+            Arc::clone(&self.metrics),
+        )?;
+        self.journal = Some((Path::new(config::JOURNAL_SOURCE).into(), journal));
+        Ok(())
+    }
+
+    /// Cursor of the last journal entry passed to `on_line`.
+    pub fn journal_cursor(&self) -> Option<Arc<str>> {
+        self.journal.as_ref().and_then(|(_, j)| j.cursor())
     }
 
     /// Saved positions from a previous run; call before [`Monitor::run`].
@@ -441,7 +468,8 @@ impl Monitor {
             if let Some((interval, f)) = &mut checkpoints {
                 let now = Instant::now();
                 if now >= next_checkpoint {
-                    f(self.checkpoint());
+                    let files = self.checkpoint();
+                    f(files, self.journal_cursor());
                     next_checkpoint = now + *interval;
                 }
             }
@@ -526,6 +554,11 @@ impl Monitor {
                         busy = true;
                     }
                     changed = true;
+                }
+            }
+            if let Some((path, journal)) = &mut self.journal {
+                if journal.poll(&self.metrics, &mut |line| on_line(path, line)) {
+                    busy = true;
                 }
             }
             if changed {

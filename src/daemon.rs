@@ -45,9 +45,15 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let reload = Arc::new(AtomicBool::new(false));
     let mut monitor = Monitor::new(&cfg, Arc::clone(&metrics), true);
+    let mut journal_cursor = None;
     if let Some(path) = &cfg.general.state_file {
-        monitor.resume(state::load(path));
+        let saved = state::load(path);
+        monitor.resume(saved.files);
+        journal_cursor = saved.journal_cursor;
     }
+    monitor
+        .start_journal(&cfg, journal_cursor)
+        .map_err(RuntimeError::Startup)?;
     let waker = monitor.waker();
 
     spawn_signal_thread(
@@ -113,17 +119,18 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
 
     let mut running = cfg;
     loop {
-        let mut record = |files| {
+        let mut record = |files, journal| {
             if let Some(w) = &state_writer {
                 w.record(Checkpoint {
                     events: progress.sent(),
                     files,
+                    journal,
                 });
             }
         };
         let checkpoints = state_writer
             .as_ref()
-            .map(|_| (state_flush, &mut record as &mut dyn FnMut(_)));
+            .map(|_| (state_flush, &mut record as &mut dyn FnMut(_, _)));
         let stopped = monitor.run_with(
             &shutdown,
             Some(&reload),
@@ -146,6 +153,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     let final_checkpoint = Checkpoint {
         events: progress.sent(),
         files: monitor.checkpoint(),
+        journal: monitor.journal_cursor(),
     };
     let result = pipeline.dispatcher.finish();
     if let Some(w) = state_writer {
@@ -277,6 +285,10 @@ fn keep_restart_only(running: &Config, mut new: Config) -> Config {
         output.queue_capacity,
         output.syslog_prefix,
     );
+    if new.journal != running.journal {
+        kept.push("journal");
+        new.journal = running.journal.clone();
+    }
     if !kept.is_empty() {
         warn!(
             settings = %kept.join(", "),

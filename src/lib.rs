@@ -11,6 +11,7 @@ pub mod engine;
 pub mod error;
 pub mod event;
 pub mod glob;
+pub mod journal;
 pub mod metrics;
 pub mod monitor;
 pub mod reader;

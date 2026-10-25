@@ -101,3 +101,8 @@ enabled = true
 match_type = "regex"       # Rust regex syntax; guaranteed linear-time matching
 pattern = "(?i)(kernel panic|out of memory)"
 severity = "critical"
+
+# Read the systemd journal too (for hosts without rsyslog, where auth.log and
+# kern.log do not exist). Needs a drop-in for the packaged unit, see README.
+#[journal]
+#matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIER=sshd-session"]

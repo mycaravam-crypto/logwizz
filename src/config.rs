@@ -251,6 +251,23 @@ struct RawConfig {
     files: Vec<RawFile>,
     #[serde(default)]
     rules: Vec<RawRule>,
+    journal: Option<RawJournal>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawJournal {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    matches: Vec<String>,
+}
+
+/// A validated `[journal]` section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Journal {
+    /// journalctl match arguments: `FIELD=value`, or `+` between groups.
+    pub matches: Vec<String>,
 }
 
 /// A validated, compiled rule.
@@ -316,6 +333,9 @@ pub struct Config {
     /// Entries configured with `glob`.
     pub globs: Vec<Glob>,
     pub rules: Vec<Rule>,
+    /// Set: also read the systemd journal. Its events name the file
+    /// [`JOURNAL_SOURCE`].
+    pub journal: Option<Journal>,
     pub disabled_files: usize,
     pub disabled_rules: usize,
 }
@@ -376,7 +396,18 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         limits,
         files: raw_files,
         rules: raw_rules,
+        journal: raw_journal,
     } = raw;
+    let journal = match raw_journal {
+        Some(j) if j.enabled => match check_journal_matches(&j.matches) {
+            Ok(()) => Some(Journal { matches: j.matches }),
+            Err(msg) => {
+                problems.push(format!("journal.matches: {msg}"));
+                None
+            }
+        },
+        _ => None,
+    };
 
     check_range(
         &mut problems,
@@ -513,8 +544,8 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
             (None, None) => problems.push(format!("files[{i}]: 'path' or 'glob' is required")),
         }
     }
-    if files.is_empty() && globs.is_empty() {
-        problems.push("no enabled [[files]] entries".to_string());
+    if files.is_empty() && globs.is_empty() && journal.is_none() {
+        problems.push("no enabled [[files]] entries and no [journal]".to_string());
     }
     if let Some(state) = &general.state_file {
         let label = format!("general.state_file ({})", state.display());
@@ -595,6 +626,7 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
             files,
             globs,
             rules,
+            journal,
             disabled_files,
             disabled_rules,
         })
@@ -692,6 +724,47 @@ fn check_rule_id(id: &str) -> Result<(), String> {
         return Err(
             "rule id may only contain ASCII letters, digits, '_', '-', '.' and ':'".to_string(),
         );
+    }
+    Ok(())
+}
+
+/// Name used as the event `file` of journal entries.
+pub const JOURNAL_SOURCE: &str = "journal";
+pub const MAX_JOURNAL_MATCHES: usize = 64;
+
+/// `FIELD=value` with a journal field name (upper-case letters, digits,
+/// `_`; not starting with a digit), or `+`. logwizz's own namespace is
+/// never read: its events are not in the system journal.
+fn check_journal_matches(matches: &[String]) -> Result<(), String> {
+    if matches.len() > MAX_JOURNAL_MATCHES {
+        return Err(format!("at most {MAX_JOURNAL_MATCHES} entries"));
+    }
+    for m in matches {
+        if m == "+" {
+            continue;
+        }
+        let Some((field, value)) = m.split_once('=') else {
+            return Err(format!("`{m}` is not FIELD=value or +"));
+        };
+        let valid_field = !field.is_empty()
+            && field.len() <= 64
+            && !field.starts_with(|c: char| c.is_ascii_digit())
+            && field
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+        if !valid_field {
+            return Err(format!("`{field}` is not a journal field name"));
+        }
+        if value.len() > 1024 || value.contains(['\n', '\0']) {
+            return Err(format!(
+                "the value of `{field}` is too long or has a newline"
+            ));
+        }
+        if field == "_NAMESPACE" {
+            return Err(
+                "logwizz never reads journal namespaces (its own events are in one)".into(),
+            );
+        }
     }
     Ok(())
 }
@@ -888,6 +961,41 @@ mod tests {
         let cfg = parse_str(&ok).unwrap();
         assert_eq!(cfg.rules[0].action, Action::Ignore);
         assert_eq!(cfg.rules[1].action, Action::Emit);
+    }
+
+    #[test]
+    fn journal_section() {
+        let rules = "[[rules]]\nid = \"r\"\nmatch_type = \"literal\"\npattern = \"x\"\nseverity = \"info\"\n";
+        // The journal alone is a valid source.
+        let cfg = parse_str(&format!(
+            "[journal]\nmatches = [\"_TRANSPORT=kernel\", \"+\", \"SYSLOG_IDENTIFIER=sshd\"]\n{rules}"
+        ))
+        .unwrap();
+        assert!(cfg.files.is_empty());
+        assert_eq!(cfg.journal.unwrap().matches.len(), 3);
+        assert!(
+            parse_str(&format!("[journal]\n{rules}"))
+                .unwrap()
+                .journal
+                .is_some()
+        );
+        assert!(
+            parse_str(&format!("{MINIMAL}\n[journal]\nenabled = false\n"))
+                .unwrap()
+                .journal
+                .is_none()
+        );
+        let p = |m: &str| problems(&format!("{MINIMAL}\n[journal]\nmatches = [{m}]\n")).join("; ");
+        assert!(p("\"sshd\"").contains("not FIELD=value"));
+        assert!(p("\"syslog_identifier=sshd\"").contains("not a journal field name"));
+        assert!(p("\"1X=a\"").contains("not a journal field name"));
+        assert!(p("\"MESSAGE=a\\nb\"").contains("newline"));
+        assert!(p("\"_NAMESPACE=logwizz\"").contains("never reads journal namespaces"));
+        let many = vec!["\"+\""; MAX_JOURNAL_MATCHES + 1].join(", ");
+        assert!(p(&many).contains("at most"));
+        assert!(
+            problems(&format!("[journal]\nenabled = false\n{rules}"))[0].contains("no [journal]")
+        );
     }
 
     #[test]

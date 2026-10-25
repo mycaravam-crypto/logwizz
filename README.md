@@ -206,6 +206,53 @@ exclude = "*.old.log"
   precedence, then the first matching glob.
 - Directories are skipped. `state_file` must not match a glob.
 
+### `[journal]`
+
+Reads the systemd journal as well as (or instead of) files. Debian 12 and
+newer, Fedora and Arch do not install rsyslog by default, so `auth.log`,
+`kern.log` and `syslog` do not exist there and SSH failures and firewall
+logs are only in the journal.
+
+```toml
+[journal]
+# Optional journalctl matches: FIELD=value; entries of the same field are
+# alternatives, different fields must all match, "+" separates groups.
+matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIER=sshd-session"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` keeps the section but does not read the journal. |
+| `matches` | `[]` | journalctl match arguments, at most 64. `FIELD=value` with an upper-case field name, or `+`. Empty: every entry of the system journal. |
+
+- logwizz runs `journalctl --follow --output=json` (found on `PATH`; never a
+  program named in the configuration) and matches each entry's `MESSAGE`
+  against the rules, as one line, cut at `max_line_bytes`. Events name the
+  file `journal`.
+- Where reading starts: after the cursor saved in `state_file`, if any;
+  otherwise `startup_mode = "tail"` reads new entries only and `"beginning"`
+  the current boot. With `state_file`, the journal has the same
+  at-least-once guarantee as files.
+- If journalctl exits it is started again after the last entry read, after
+  1 s, doubling up to 30 s (`journal_restarts`). Entries that cannot be
+  parsed or are longer than about 6 × `max_line_bytes` as JSON are skipped
+  and counted (`journal_entries_skipped`). While the output is blocked,
+  logwizz stops reading; the entries wait in the journal.
+- Only the system journal is read, never a namespace, so logwizz never sees
+  its own events (which are in the `logwizz` namespace).
+- The service needs read access to the journal. With the packaged unit, add
+  this drop-in (`systemctl edit logwizz`):
+
+  ```ini
+  [Service]
+  SupplementaryGroups=systemd-journal
+  # journalctl reads /proc/sys/kernel/random/boot_id, which ProcSubset=pid hides.
+  ProcSubset=all
+  ```
+- Do not watch a file and the journal for the same messages (for example
+  `/var/log/auth.log` and sshd in the journal on a host with rsyslog): each
+  line would be matched twice.
+
 ### `[[rules]]`
 
 | Key | Default | Meaning |
@@ -262,7 +309,7 @@ One JSON object per line. Schema version `1`:
 | `ts` | string | Detection time, RFC 3339 UTC with microseconds, e.g. `2026-10-24T08:15:35.120318Z`. |
 | `host` | string | Hostname. |
 | `pid` | integer | logwizz process ID. |
-| `file` | string | Configured path the line came from. If the file was rotated away, this is still the configured path. |
+| `file` | string | Configured path the line came from, or `journal`. If the file was rotated away, this is still the configured path. |
 | `rule` | string | Rule `id`. |
 | `description` | string | Rule description. |
 | `severity` | string | Rule severity. |
@@ -447,7 +494,7 @@ applied one, and logs `configuration reloaded`:
   `on_full`.
 - **Need a restart:** `startup_mode`, `max_line_bytes`, `diagnostics`,
   `state_file`, `state_flush_ms`, `format`, `destination`,
-  `queue_capacity` and `syslog_prefix`. A change to any of them is logged as a warning naming
+  `queue_capacity`, `syslog_prefix` and `[journal]`. A change to any of them is logged as a warning naming
   the settings, and their running values are kept.
 
 Events queued before the reload are written with the file and rule names
@@ -459,7 +506,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0 glob_matches_refused=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -483,6 +530,8 @@ retry.
 | `read_errors` | Episodes of unreadable files or paths that are not regular files. A new file that is briefly unreadable while its owner or mode is set is not counted. |
 | `notify_overflows` | inotify queue overflows (each one triggers a full rescan). |
 | `rotations`, `truncations` | Detected replacements and truncations. |
+| `journal_entries_skipped` | Journal entries that could not be parsed or were too long. |
+| `journal_restarts` | Times journalctl was started again after it exited or could not be started. |
 | `glob_matches_refused` | Files matching a glob that were not followed because of `max_glob_files`. Each file is counted once while it stays refused. |
 | `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 

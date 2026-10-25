@@ -60,6 +60,11 @@ PrivateTmp=yes
 PrivateDevices=yes
 ProtectProc=invisible
 ProcSubset=pid
+# Reading [journal]: journalctl needs the systemd-journal group and
+# /proc/sys/kernel/random/boot_id. Add with `systemctl edit logwizz`:
+#   [Service]
+#   SupplementaryGroups=systemd-journal
+#   ProcSubset=all
 
 # Kernel and system interfaces
 ProtectKernelTunables=yes

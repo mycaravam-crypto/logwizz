@@ -1,0 +1,200 @@
+//! Journal input end to end, with a fake `journalctl` first on `PATH` that
+//! records its arguments and prints a prepared feed.
+
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, channel};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const RULES: &str = r#"
+[[rules]]
+id = "ssh"
+match_type = "regex"
+pattern = 'Failed password for \S+ from (?P<src>\S+)'
+severity = "warning"
+"#;
+
+/// `follow`: keep running after the feed like `journalctl -f`; otherwise
+/// exit, so that logwizz has to restart it.
+fn fake_journalctl(dir: &Path, feed: &str, follow: bool) {
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(dir.join("feed"), feed).unwrap();
+    let tail = if follow { "exec sleep 1000" } else { "exit 0" };
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> '{d}/args'\ncat '{d}/feed'\n{tail}\n",
+        d = dir.display()
+    );
+    let path = bin.join("journalctl");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+struct Daemon {
+    child: Child,
+    stdout: Receiver<String>,
+    stderr: Receiver<String>,
+}
+
+fn lines_of(r: impl std::io::Read + Send + 'static) -> Receiver<String> {
+    let (tx, rx) = channel();
+    thread::spawn(move || {
+        for line in BufReader::new(r).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+impl Daemon {
+    fn start(dir: &Path, config: &str) -> Self {
+        let cfg = dir.join("logwizz.toml");
+        fs::write(&cfg, config).unwrap();
+        let path = format!(
+            "{}:{}",
+            dir.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_logwizz"))
+            .arg("--config")
+            .arg(&cfg)
+            .env("PATH", path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = lines_of(child.stdout.take().unwrap());
+        let stderr = lines_of(child.stderr.take().unwrap());
+        Daemon {
+            child,
+            stdout,
+            stderr,
+        }
+    }
+
+    fn event(&self) -> serde_json::Value {
+        let line = self
+            .stdout
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no event on stdout");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn wait_stderr(&self, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.stderr.recv_timeout(left) {
+                Ok(l) if l.contains(needle) => return l,
+                Ok(_) => {}
+                Err(_) => panic!("{needle:?} not seen on stderr"),
+            }
+        }
+    }
+
+    fn stop(mut self) {
+        // SAFETY: plain kill(2) on our own child's pid.
+        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        assert!(self.child.wait().unwrap().success());
+    }
+}
+
+fn entry(cursor: &str, message: &str) -> String {
+    format!(
+        "{{\"__CURSOR\":\"{cursor}\",\"MESSAGE\":{},\"_TRANSPORT\":\"syslog\"}}\n",
+        serde_json::to_string(message).unwrap()
+    )
+}
+
+#[test]
+fn journal_entries_are_matched_and_the_cursor_is_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut feed = entry("c1", "Failed password for root from 192.0.2.7 port 22 ssh2");
+    feed.push_str("{\"__CURSOR\":\"c2\"}\n"); // no MESSAGE
+    feed.push_str("not json\n");
+    // Not valid UTF-8: journalctl writes a byte array. "Failed password for x from y\xff"
+    let mut bytes: Vec<u8> = b"Failed password for x from 192.0.2.8".to_vec();
+    bytes.push(0xff);
+    feed.push_str(&format!(
+        "{{\"__CURSOR\":\"c3\",\"MESSAGE\":{}}}\n",
+        serde_json::to_string(&bytes).unwrap()
+    ));
+    fake_journalctl(dir.path(), &feed, true);
+    let state = dir.path().join("offsets.json");
+    let config = format!(
+        "[general]\ndiagnostics = \"info\"\nstate_file = {:?}\nstate_flush_ms = 100\n\n[journal]\nmatches = [\"SYSLOG_IDENTIFIER=sshd\"]\n{RULES}",
+        state.display().to_string()
+    );
+
+    let d = Daemon::start(dir.path(), &config);
+    let ev = d.event();
+    assert_eq!(ev["file"], "journal");
+    assert_eq!(ev["rule"], "ssh");
+    assert_eq!(ev["fields"]["src"], "192.0.2.7");
+    let ev = d.event();
+    assert_eq!(ev["line"], "Failed password for x from 192.0.2.8\u{fffd}");
+    // SAFETY: plain kill(2) on our own child's pid.
+    unsafe { libc::kill(d.child.id() as i32, libc::SIGUSR1) };
+    let stats = d.wait_stderr("statistics");
+    assert!(stats.contains("journal_entries_skipped=1"), "{stats}");
+    assert!(stats.contains("lines_processed=2"), "{stats}");
+    d.stop();
+
+    let args = fs::read_to_string(dir.path().join("args")).unwrap();
+    assert_eq!(
+        args.lines().next().unwrap(),
+        "--follow --output=json --no-pager --quiet --lines=0 SYSLOG_IDENTIFIER=sshd"
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    assert_eq!(saved["journal_cursor"], "c3");
+
+    // A restart continues after the saved cursor.
+    fs::write(dir.path().join("feed"), "").unwrap();
+    let d = Daemon::start(dir.path(), &config);
+    d.wait_stderr("following the journal");
+    thread::sleep(Duration::from_millis(300));
+    d.stop();
+    let args = fs::read_to_string(dir.path().join("args")).unwrap();
+    assert!(
+        args.lines().nth(1).unwrap().contains("--after-cursor=c3"),
+        "{args}"
+    );
+}
+
+#[test]
+fn journalctl_is_restarted_after_the_last_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    fake_journalctl(
+        dir.path(),
+        &entry("k7", "Failed password for root from 192.0.2.9 port 22 ssh2"),
+        false,
+    );
+    let config = format!("[general]\ndiagnostics = \"info\"\n\n[journal]\n{RULES}");
+    let d = Daemon::start(dir.path(), &config);
+    assert_eq!(d.event()["fields"]["src"], "192.0.2.9");
+    d.wait_stderr("journalctl exited; restarting");
+    // The restart (after a 1 s delay) asks for entries after k7 only, so
+    // the entry the fake prints again is a duplicate the real journalctl
+    // would not send; it is enough to check the arguments.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let args = loop {
+        let args = fs::read_to_string(dir.path().join("args")).unwrap_or_default();
+        if args.lines().count() >= 2 || Instant::now() > deadline {
+            break args;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        args.lines()
+            .nth(1)
+            .is_some_and(|l| l.contains("--after-cursor=k7")),
+        "{args}"
+    );
+    d.stop();
+}
