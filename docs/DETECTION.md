@@ -93,7 +93,7 @@ for open ports, or use the `! --dports` list as shown. Repeat with `ip6tables` f
 |---|---|
 | Debian, Ubuntu (with rsyslog) | `/var/log/kern.log` (and `/var/log/syslog`) |
 | RHEL, Rocky, Alma, CentOS | `/var/log/messages` |
-| Debian 12+, Fedora, Arch without rsyslog | only the journal: install rsyslog (`apt install rsyslog`) until logwizz can read the journal (#40) |
+| Debian 12+, Fedora, Arch without rsyslog | only the journal: configure the `[journal]` source in logwizz; see the README section on journal input |
 
 Watch kernel messages in **one** file: on Debian and Ubuntu every firewall
 line is in both `kern.log` and `syslog`, and watching both counts it twice.
@@ -107,8 +107,12 @@ systemctl restart logwizz
 ```
 
 Adjust the `[[files]]` paths to your distribution (comments in the file),
-and enable the web access log if you run a web server. To keep your existing
-rules, copy the `[[rules]]` blocks you want into your configuration instead.
+and enable the web access log if you run a web server. On systems without
+rsyslog, use the `[journal]` source instead of enabling file paths for the
+same kernel or SSH messages. For example, add `[journal]` with
+`matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIER=sshd-session"]`
+and follow the README's journal-access drop-in instructions. To keep your
+existing rules, copy the `[[rules]]` blocks you want into your configuration instead.
 
 ## 3. Test it
 
