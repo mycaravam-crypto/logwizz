@@ -2,6 +2,7 @@
 //! their thresholds.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use logwizz::config::{self, Config};
@@ -87,8 +88,9 @@ fn port_scan_fires_once_per_source() {
     let i = cfg.rules.iter().position(|r| r.id == "port_scan").unwrap();
     let rule = &cfg.rules[i];
     let t = rule.threshold.as_ref().unwrap();
-    let mut th = Thresholds::new(cfg.rules.len(), cfg.limits.threshold_max_groups);
-    let (m, now) = (Metrics::default(), Instant::now());
+    let m = Arc::new(Metrics::default());
+    let mut th = Thresholds::new(cfg.rules.len(), cfg.limits.threshold_max_groups, m);
+    let now = Instant::now();
     let mut fired = Vec::new();
     for port in 1..=1000 {
         for src in ["203.0.113.66", "192.0.2.10"] {
@@ -98,7 +100,7 @@ fn port_scan_fires_once_per_source() {
                 "kernel: logwizz-drop: IN=eth0 SRC={src} DST=198.51.100.1 PROTO=TCP DPT={dpt} SYN"
             );
             let fields = rule.matcher.fields(line.as_bytes());
-            if let Some(f) = th.observe(i, &rule.id, t, 0, &fields, now, &m) {
+            if let Some(f) = th.observe(i, &rule.id, t, 0, &fields, now) {
                 fired.push((
                     String::from_utf8_lossy(&f.group.unwrap()).into_owned(),
                     port,
