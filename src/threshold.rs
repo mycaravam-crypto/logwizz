@@ -10,6 +10,7 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracing::warn;
@@ -54,16 +55,18 @@ pub struct Thresholds {
     hasher: RandomState,
     evictions_since_warning: u64,
     last_warning: Option<Instant>,
+    metrics: Arc<Metrics>,
 }
 
 impl Thresholds {
-    pub fn new(rules: usize, max_groups: usize) -> Self {
+    pub fn new(rules: usize, max_groups: usize, metrics: Arc<Metrics>) -> Self {
         Thresholds {
             tables: (0..rules).map(|_| Table::default()).collect(),
             max_groups,
             hasher: RandomState::new(),
             evictions_since_warning: 0,
             last_warning: None,
+            metrics,
         }
     }
 
@@ -84,7 +87,6 @@ impl Thresholds {
     /// Counts one match of `rule`. `fields` are the match's captured values
     /// as (group index, value). Returns what to report if this match makes
     /// the group reach its threshold, `None` if it is absorbed.
-    #[allow(clippy::too_many_arguments)]
     pub fn observe(
         &mut self,
         rule: usize,
@@ -93,7 +95,6 @@ impl Thresholds {
         file: usize,
         fields: &[(usize, Box<[u8]>)],
         now: Instant,
-        m: &Metrics,
     ) -> Option<Fired> {
         let field = |i: usize| fields.iter().find(|(g, _)| *g == i).map(|(_, v)| &**v);
         let file_key = file.to_le_bytes();
@@ -110,7 +111,7 @@ impl Thresholds {
         let table = &mut self.tables[rule];
         if !table.groups.contains_key(key) && table.groups.len() >= self.max_groups {
             let evicted = evict(table, t, now);
-            metrics::add(&m.threshold_evictions, evicted);
+            metrics::add(&self.metrics.threshold_evictions, evicted);
             self.evictions_since_warning += evicted;
             if self
                 .last_warning
@@ -169,6 +170,9 @@ impl Thresholds {
 /// keys costs amortised O(1) per key. Returns the number dropped.
 fn evict(table: &mut Table, t: &Threshold, now: Instant) -> u64 {
     let before = table.groups.len();
+    if before == 0 {
+        return 0;
+    }
     let idle = |g: &Group| {
         now.saturating_duration_since(g.start) >= t.window
             && g.silent_until.is_none_or(|until| now >= until)
@@ -215,9 +219,10 @@ mod tests {
 
     #[test]
     fn fires_once_at_count_then_cools_down() {
-        let (mut th, m, t0) = (Thresholds::new(1, 100), Metrics::default(), Instant::now());
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::Capture(1), None, 3);
-        let mut obs = |s, src| th.observe(0, "r", &t, 0, &f(src, "22"), secs(t0, s), &m);
+        let mut obs = |s, src| th.observe(0, "r", &t, 0, &f(src, "22"), secs(t0, s));
         assert_eq!(obs(0, "a"), None);
         assert_eq!(obs(1, "a"), None);
         assert_eq!(obs(1, "b"), None, "other group");
@@ -234,9 +239,10 @@ mod tests {
 
     #[test]
     fn distinct_counts_values_not_matches() {
-        let (mut th, m, t0) = (Thresholds::new(1, 100), Metrics::default(), Instant::now());
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::Capture(1), Some(2), 3);
-        let mut obs = |dpt| th.observe(0, "r", &t, 0, &f("a", dpt), t0, &m);
+        let mut obs = |dpt| th.observe(0, "r", &t, 0, &f("a", dpt), t0);
         for _ in 0..100 {
             assert_eq!(obs("22"), None, "same port again and again");
         }
@@ -246,9 +252,10 @@ mod tests {
 
     #[test]
     fn window_expiry_resets_the_count() {
-        let (mut th, m, t0) = (Thresholds::new(1, 100), Metrics::default(), Instant::now());
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::All, None, 2);
-        let mut obs = |s| th.observe(0, "r", &t, 0, &[], secs(t0, s), &m);
+        let mut obs = |s| th.observe(0, "r", &t, 0, &[], secs(t0, s));
         assert_eq!(obs(0), None);
         assert_eq!(obs(10), None, "first match of a new window");
         assert_eq!(obs(11).map(|f| (f.group, f.count)), Some((None, 2)));
@@ -256,50 +263,56 @@ mod tests {
 
     #[test]
     fn file_grouping_and_missing_captures() {
-        let (mut th, m, t0) = (Thresholds::new(1, 100), Metrics::default(), Instant::now());
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::File, None, 2);
-        assert_eq!(th.observe(0, "r", &t, 0, &[], t0, &m), None);
-        assert_eq!(th.observe(0, "r", &t, 1, &[], t0, &m), None, "other file");
-        assert!(th.observe(0, "r", &t, 0, &[], t0, &m).is_some());
+        assert_eq!(th.observe(0, "r", &t, 0, &[], t0), None);
+        assert_eq!(th.observe(0, "r", &t, 1, &[], t0), None, "other file");
+        assert!(th.observe(0, "r", &t, 0, &[], t0).is_some());
         // A match without the grouping capture is not counted.
         let t = threshold(GroupBy::Capture(5), None, 1);
-        assert_eq!(th.observe(0, "r", &t, 0, &f("a", "1"), t0, &m), None);
+        assert_eq!(th.observe(0, "r", &t, 0, &f("a", "1"), t0), None);
     }
 
     #[test]
     fn full_table_evicts_and_keeps_tracking() {
-        let (mut th, m, t0) = (Thresholds::new(1, 16), Metrics::default(), Instant::now());
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 16, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::Capture(1), None, 2);
         let ms = |n: u64| t0 + Duration::from_millis(n);
         for i in 0..16 {
-            th.observe(0, "r", &t, 0, &f(&i.to_string(), "1"), ms(i), &m);
+            th.observe(0, "r", &t, 0, &f(&i.to_string(), "1"), ms(i));
         }
         // Full, nothing idle: the least recently seen eighth (2 groups) goes.
-        assert_eq!(th.observe(0, "r", &t, 0, &f("new", "1"), ms(16), &m), None);
+        assert_eq!(th.observe(0, "r", &t, 0, &f("new", "1"), ms(16)), None);
         assert_eq!(m.snapshot().threshold_evictions, 2);
         assert_eq!(th.tables[0].groups.len(), 15);
         assert!(!th.tables[0].groups.contains_key(&b"0"[..]));
         assert!(!th.tables[0].groups.contains_key(&b"1"[..]));
-        assert!(
-            th.observe(0, "r", &t, 0, &f("new", "1"), ms(17), &m)
-                .is_some()
-        );
-        th.observe(0, "r", &t, 0, &f("x", "1"), ms(18), &m);
+        assert!(th.observe(0, "r", &t, 0, &f("new", "1"), ms(17)).is_some());
+        th.observe(0, "r", &t, 0, &f("x", "1"), ms(18));
         // Once their windows are over, all idle groups are dropped at once;
         // "new" is in its cooldown and stays.
-        th.observe(0, "r", &t, 0, &f("late", "1"), secs(t0, 30), &m);
+        th.observe(0, "r", &t, 0, &f("late", "1"), secs(t0, 30));
         assert_eq!(m.snapshot().threshold_evictions, 2 + 15);
         assert_eq!(th.tables[0].groups.len(), 2);
     }
 
     #[test]
+    fn evicting_an_empty_table_is_a_no_op() {
+        let t = threshold(GroupBy::All, None, 1);
+        assert_eq!(evict(&mut Table::default(), &t, Instant::now()), 0);
+    }
+
+    #[test]
     fn reconfigure_keeps_unchanged_rules() {
-        let (mut th, m, t0) = (Thresholds::new(2, 100), Metrics::default(), Instant::now());
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(2, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::All, None, 2);
-        th.observe(1, "r", &t, 0, &[], t0, &m);
+        th.observe(1, "r", &t, 0, &[], t0);
         // Rule 1 moves to index 0, a new rule takes index 1.
         th.reconfigure(100, &[Some(1), None]);
-        assert!(th.observe(0, "r", &t, 0, &[], t0, &m).is_some());
-        assert_eq!(th.observe(1, "r", &t, 0, &[], t0, &m), None);
+        assert!(th.observe(0, "r", &t, 0, &[], t0).is_some());
+        assert_eq!(th.observe(1, "r", &t, 0, &[], t0), None);
     }
 }

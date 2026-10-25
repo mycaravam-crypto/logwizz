@@ -99,7 +99,11 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     let mut pipeline = Pipeline {
         engine: Engine::new(cfg.rules.clone()),
         limiter: Limiter::new(&cfg.limits, cfg.rules.len()),
-        thresholds: Thresholds::new(cfg.rules.len(), cfg.limits.threshold_max_groups),
+        thresholds: Thresholds::new(
+            cfg.rules.len(),
+            cfg.limits.threshold_max_groups,
+            Arc::clone(&metrics),
+        ),
         dispatcher,
         metrics: Arc::clone(&metrics),
         meta,
@@ -193,7 +197,7 @@ impl Pipeline {
             let fields = r.matcher.fields(line.bytes);
             let threshold = match &r.threshold {
                 None => None,
-                Some(t) => match thresholds.observe(rule, &r.id, t, file, &fields, now, metrics) {
+                Some(t) => match thresholds.observe(rule, &r.id, t, file, &fields, now) {
                     Some(fired) => {
                         metrics::inc(&metrics.threshold_fired);
                         Some(fired)

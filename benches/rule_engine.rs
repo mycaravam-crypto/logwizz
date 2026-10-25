@@ -15,6 +15,7 @@
 use std::hint::black_box;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -177,9 +178,8 @@ fn bench_threshold(c: &mut Criterion) {
             src & 255
         )
     };
-    let m = Metrics::default();
     let now = Instant::now();
-    let mut th = Thresholds::new(1, 4096);
+    let mut th = Thresholds::new(1, 4096, Arc::new(Metrics::default()));
     let lines: Vec<String> = (0..1000).map(|p| line(1, p)).collect();
     let mut i = 0;
     g.bench_function("one_scanner", |b| {
@@ -187,17 +187,17 @@ fn bench_threshold(c: &mut Criterion) {
             i = (i + 1) % lines.len();
             let l = lines[i].as_bytes();
             let fields = matcher.fields(black_box(l));
-            th.observe(0, "scan", &t, 0, &fields, now, &m)
+            th.observe(0, "scan", &t, 0, &fields, now)
         })
     });
-    let mut th = Thresholds::new(1, 4096);
+    let mut th = Thresholds::new(1, 4096, Arc::new(Metrics::default()));
     let mut src = 0u32;
     g.bench_function("new_sources_full_table", |b| {
         b.iter(|| {
             src = src.wrapping_add(1);
             let l = line(src, 22);
             let fields = matcher.fields(black_box(l.as_bytes()));
-            th.observe(0, "scan", &t, 0, &fields, now, &m)
+            th.observe(0, "scan", &t, 0, &fields, now)
         })
     });
     g.finish();
