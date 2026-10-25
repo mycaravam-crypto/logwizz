@@ -105,6 +105,8 @@ PY
 SINK=$!
 systemd-analyze verify /etc/systemd/system/logwizz-notify.service || res notify_verify FAIL
 systemctl daemon-reload; systemctl start logwizz-notify; sleep 2
+# The notifier's own messages, for FAIL details.
+notify_log() { journalctl -u logwizz-notify -n 15 -o cat --no-pager | tr '\n' ';'; }
 sunk() { grep -cF -- "$1" /root/sink.txt 2>/dev/null; }
 wait_sunk() { local t=0; while (( t < 100 )); do [[ $(sunk "$1") -ge 1 ]] && return 0; sleep 0.1; t=$((t+1)); done; return 1; }
 logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY1 from 192.0.2.1"
@@ -117,7 +119,7 @@ if [[ $(sunk LWZ-NOTIFY1) == 1 && $(sunk LWZ-NOTIFY2) == 1 && $(sunk LWZ-T0) == 
    jq -e '.body | fromjson | select(.rule == "ssh_failed_login")' < <(grep -F LWZ-NOTIFY2 /root/sink.txt) >/dev/null; then
   res notify PASS "warning events posted once across a restart, info filtered"
 else
-  res notify FAIL "NOTIFY1=$(sunk LWZ-NOTIFY1) NOTIFY2=$(sunk LWZ-NOTIFY2) T0=$(sunk LWZ-T0) $(systemctl status logwizz-notify --no-pager | tail -5 | tr '\n' ';')"
+  res notify FAIL "NOTIFY1=$(sunk LWZ-NOTIFY1) NOTIFY2=$(sunk LWZ-NOTIFY2) T0=$(sunk LWZ-T0) $(notify_log)"
 fi
 # ntfy format with an auth header, and log content that tries shell injection.
 printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\n' > /etc/logwizz/notify.env
@@ -129,7 +131,7 @@ if jq -e 'select(.title == "logwizz lwz-hostcheck: ssh_failed_login" and .auth =
    [[ ! -e /var/lib/private/logwizz-notify/pwned ]]; then
   res notify_ntfy PASS "title, auth header file, log content not executed"
 else
-  res notify_ntfy FAIL "$n3 $(ls /var/lib/private/logwizz-notify/)"
+  res notify_ntfy FAIL "$n3 $(ls /var/lib/private/logwizz-notify/) $(notify_log)"
 fi
 res notify_security PASS "$(systemd-analyze security logwizz-notify --no-pager | tail -1)"
 systemctl stop logwizz-notify; kill "$SINK"
