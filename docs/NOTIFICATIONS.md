@@ -56,6 +56,7 @@ Keep `notify.env` owned by root and mode `0600`. The bot token, endpoint URLs an
 | `NOTIFY_WINDOW_SECS` | `60` | Aggregation window, 10–3600 seconds. |
 | `NOTIFY_MIN_PRIORITY` | `warning` | Lowest severity forwarded: `debug`, `info`, `notice`, `warning`, `error` (or `err`), `critical` (or `crit`). |
 | `NOTIFY_MAX_PENDING` | `4096` | Maximum pending rule/window summaries, 1–65536. |
+| `NOTIFY_FIELDS` | `login` | Captures that may be sent, comma-separated (up to 16 names of `a-z`, `0-9`, `_`). See [Sources and fields](#sources-and-fields). |
 
 Invalid settings stop the notifier with exit code 2 and a message that names the variable but never its value.
 
@@ -82,9 +83,28 @@ their counts. ntfy receives the plain-text form shown under
 
 - Events are grouped by **rule and fixed event-time window**: a window starts at a multiple of `NOTIFY_WINDOW_SECS` since the epoch, in the event's own `ts`.
 - Each summary contains the host, rule ID, description, severity, count, window start/end and the sources seen.
-- The source of an event is its `src` (or `source`) capture, or else the group of a threshold rule. If every event in a summary has the same source, that source is shown. Otherwise the summary says `multiple` and lists the five most frequent sources with their counts, for example `Sources: 203.0.113.8 (30), 198.51.100.4 (7) and 3 more`.
+- The source of an event is its `src` (or `source`) capture, or else the group of a threshold rule, extended by the fields in `NOTIFY_FIELDS` (see [Sources and fields](#sources-and-fields)). If every event in a summary has the same source, that source is shown. Otherwise the summary says `multiple` and lists the five most frequent sources with their counts, for example `Sources: 203.0.113.8 (30), 198.51.100.4 (7) and 3 more`.
 - Up to 32 distinct sources are tracked per summary. Beyond that, the least frequent one is replaced, so a source responsible for a large share of the matches is still listed even among thousands of one-off sources; the counts are then approximate and the message says so.
-- Raw log lines, excerpts and captures other than the source are never included in outbound summaries.
+- Raw log lines, excerpts and captures other than the source and the fields in `NOTIFY_FIELDS` are never included in outbound summaries.
+
+## Sources and fields
+
+`NOTIFY_FIELDS` lists the captures that may leave the host; all others stay
+local. A listed `login` is shown as `login@src`; the values of the other
+listed fields follow the source, joined by ` · `. An event without an address
+shows the field values alone. With `NOTIFY_FIELDS=login,key,tool,cmd,change`
+and `config/detection.toml`:
+
+| Rule | Source |
+|---|---|
+| `ssh_login` | `deploy@203.0.113.8 · ED25519 SHA256:4Qs8…` |
+| `scanner_user_agent` | `203.0.113.8 · sqlmap` |
+| `account_change` | `usermod · add 'deploy' to group 'sudo'` |
+
+List only captures that cannot hold secrets: values from a fixed list
+(`tool`), fixed formats (`key`) or messages that never contain passwords
+(`change`). Never list a capture of failed-login usernames: people type
+passwords into the username prompt.
 - A window is sent once it is over: when a later window has started, or when its end has passed by the clock and the journal has gone quiet. While a backlog is read (after a restart, for example) a window is not sent until the backlog has moved past it, so it is not split into several summaries.
 - On `systemctl stop` or `restart`, pending windows are sent before exit, open ones as partial summaries. Sending at shutdown stops after 30 seconds; what is left stays on disk for the next start.
 - `NOTIFY_MAX_PENDING` caps pending rule/window summaries. When the cap is reached, the notifier pauses reading the journal without advancing its cursor, keeps delivering, and resumes once summaries have been sent. Entries wait in the journal meanwhile; nothing is lost.

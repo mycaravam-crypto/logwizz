@@ -117,7 +117,10 @@ cooldown_secs = 3600
 id = "ssh_login"
 description = "Successful SSH login"
 match_type = "regex"
-pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for \S+ from (?P<src>[0-9A-Fa-f.:]+) port \d+'
+# logwizz-notify shows the `login` capture as login@src, and `key` (the key
+# type and fingerprint) with NOTIFY_FIELDS. Capture `login` only on successful
+# logins: failed ones can carry a password typed as the username.
+pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for (?P<login>\S+) from (?P<src>[0-9A-Fa-f.:]+) port \d+(?: ssh2: (?P<key>\S+ SHA256:\S+))?'
 severity = "warning"           # every login notifies; drop this rule if that is too chatty
 
 [[rules]]
@@ -140,7 +143,9 @@ severity = "error"
 id = "account_change"
 description = "User, group or password changed"
 match_type = "regex"
-pattern = '(?:useradd|userdel|usermod|groupadd|groupdel|groupmod|gpasswd|chpasswd|passwd)\[\d+\]: '
+# `cmd` and `change` (what changed) reach notifications with NOTIFY_FIELDS.
+# These tools never log passwords.
+pattern = '(?P<cmd>useradd|userdel|usermod|groupadd|groupdel|groupmod|gpasswd|chpasswd|passwd)\[\d+\]: (?P<change>.+)'
 severity = "warning"
 
 # --- Web ---
@@ -150,7 +155,8 @@ id = "scanner_user_agent"
 description = "Request from a known scanning tool"
 match_type = "regex"
 # Combined log format (nginx, Apache) or Caddy's JSON access log.
-pattern = '^(?:\{.*?"remote_ip":")?(?P<src>[^\s"]+)[\s"].*(?i:Nmap Scripting Engine|masscan|zgrab|sqlmap|nikto|nuclei)'
+# `tool` can only be one of the listed names, so it is safe to notify.
+pattern = '^(?:\{.*?"remote_ip":")?(?P<src>[^\s"]+)[\s"].*(?P<tool>(?i:Nmap Scripting Engine|masscan|zgrab|sqlmap|nikto|nuclei))'
 severity = "warning"
 [rules.threshold]
 group_by = "src"

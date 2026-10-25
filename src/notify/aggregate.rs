@@ -27,7 +27,7 @@ const MAX_DESCRIPTION_BYTES: usize = 160;
 const MAX_SOURCE_BYTES: usize = 128;
 
 /// One detection event, reduced to what a summary may contain. Never holds
-/// the log line or any capture other than the source.
+/// the log line or any capture other than the source and the listed fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detection {
     /// Event time, seconds since the epoch.
@@ -36,7 +36,11 @@ pub struct Detection {
     pub host: String,
     pub severity: Severity,
     pub description: String,
+    /// `[login@]src`, then the values of the listed fields, joined by " · ".
     pub source: Option<String>,
+    /// The source starts with an address (src, source or threshold group),
+    /// not only with field values.
+    pub addressed: bool,
 }
 
 /// Why a journal message was not turned into a [`Detection`].
@@ -76,7 +80,11 @@ impl Detection {
     /// Parses a logwizz JSON event. `journal_time` (the entry's
     /// `__REALTIME_TIMESTAMP`, in seconds) is used when `ts` is missing or
     /// invalid; the second value is then `true`.
-    pub fn parse(message: &str, journal_time: Option<u64>) -> Result<(Self, bool), NotAnEvent> {
+    pub fn parse(
+        message: &str,
+        journal_time: Option<u64>,
+        fields: &[String],
+    ) -> Result<(Self, bool), NotAnEvent> {
         if !message.starts_with('{') {
             return Err(NotAnEvent::Other);
         }
@@ -95,11 +103,33 @@ impl Detection {
                 .and_then(|f| f.get(name))
                 .and_then(Value::as_str)
         };
-        let source = field("src")
+        // Only the captures listed in NOTIFY_FIELDS leave the host: `login`
+        // as login@source, the others appended to the source.
+        let listed = |name: &str| {
+            fields
+                .iter()
+                .any(|f| f == name)
+                .then(|| field(name))
+                .flatten()
+                .filter(|v| !v.is_empty())
+        };
+        let address = field("src")
             .or_else(|| field("source"))
             .or(ev.threshold.as_ref().and_then(|t| t.group.as_deref()))
-            .map(|s| clean(s, MAX_SOURCE_BYTES))
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .map(|s| match listed("login") {
+                Some(login) => format!("{login}@{s}"),
+                None => s.to_string(),
+            });
+        let mut parts: Vec<String> = address.iter().cloned().collect();
+        parts.extend(
+            fields
+                .iter()
+                .filter(|f| *f != "login")
+                .filter_map(|f| listed(f))
+                .map(String::from),
+        );
+        let source = Some(clean(&parts.join(" · "), MAX_SOURCE_BYTES)).filter(|s| !s.is_empty());
         Ok((
             Detection {
                 time,
@@ -115,6 +145,7 @@ impl Detection {
                     MAX_DESCRIPTION_BYTES,
                 ),
                 source,
+                addressed: address.is_some(),
             },
             fallback,
         ))
@@ -163,6 +194,10 @@ pub struct Summary {
     /// More distinct sources were seen than could be tracked.
     #[serde(default)]
     pub sources_overflowed: bool,
+    /// Some source started with an address; otherwise the sources are
+    /// field values only (`account_change`) and Telegram drops "from".
+    #[serde(default = "yes")]
+    pub addressed: bool,
     #[serde(default)]
     pub retry_count: u32,
     /// No delivery attempt before this time (seconds since the epoch).
@@ -183,6 +218,7 @@ impl Summary {
             unsourced: 0,
             sources: Vec::new(),
             sources_overflowed: false,
+            addressed: false,
             retry_count: 0,
             retry_after: 0,
         }
@@ -190,6 +226,7 @@ impl Summary {
 
     fn add(&mut self, d: &Detection) {
         self.count += 1;
+        self.addressed |= d.addressed;
         if self.host != d.host {
             self.host = "multiple".into();
         }
@@ -325,8 +362,9 @@ impl Summary {
             html(&self.host),
         );
         if let Some(src) = self.single_source() {
+            let from = if self.addressed { " from" } else { "" };
             s.push_str(&format!(
-                "<b>{}×</b> from <code>{}</code>",
+                "<b>{}×</b>{from} <code>{}</code>",
                 self.count,
                 html(src)
             ));
@@ -336,8 +374,12 @@ impl Summary {
             let top = self.top_sources();
             let approx = if self.sources_overflowed { "~" } else { "" };
             let n = self.sources.len();
-            let noun = if n == 1 { "source" } else { "sources" };
-            s.push_str(&format!("<b>{}×</b> from {approx}{n} {noun}", self.count));
+            let noun = match (self.addressed, n == 1) {
+                (true, true) => " from 1 source".to_string(),
+                (true, false) => format!(" from {approx}{n} sources"),
+                (false, _) => String::new(),
+            };
+            s.push_str(&format!("<b>{}×</b>{noun}", self.count));
             for t in &top {
                 s.push_str(&format!("\n<code>{}</code>  {}", html(&t.source), t.count));
             }
@@ -363,6 +405,10 @@ impl Summary {
         }
         s
     }
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Escapes text for Telegram HTML.
@@ -496,6 +542,7 @@ mod tests {
             severity: Severity::Warning,
             description: "Failed SSH authentication".into(),
             source: source.map(String::from),
+            addressed: source.is_some(),
         }
     }
 
@@ -504,10 +551,19 @@ mod tests {
         let msg = r#"{"v":1,"ts":"2026-10-25T12:40:07.5Z","host":"web1","rule":"ssh",
             "description":"d\nx","severity":"warning","line":"RAW SECRET",
             "fields":{"src":"203.0.113.8","user":"root"}}"#;
-        let (d, fallback) = Detection::parse(msg, None).unwrap();
+        let (d, fallback) = Detection::parse(msg, None, &[]).unwrap();
         assert!(!fallback);
         assert_eq!(d.time, 1_792_932_007);
         assert_eq!(d.source.as_deref(), Some("203.0.113.8"));
+        let login = msg.replace(r#""user":"root""#, r#""login":"root""#);
+        assert_eq!(
+            Detection::parse(&login, None, &["login".into()])
+                .unwrap()
+                .0
+                .source
+                .as_deref(),
+            Some("root@203.0.113.8")
+        );
         assert_eq!(d.description, "d x");
         assert_eq!(d.severity, Severity::Warning);
         assert!(!format!("{d:?}").contains("RAW SECRET"));
@@ -515,7 +571,7 @@ mod tests {
         // Threshold group as source; unknown severity and missing host defaulted.
         let msg = r#"{"v":1,"ts":"2026-10-25T12:40:07Z","rule":"scan","severity":"bogus",
             "threshold":{"group":"192.0.2.7","count":20,"window_secs":10}}"#;
-        let (d, _) = Detection::parse(msg, None).unwrap();
+        let (d, _) = Detection::parse(msg, None, &[]).unwrap();
         assert_eq!(
             (d.source.as_deref(), d.severity, d.host.as_str()),
             (Some("192.0.2.7"), Severity::Notice, "unknown")
@@ -523,9 +579,9 @@ mod tests {
 
         // A bad timestamp falls back to the journal's time, or is refused.
         let msg = r#"{"v":1,"ts":"not-a-timestamp","rule":"r"}"#;
-        assert_eq!(Detection::parse(msg, Some(42)).unwrap().0.time, 42);
-        assert!(Detection::parse(msg, Some(42)).unwrap().1);
-        assert_eq!(Detection::parse(msg, None), Err(NotAnEvent::NoTime));
+        assert_eq!(Detection::parse(msg, Some(42), &[]).unwrap().0.time, 42);
+        assert!(Detection::parse(msg, Some(42), &[]).unwrap().1);
+        assert_eq!(Detection::parse(msg, None, &[]), Err(NotAnEvent::NoTime));
 
         for other in [
             "logwizz started",
@@ -535,7 +591,7 @@ mod tests {
             r#"{"v":1,"ts":"2026-10-25T12:40:07Z"}"#,
         ] {
             assert_eq!(
-                Detection::parse(other, Some(1)),
+                Detection::parse(other, Some(1), &[]),
                 Err(NotAnEvent::Other),
                 "{other}"
             );
@@ -615,6 +671,40 @@ mod tests {
         none.add(&det(0, "a", None));
         assert_eq!(none.source_field(), "");
         assert!(!none.to_text(false).contains("Source"));
+    }
+
+    #[test]
+    fn listed_fields_extend_the_source() {
+        let fields: Vec<String> = ["login", "key", "cmd", "change"].map(String::from).to_vec();
+        let login = r#"{"v":1,"ts":"2026-10-25T12:40:07Z","rule":"ssh_login",
+            "fields":{"src":"203.0.113.8","login":"deploy","key":"ED25519 SHA256:x","user":"secret"}}"#;
+        let (d, _) = Detection::parse(login, None, &fields).unwrap();
+        assert_eq!(
+            d.source.as_deref(),
+            Some("deploy@203.0.113.8 · ED25519 SHA256:x")
+        );
+        assert!(d.addressed);
+        // Unlisted captures stay on the host.
+        let (d, _) = Detection::parse(login, None, &["key".into()]).unwrap();
+        assert_eq!(d.source.as_deref(), Some("203.0.113.8 · ED25519 SHA256:x"));
+
+        let change = r#"{"v":1,"ts":"2026-10-25T12:40:07Z","rule":"account_change",
+            "fields":{"cmd":"usermod","change":"add 'deploy' to group 'sudo'"}}"#;
+        let (d, _) = Detection::parse(change, None, &fields).unwrap();
+        assert_eq!(
+            d.source.as_deref(),
+            Some("usermod · add 'deploy' to group 'sudo'")
+        );
+        assert!(!d.addressed);
+        let mut s = Summary::new(&d, d.time, 60);
+        s.add(&d);
+        assert!(
+            s.to_telegram_html(false)
+                .contains("\n\n<b>1×</b> <code>usermod · add 'deploy' to group 'sudo'</code>\n"),
+            "{}",
+            s.to_telegram_html(false)
+        );
+        assert_eq!(Detection::parse(change, None, &[]).unwrap().0.source, None);
     }
 
     #[test]
