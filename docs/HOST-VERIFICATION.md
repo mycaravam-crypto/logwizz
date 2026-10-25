@@ -8,16 +8,20 @@ systemd host: item 1 of #7, the last check before 0.1.0. Until then the unit had
 
 | | |
 |---|---|
-| Host | Ubuntu 24.04 cloud image (`noble-server-cloudimg-amd64`), fresh VM per run |
-| Kernel / systemd | 6.8.0-147-generic / systemd 255 (255.4-1ubuntu8.18) |
+| Hosts | Ubuntu 24.04, Debian 12 (bookworm) and Debian 13 (trixie) cloud images, one fresh VM per run |
+| Kernel / systemd | Ubuntu baseline: 6.8.0-147-generic / systemd 255 (255.4-1ubuntu8.18); Debian versions are recorded by each run |
 | Virtualisation | qemu, TCG (no KVM in the build container), 4 vCPUs, 3 GiB |
 | logwizz | `main` at 113f614 plus this change, static musl release build (the release asset) |
 | Installation | exactly as the README documents: binary, config `0640 root:adm`, unit, `systemctl enable --now` |
 | Watched files | `/var/log/auth.log`, `/var/log/syslog` (example config), `/var/log/lwtest.log` (test file) |
 
-Reproduce with `tests/host/run-vm.sh`. It boots the VM, runs [`tests/host/hostcheck.sh`](../tests/host/hostcheck.sh)
-inside and prints one `RESULT` line per check: `PASS`, `FAIL`, or `KNOWN` for a documented limitation. CI runs the
-same script in the `host` workflow; any `FAIL` fails the job.
+Reproduce the default Ubuntu run with `tests/host/run-vm.sh`. The script also accepts
+`IMAGE_URL`, `IMAGE`, `CHECKSUM_FILE`, and `CHECKSUM_TOOL` for other cloud images. The host workflow runs
+Ubuntu 24.04, Debian 12 (bookworm), and Debian 13 (trixie) in separate jobs. Cloud-init installs and starts
+rsyslog because the host test intentionally exercises the file-based `auth.log` and `syslog` paths even on
+Debian images that otherwise default to journal-only logging. Each VM runs [`tests/host/hostcheck.sh`](../tests/host/hostcheck.sh)
+and prints one `RESULT` line per check: `PASS`, `FAIL`, or `KNOWN` for a documented limitation. Any `FAIL`
+fails the corresponding CI job.
 
 ## Results (final run)
 
