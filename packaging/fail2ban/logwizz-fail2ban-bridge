@@ -16,6 +16,7 @@ OUTPUT = Path("/var/log/logwizz/fail2ban.log")
 ELIGIBLE_RULES = {
     "port_scan",
     "fast_scan",
+    "slow_scan",
     "tcp_flag_scan",
     "ssh_bruteforce",
     "ssh_probe",

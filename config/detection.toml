@@ -70,6 +70,21 @@ window_secs = 2
 cooldown_secs = 600
 
 [[rules]]
+id = "slow_scan"
+description = "One source probed many closed ports within an hour"
+# Most background scanners stay under port_scan's rate: a few ports per
+# minute, but over a hundred in an hour.
+match_type = "regex"
+pattern = 'logwizz-drop: .*SRC=(?P<src>\S+) .*DPT=(?P<dpt>\d+)'
+severity = "error"
+[rules.threshold]
+group_by = "src"
+distinct = "dpt"
+count = 50
+window_secs = 3600
+cooldown_secs = 3600
+
+[[rules]]
 id = "tcp_flag_scan"
 description = "TCP packet with flags no normal stack sends (nmap -sN/-sF/-sX)"
 match_type = "regex"
