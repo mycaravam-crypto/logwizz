@@ -30,6 +30,17 @@ class FormatEventTests(unittest.TestCase):
             "logwizz rule=port_scan src=2001:db8::1",
         )
 
+    def test_ipv4_mapped_ipv6_becomes_ipv4(self):
+        self.assertEqual(
+            BRIDGE.format_event(event("ssh_probe", "::ffff:203.0.113.5")),
+            "logwizz rule=ssh_probe src=203.0.113.5",
+        )
+
+    def test_duplicate_events_each_produce_a_line(self):
+        # Fail2ban owns deduplication: a source that is already banned is not banned twice.
+        raw = event("port_scan", "203.0.113.66")
+        self.assertEqual(BRIDGE.format_event(raw), BRIDGE.format_event(raw))
+
     def test_unapproved_rule_is_ignored(self):
         self.assertIsNone(BRIDGE.format_event(event("log_flood", "203.0.113.66")))
 

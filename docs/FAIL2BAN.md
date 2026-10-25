@@ -80,8 +80,10 @@ python3 packaging/fail2ban/test_bridge.py
 The normalized format is intentionally simple:
 
 ```text
-logwizz rule=ssh_bruteforce src=203.0.113.66
+2026-10-25 14:35:31 logwizz rule=ssh_bruteforce src=203.0.113.66
 ```
+
+The timestamp is local time; Fail2ban ignores matches without one.
 
 After enabling the jail, verify it with `fail2ban-client status logwizz`.
 Test on a disposable host or with a controlled test event before relying on
@@ -93,6 +95,12 @@ replacement for reviewing your detection thresholds.
 - **Policy stays in Fail2ban.** The example uses `maxretry = 1` because
   Logwizz's threshold rules already aggregate activity. Tune `findtime`,
   `bantime` and the allowlist for your environment.
+- **IPv4 and IPv6.** Both are accepted and written in canonical form
+  (`2001:db8::1`). IPv4-mapped addresses (`::ffff:203.0.113.5`) are written
+  as IPv4, so the ban hits the address the traffic actually comes from.
+- **Duplicates.** Every eligible event produces one line. Threshold rules
+  already report a source once per cooldown; a repeat for a source that is
+  still banned does nothing in Fail2ban.
 - **Use source-aware rules only.** `log_flood` and other events without a
   validated source address are not eligible.
 - **Avoid self-lockout.** Configure `ignoreip` for loopback, management
