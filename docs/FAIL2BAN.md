@@ -80,8 +80,10 @@ python3 packaging/fail2ban/test_bridge.py
 The normalized format is intentionally simple:
 
 ```text
-logwizz rule=ssh_bruteforce src=203.0.113.66
+2026-10-25 14:35:31 logwizz rule=ssh_bruteforce src=203.0.113.66
 ```
+
+The timestamp is local time; Fail2ban ignores matches without one.
 
 After enabling the jail, verify it with `fail2ban-client status logwizz`.
 Test on a disposable host or with a controlled test event before relying on
