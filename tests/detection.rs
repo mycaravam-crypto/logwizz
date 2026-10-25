@@ -81,21 +81,47 @@ fn rules_match_real_log_lines() {
     ] {
         assert_eq!(hits(&cfg, line), ["sudo_auth_failure "], "{line}");
     }
-    for line in [
-        "2026-10-25T14:19:50.1+01:00 web1 usermod[56460]: add 'deploy' to group 'adm'",
-        "Oct 25 10:00:04 web1 useradd[2001]: new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash, from=/dev/pts/0",
-        "Oct 25 10:00:04 web1 passwd[2002]: pam_unix(passwd:chauthtok): password changed for root",
+    for (line, fields) in [
+        (
+            "2026-10-25T14:19:50.1+01:00 web1 usermod[56460]: add 'deploy' to group 'adm'",
+            "cmd=usermod change=add 'deploy' to group 'adm'",
+        ),
+        (
+            "Oct 25 10:00:04 web1 useradd[2001]: new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash, from=/dev/pts/0",
+            "cmd=useradd change=new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash, from=/dev/pts/0",
+        ),
+        (
+            "Oct 25 10:00:04 web1 passwd[2002]: pam_unix(passwd:chauthtok): password changed for root",
+            "cmd=passwd change=pam_unix(passwd:chauthtok): password changed for root",
+        ),
     ] {
-        assert_eq!(hits(&cfg, line), ["account_change "], "{line}");
+        assert_eq!(
+            hits(&cfg, line),
+            [format!("account_change {fields}")],
+            "{line}"
+        );
     }
     let nse = r#"192.0.2.9 - - [25/Oct/2026:10:00:04 +0000] "GET /nmaplowercheck1729 HTTP/1.1" 404 153 "-" "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)""#;
-    assert_eq!(hits(&cfg, nse), ["scanner_user_agent src=192.0.2.9"]);
+    assert_eq!(
+        hits(&cfg, nse),
+        ["scanner_user_agent src=192.0.2.9 tool=Nmap Scripting Engine"]
+    );
     let caddy = r#"{"level":"info","ts":1761398404.5,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"192.0.2.9","remote_port":"51000","client_ip":"192.0.2.9","proto":"HTTP/1.1","method":"GET","host":"example.org","uri":"/?id=1","headers":{"User-Agent":["sqlmap/1.8.4#stable (https://sqlmap.org)"]}},"status":404}"#;
-    assert_eq!(hits(&cfg, caddy), ["scanner_user_agent src=192.0.2.9"]);
+    assert_eq!(
+        hits(&cfg, caddy),
+        ["scanner_user_agent src=192.0.2.9 tool=sqlmap"]
+    );
     assert_eq!(
         hits(
             &cfg,
             "2026-10-25T14:20:12.5+01:00 web1 sshd-session[56533]: Accepted publickey for deploy from 10.0.0.5 port 34092 ssh2: ED25519 SHA256:x"
+        ),
+        ["ssh_login login=deploy src=10.0.0.5 key=ED25519 SHA256:x"]
+    );
+    assert_eq!(
+        hits(
+            &cfg,
+            "Oct 25 10:00:05 web1 sshd[1260]: Accepted password for deploy from 10.0.0.5 port 52144 ssh2"
         ),
         ["ssh_login login=deploy src=10.0.0.5"]
     );

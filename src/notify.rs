@@ -55,6 +55,8 @@ pub struct Settings {
     pub max_pending: usize,
     pub min_priority: Severity,
     pub state_dir: PathBuf,
+    /// Captures that may leave the host (NOTIFY_FIELDS).
+    pub fields: Vec<String>,
 }
 
 impl Settings {
@@ -115,6 +117,22 @@ impl Settings {
                     .to_string()
             })?,
         };
+        let fields: Vec<String> = var("NOTIFY_FIELDS")
+            .as_deref()
+            .unwrap_or("login")
+            .split(',')
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect();
+        if fields.len() > 16
+            || !fields.iter().all(|f| {
+                f.len() <= 32
+                    && f.bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+        {
+            return Err("NOTIFY_FIELDS must list up to 16 capture names (a-z, 0-9, _)".into());
+        }
         // systemd may pass several directories, separated by ':'.
         let state_dir = var("STATE_DIRECTORY")
             .map(|d| PathBuf::from(d.split(':').next().unwrap_or_default()))
@@ -125,6 +143,7 @@ impl Settings {
             max_pending: number("NOTIFY_MAX_PENDING", 4096, 1, 65536)? as usize,
             min_priority,
             state_dir,
+            fields,
         })
     }
 }
@@ -253,6 +272,7 @@ fn load_legacy(dir: &Path, window_secs: u64) -> State {
             unsourced: if old.source.is_empty() { old.count } else { 0 },
             sources,
             sources_overflowed: overflowed,
+            addressed: true,
             retry_count: old.retry_count,
             retry_after: old.retry_after,
         });
@@ -423,6 +443,7 @@ struct Notifier<D> {
     agg: Aggregator,
     deliver: D,
     state_dir: PathBuf,
+    fields: Vec<String>,
     cursor: Option<String>,
     dirty: bool,
     last_save: Instant,
@@ -485,7 +506,7 @@ impl<D: Deliver> Notifier<D> {
 
     fn consume(&mut self, entry: &Entry) -> Recorded {
         if let Some(message) = &entry.message {
-            match Detection::parse(message, entry.time) {
+            match Detection::parse(message, entry.time, &self.fields) {
                 Ok((d, fallback)) => {
                     if fallback {
                         warn!(rule = %d.rule, "event has no valid timestamp; using the journal's");
@@ -529,6 +550,7 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         agg: Aggregator::new(settings.window_secs, settings.max_pending, state.summaries),
         deliver: settings.transport,
         state_dir: settings.state_dir,
+        fields: settings.fields,
         cursor: state.cursor,
         dirty: !legacy.is_empty(),
         last_save: Instant::now(),
@@ -649,6 +671,7 @@ mod tests {
         assert_eq!((s.window_secs, s.max_pending), (60, 4096));
         assert_eq!(s.min_priority, Severity::Warning);
         assert_eq!(s.state_dir, Path::new("/var/lib/logwizz-notify"));
+        assert_eq!(s.fields, ["login"]);
 
         let err = |pairs: &[(&str, &str)]| Settings::from_env(env(pairs)).unwrap_err();
         assert!(err(&[]).contains("TELEGRAM_BOT_TOKEN is not set"));
@@ -680,6 +703,12 @@ mod tests {
             Path::new("/a")
         );
         assert!(err(&[("NOTIFY_KIND", "email")]).contains("NOTIFY_KIND"));
+        assert_eq!(
+            with(("NOTIFY_FIELDS", "login, key,tool")).unwrap().fields,
+            ["login", "key", "tool"]
+        );
+        assert!(with(("NOTIFY_FIELDS", "Key")).is_err());
+        assert!(with(("NOTIFY_FIELDS", "a b")).is_err());
     }
 
     #[test]
@@ -781,6 +810,7 @@ mod tests {
                 ..Fake::default()
             },
             state_dir: dir.to_path_buf(),
+            fields: vec!["login".into()],
             cursor: None,
             dirty: false,
             last_save: Instant::now(),
