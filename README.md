@@ -178,7 +178,7 @@ Globs are not supported in 0.1.0. List each file explicitly.
 | `description` | `""` | Free text included in events. |
 | `enabled` | `true` | Disabled rules are still compiled, so mistakes surface immediately. |
 | `match_type` | required | `literal`: case-sensitive substring. `regex`: [Rust regex syntax](https://docs.rs/regex/latest/regex/#syntax). Use `(?i)` for case-insensitive matching. |
-| `pattern` | required | Non-empty, at most 4096 bytes. Regexes are limited to 2 MiB compiled size. |
+| `pattern` | required | Non-empty, at most 4096 bytes. Regexes are limited to 2 MiB compiled size. Named capture groups (`(?P<src>\S+)`), at most 16 per rule, become the event's `fields`. |
 | `severity` | required | `debug`, `info`, `notice`, `warning`, `error`, `critical`. |
 
 Rules are compiled once at startup. Every enabled rule is evaluated against
@@ -208,6 +208,7 @@ One JSON object per line. Schema version `1`:
 | `match_type` | string | `literal` or `regex`. |
 | `line` | string | The matching line without its terminator (`\n` or `\r\n`), or its excerpt. Invalid UTF-8 sequences are replaced with U+FFFD. |
 | `truncated` | boolean | `true` if `line` is incomplete (cut at `max_line_bytes` or `max_excerpt_bytes`). |
+| `fields` | object | Only for regex rules with named capture groups: each group that matched, name → value, in pattern order. Values are taken from the whole line (not the excerpt), cut to 256 bytes on a UTF-8 boundary, and converted like `line`. Example: `{"src":"192.0.2.7","dpt":"22"}`. |
 
 Consumers should ignore unknown fields; new fields may be added without a
 version bump.
@@ -220,6 +221,7 @@ version bump.
 
 Control characters in the line are escaped (`\u{1b}`), so log content cannot
 inject terminal escape sequences. A truncated line ends with ` [truncated]`.
+Captured fields follow as ` name=value`, escaped the same way.
 
 ## Behaviour and guarantees
 

@@ -123,6 +123,23 @@ struct JsonEvent<'a> {
     match_type: &'static str,
     line: Cow<'a, str>,
     truncated: bool,
+    #[serde(skip_serializing_if = "Fields::is_empty")]
+    fields: Fields<'a>,
+}
+
+/// Named capture values, serialised as a JSON object in group order.
+struct Fields<'a>(Vec<(&'a str, Cow<'a, str>)>);
+
+impl Fields<'_> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Serialize for Fields<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(k, v)| (k, v)))
+    }
 }
 
 /// Formats one event, including the trailing newline, into `out`.
@@ -145,6 +162,12 @@ pub fn format_event(
     format_rfc3339(ev.time, ts);
     let line = String::from_utf8_lossy(&ev.line);
     let file = t.files[ev.file].to_string_lossy();
+    let fields = Fields(
+        ev.fields
+            .iter()
+            .filter_map(|(i, v)| Some((rule.matcher.group_name(*i)?, String::from_utf8_lossy(v))))
+            .collect(),
+    );
     if syslog_prefix {
         write!(out, "<{}>", rule.severity.syslog_priority())?;
     }
@@ -162,6 +185,7 @@ pub fn format_event(
                 match_type: rule.match_type.as_str(),
                 line,
                 truncated: ev.truncated,
+                fields,
             };
             serde_json::to_writer(&mut *out, &je)?;
         }
@@ -176,6 +200,10 @@ pub fn format_event(
             out.extend_from_slice(escape(&line).as_bytes());
             if ev.truncated {
                 out.extend_from_slice(b" [truncated]");
+            }
+            for (name, value) in &fields.0 {
+                write!(out, " {name}=")?;
+                out.extend_from_slice(escape(value).as_bytes());
             }
         }
     }
@@ -212,11 +240,19 @@ fn escape(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Bytes an event is charged against `max_queue_bytes`: its line plus the
-/// fixed part of the struct.
+/// Bytes an event is charged against `max_queue_bytes`: its line and
+/// captured values plus the fixed part of the struct.
 pub fn event_cost(ev: &Event) -> usize {
-    std::mem::size_of::<Event>() + ev.line.len()
+    let fields: usize = ev
+        .fields
+        .iter()
+        .map(|(_, v)| FIELD_OVERHEAD + v.len())
+        .sum();
+    std::mem::size_of::<Event>() + ev.line.len() + fields
 }
+
+/// Fixed bytes per captured field: its index and the boxed slice.
+const FIELD_OVERHEAD: usize = std::mem::size_of::<(usize, Box<[u8]>)>();
 
 /// What the output queue carries.
 enum Msg {
@@ -688,6 +724,7 @@ mod tests {
             rule: 0,
             line: line.into(),
             truncated,
+            fields: Vec::new(),
         }
     }
 
@@ -699,6 +736,55 @@ mod tests {
         let mut out = Vec::new();
         format_event(format, prefix, &tables(), ev, &mut String::new(), &mut out).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn captured_fields_in_both_formats() {
+        let cfg = config::parse(
+            r#"
+            [[files]]
+            path = "/var/log/kern.log"
+            [[rules]]
+            id = "fw"
+            match_type = "regex"
+            pattern = 'SRC=(?P<src>\S+) DPT=(?P<dpt>\d+)(?P<rest>.*)'
+            severity = "notice"
+            "#,
+            Path::new("t"),
+        )
+        .unwrap();
+        let line = b"SRC=192.0.2.7 DPT=22 \x1b[31m";
+        let ev = Event {
+            fields: cfg.rules[0].matcher.fields(line),
+            ..event(line, false)
+        };
+        let t = Tables {
+            files: cfg.files,
+            rules: cfg.rules,
+            meta: Meta {
+                host: "box".into(),
+                pid: 42,
+            },
+        };
+        let render = |format| {
+            let mut out = Vec::new();
+            format_event(format, false, &t, &ev, &mut String::new(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let v: serde_json::Value = serde_json::from_str(&render(OutputFormat::Json)).unwrap();
+        assert_eq!(
+            v["fields"],
+            serde_json::json!({"src": "192.0.2.7", "dpt": "22", "rest": " \u{1b}[31m"})
+        );
+        let human = render(OutputFormat::Human);
+        assert!(
+            human.ends_with(" src=192.0.2.7 dpt=22 rest= \\u{1b}[31m\n"),
+            "{human}"
+        );
+        assert!(event_cost(&ev) > event_cost(&event(line, false)));
+        // No named groups: no "fields" key at all.
+        let plain = render_with(OutputFormat::Json, false, &event(b"Failed", false));
+        assert!(!plain.contains("fields"), "{plain}");
     }
 
     #[test]

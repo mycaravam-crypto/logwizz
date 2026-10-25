@@ -66,6 +66,8 @@ pub struct Event {
     pub line: Box<[u8]>,
     /// `line` is incomplete: cut at `max_line_bytes` or `max_excerpt_bytes`.
     pub truncated: bool,
+    /// Named capture groups of the rule's regex, as (group index, value).
+    pub fields: Vec<(usize, Box<[u8]>)>,
 }
 
 /// Returns at most `max` bytes of `line`, backing off to a UTF-8 character

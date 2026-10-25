@@ -14,7 +14,7 @@ use memchr::memmem;
 use regex::bytes::RegexBuilder;
 use serde::Deserialize;
 
-use crate::engine::{MatchType, Matcher};
+use crate::engine::{MAX_FIELDS, MatchType, Matcher};
 use crate::error::ConfigError;
 use crate::event::Severity;
 
@@ -565,11 +565,19 @@ fn compile(match_type: MatchType, pattern: &str) -> Result<Matcher, String> {
         MatchType::Literal => Ok(Matcher::Literal(Box::new(
             memmem::Finder::new(pattern.as_bytes()).into_owned(),
         ))),
-        MatchType::Regex => RegexBuilder::new(pattern)
-            .size_limit(REGEX_SIZE_LIMIT)
-            .build()
-            .map(Matcher::Regex)
-            .map_err(|e| format!("invalid regex: {e}")),
+        MatchType::Regex => {
+            let re = RegexBuilder::new(pattern)
+                .size_limit(REGEX_SIZE_LIMIT)
+                .build()
+                .map_err(|e| format!("invalid regex: {e}"))?;
+            let named = re.capture_names().flatten().count();
+            if named > MAX_FIELDS {
+                return Err(format!(
+                    "regex has {named} named capture groups (maximum {MAX_FIELDS})"
+                ));
+            }
+            Ok(Matcher::Regex(re))
+        }
     }
 }
 
@@ -721,6 +729,22 @@ mod tests {
             .replace("\"literal\"", "\"regex\"")
             .replace("Out of memory", r"\\w{1000}\\w{1000}");
         assert!(problems(&text)[0].contains("invalid regex"));
+    }
+
+    #[test]
+    fn named_group_limit() {
+        let groups = |n: usize| -> String {
+            let pattern: String = (0..n).map(|i| format!("(?P<g{i}>x)?")).collect();
+            MINIMAL
+                .replace("\"literal\"", "\"regex\"")
+                .replace("Out of memory", &pattern)
+        };
+        assert!(parse_str(&groups(MAX_FIELDS)).is_ok());
+        let p = problems(&groups(MAX_FIELDS + 1));
+        assert!(
+            p[0].contains("17 named capture groups (maximum 16)"),
+            "{p:?}"
+        );
     }
 
     #[test]
