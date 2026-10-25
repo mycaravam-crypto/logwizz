@@ -141,6 +141,16 @@ impl FileState {
 struct StateFile {
     v: u32,
     files: Vec<Entry>,
+    /// Cursor of the last journal entry handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    journal_cursor: Option<String>,
+}
+
+/// What a state file holds.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Saved {
+    pub files: HashMap<PathBuf, FileState>,
+    pub journal_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,15 +167,20 @@ struct Entry {
 /// Reads the state file. A missing file yields an empty map; an unreadable
 /// or invalid one is reported and also yields an empty map, so a bad state
 /// file never prevents startup.
-pub fn load(path: &Path) -> HashMap<PathBuf, FileState> {
+pub fn load(path: &Path) -> Saved {
     match try_load(path) {
-        Ok(map) => {
-            info!(path = %path.display(), files = map.len(), "loaded saved offsets");
-            map
+        Ok(saved) => {
+            info!(
+                path = %path.display(),
+                files = saved.files.len(),
+                journal = saved.journal_cursor.is_some(),
+                "loaded saved offsets"
+            );
+            saved
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {
             info!(path = %path.display(), "no saved offsets yet");
-            HashMap::new()
+            Saved::default()
         }
         Err(e) => {
             warn!(
@@ -173,12 +188,12 @@ pub fn load(path: &Path) -> HashMap<PathBuf, FileState> {
                 error = %e,
                 "cannot use state file; starting according to startup_mode"
             );
-            HashMap::new()
+            Saved::default()
         }
     }
 }
 
-fn try_load(path: &Path) -> io::Result<HashMap<PathBuf, FileState>> {
+fn try_load(path: &Path) -> io::Result<Saved> {
     let mut text = Vec::new();
     File::open(path)?
         .take(MAX_STATE_BYTES + 1)
@@ -195,7 +210,7 @@ fn try_load(path: &Path) -> io::Result<HashMap<PathBuf, FileState>> {
             state.v
         )));
     }
-    Ok(state
+    let files = state
         .files
         .into_iter()
         .map(|e| {
@@ -212,11 +227,19 @@ fn try_load(path: &Path) -> io::Result<HashMap<PathBuf, FileState>> {
             };
             (e.path, st)
         })
-        .collect())
+        .collect();
+    Ok(Saved {
+        files,
+        journal_cursor: state.journal_cursor,
+    })
 }
 
 /// Atomically replaces the state file with `files`.
-pub fn save(path: &Path, files: &[(&Path, FileState)]) -> io::Result<()> {
+pub fn save(
+    path: &Path,
+    files: &[(&Path, FileState)],
+    journal_cursor: Option<&str>,
+) -> io::Result<()> {
     let state = StateFile {
         v: STATE_VERSION,
         files: files
@@ -230,6 +253,7 @@ pub fn save(path: &Path, files: &[(&Path, FileState)]) -> io::Result<()> {
                 fp: st.fingerprint.hash,
             })
             .collect(),
+        journal_cursor: journal_cursor.map(String::from),
     };
     let mut bytes = serde_json::to_vec(&state).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -258,6 +282,8 @@ pub fn save(path: &Path, files: &[(&Path, FileState)]) -> io::Result<()> {
 pub struct Checkpoint {
     pub events: u64,
     pub files: Vec<(Arc<Path>, FileState)>,
+    /// Cursor of the last journal entry passed to the rules.
+    pub journal: Option<Arc<str>>,
 }
 
 /// Checkpoints recorded by the monitor and not yet saved.
@@ -268,7 +294,11 @@ pub struct Pending {
 
 impl Pending {
     pub fn push(&mut self, cp: Checkpoint) {
-        if self.queue.back().is_some_and(|b| b.files == cp.files) {
+        if self
+            .queue
+            .back()
+            .is_some_and(|b| b.files == cp.files && b.journal == cp.journal)
+        {
             // Nothing moved; keep the older (more easily flushed) one.
             return;
         }
@@ -356,25 +386,29 @@ impl StateWriter {
 
 struct Saver {
     path: PathBuf,
-    last: Option<Vec<(Arc<Path>, FileState)>>,
+    last: Option<Checkpoint>,
     last_warning: Option<Instant>,
     metrics: Arc<Metrics>,
 }
 
 impl Saver {
     fn save(&mut self, cp: Checkpoint) {
-        if self.last.as_ref() == Some(&cp.files) {
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|l| l.files == cp.files && l.journal == cp.journal)
+        {
             return;
         }
         let entries: Vec<(&Path, FileState)> = cp.files.iter().map(|(p, st)| (&**p, *st)).collect();
-        match save(&self.path, &entries) {
+        match save(&self.path, &entries, cp.journal.as_deref()) {
             Ok(()) => {
                 metrics::inc(&self.metrics.state_saves);
                 if self.last_warning.take().is_some() {
                     info!(path = %self.path.display(), "state file written again");
                 }
                 debug!(files = entries.len(), "offsets saved");
-                self.last = Some(cp.files);
+                self.last = Some(cp);
             }
             Err(e) => {
                 metrics::inc(&self.metrics.state_save_errors);
@@ -412,6 +446,7 @@ mod tests {
         Checkpoint {
             events,
             files: vec![(Path::new("/a.log").into(), st(offset))],
+            journal: None,
         }
     }
 
@@ -420,24 +455,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("offsets.json");
         let a = dir.path().join("a.log");
-        save(&path, &[(&a, st(42))]).unwrap();
+        save(&path, &[(&a, st(42))], None).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(!dir.path().join("offsets.json.tmp").exists());
         let map = load(&path);
-        assert_eq!(map.len(), 1);
-        assert_eq!(map[&a], st(42));
+        assert_eq!(map.files.len(), 1);
+        assert_eq!(map.files[&a], st(42));
+        assert_eq!(map.journal_cursor, None);
+        assert!(!fs::read_to_string(&path).unwrap().contains("journal"));
+        save(&path, &[], Some("s=abc;i=1f")).unwrap();
+        assert_eq!(load(&path).journal_cursor.as_deref(), Some("s=abc;i=1f"));
     }
 
     #[test]
     fn missing_corrupt_or_wrong_version_yields_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("offsets.json");
-        assert!(load(&path).is_empty());
+        assert_eq!(load(&path), Saved::default());
         fs::write(&path, "{not json").unwrap();
-        assert!(load(&path).is_empty());
+        assert_eq!(load(&path), Saved::default());
         fs::write(&path, r#"{"v":99,"files":[]}"#).unwrap();
-        assert!(load(&path).is_empty());
+        assert_eq!(load(&path), Saved::default());
     }
 
     #[test]
@@ -507,13 +546,13 @@ mod tests {
             metrics: Arc::new(Metrics::default()),
         };
         saver.save(cp(0, 5));
-        assert_eq!(load(&path)[Path::new("/a.log")], st(5));
+        assert_eq!(load(&path).files[Path::new("/a.log")], st(5));
         let mut reloaded = cp(1, 5);
         reloaded.files = vec![(Path::new("/a.log").into(), st(7))];
         saver.save(reloaded);
         let map = load(&path);
-        assert_eq!(map.len(), 1);
-        assert_eq!(map[Path::new("/a.log")], st(7));
+        assert_eq!(map.files.len(), 1);
+        assert_eq!(map.files[Path::new("/a.log")], st(7));
     }
 
     #[test]

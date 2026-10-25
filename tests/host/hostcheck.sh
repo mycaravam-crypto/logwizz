@@ -259,5 +259,24 @@ loops=$(events | grep -c '"file":"/var/log/syslog".*logwizz\[')
 res syslog_feedback_loop $([[ $loops == 0 ]] && echo PASS || echo FAIL) "$loops events re-matched logwizz's own output in /var/log/syslog (#21)"
 rs=$(grep -c 'logwizz\[' /var/log/syslog || true)
 res syslog_isolation $([[ $rs == 0 ]] && echo PASS || echo FAIL) "$rs logwizz lines in /var/log/syslog"
+# 18. [journal] with the documented drop-in: an entry that exists only in the journal (logger to a tag
+# rsyslog also copies, but no watched file needs it) is matched as file "journal", journalctl runs inside
+# the sandbox without restarts, and logwizz never reads its own namespace.
+mkdir -p /etc/systemd/system/logwizz.service.d
+printf '[Service]\nSupplementaryGroups=systemd-journal\nProcSubset=all\n' > /etc/systemd/system/logwizz.service.d/journal.conf
+printf '\n[journal]\nmatches = ["SYSLOG_IDENTIFIER=lwz-journal"]\n' >> /etc/logwizz/logwizz.toml
+systemctl daemon-reload; systemctl start logwizz; sleep 2
+logger -t lwz-journal "Failed password for LWZ-JOURNAL from 192.0.2.3 port 22 ssh2"
+# The same message also reaches /var/log/syslog through rsyslog; wait for the journal's own event.
+if wait_for '"file":"journal","rule":"ssh_failed_login"' 10 && events | grep -F LWZ-JOURNAL | grep -q '"file":"journal"'; then
+  systemctl kill -s USR1 logwizz; sleep 1
+  jr=$(stat_of journal_restarts); js=$(stat_of journal_entries_skipped)
+  if [[ $jr == 0 && $js == 0 ]]; then res journal_input PASS "event from the journal, journal_restarts=0"
+  else res journal_input FAIL "journal_restarts=$jr journal_entries_skipped=$js"; fi
+else
+  res journal_input FAIL "no event from the journal: $(events | grep -v '^{' | grep -iE 'journal' | tail -3 | tr '\n' ';')"
+fi
+systemctl stop logwizz
+
 echo "=== journal (tail)"; journalctl --namespace=logwizz -u logwizz -o short-precise --no-pager | tail -40
 echo "SUMMARY pass=$pass fail=$fail known=$known"

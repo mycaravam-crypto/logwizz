@@ -85,6 +85,10 @@ counters! {
     /// stays refused (beyond `max_glob_files` refused files, on every
     /// directory listing).
     glob_matches_refused,
+    /// Journal entries that could not be parsed or were too long.
+    journal_entries_skipped,
+    /// Times journalctl was started again after it exited or failed to start.
+    journal_restarts,
     /// Configuration reloads applied (SIGHUP).
     config_reloads,
     /// Configuration reloads rejected; the running configuration was kept.
