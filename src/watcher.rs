@@ -10,6 +10,13 @@
 //! rather than the file itself, so creation, rename and deletion are seen
 //! even while the file does not exist.
 //!
+//! If a configured path is a symlink, writes to its target only produce
+//! events in the target's directory, so that directory is watched too (at
+//! most one extra directory per configured file). Targets are re-resolved on
+//! every reconciliation and whenever a file's identity changes, so a
+//! retargeted symlink moves the extra watch; unused extra watches are
+//! removed.
+//!
 //! Memory use is bounded: the notify thread only sets per-file dirty flags
 //! and performs a coalescing `try_send` on a capacity-1 wake channel. There
 //! is no event queue that can grow without limit.
@@ -17,9 +24,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use notify::event::AccessKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -57,8 +64,30 @@ struct Shared {
     /// Set when the kernel dropped events or a watch broke; makes every
     /// file dirty and triggers re-registration of directory watches.
     rescan: AtomicBool,
+    /// Symlink targets; changed only by the monitor thread.
+    targets: RwLock<Targets>,
     waker: Waker,
     metrics: Arc<Metrics>,
+}
+
+/// Where events for symlink targets arrive.
+#[derive(Debug, Default)]
+struct Targets {
+    /// Event path of a target -> indices of the files that point at it.
+    files: HashMap<PathBuf, Vec<usize>>,
+    /// Extra watched directory -> indices of files with a target in it.
+    dirs: HashMap<PathBuf, Vec<usize>>,
+}
+
+/// The resolved target of a symlinked file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    /// The path events for the target arrive with: the target's name in
+    /// the watched directory that contains it.
+    event_path: PathBuf,
+    /// The extra directory to watch, if the target is not in a directory
+    /// that is already watched.
+    extra_dir: Option<PathBuf>,
 }
 
 impl Shared {
@@ -91,12 +120,21 @@ impl Shared {
         if matches!(event.kind, EventKind::Access(AccessKind::Open(_))) {
             return;
         }
+        let targets = self.targets.read().unwrap_or_else(PoisonError::into_inner);
         let mut hit = false;
         for path in &event.paths {
             if let Some(&i) = self.by_path.get(path) {
                 self.dirty[i].store(true, Ordering::Relaxed);
                 hit = true;
-            } else if let Some(files) = self.by_dir.get(path) {
+            }
+            if let Some(files) = targets.files.get(path) {
+                for &i in files {
+                    self.dirty[i].store(true, Ordering::Relaxed);
+                }
+                hit = true;
+            }
+            let dir_files = self.by_dir.get(path).or_else(|| targets.dirs.get(path));
+            if let Some(files) = dir_files {
                 // An event on the watched directory itself (removed, moved):
                 // its watch is likely gone and must be re-established.
                 for &i in files {
@@ -106,6 +144,7 @@ impl Shared {
                 hit = true;
             }
         }
+        drop(targets);
         if hit {
             self.waker.wake();
         }
@@ -120,6 +159,8 @@ struct DirWatch {
     watched: Option<FileId>,
     /// A registration failure has been reported and not yet recovered.
     failed: bool,
+    /// Watched only because a symlink target is in it.
+    extra: bool,
 }
 
 /// Owns the inotify watcher and the per-file dirty flags.
@@ -127,6 +168,9 @@ pub struct Watcher {
     inner: Option<RecommendedWatcher>,
     shared: Arc<Shared>,
     dirs: Vec<DirWatch>,
+    files: Vec<PathBuf>,
+    /// Resolved symlink target of each file (`None` if not a symlink).
+    targets: Vec<Option<Target>>,
 }
 
 impl Watcher {
@@ -153,6 +197,7 @@ impl Watcher {
                 path: p.clone(),
                 watched: None,
                 failed: false,
+                extra: false,
             })
             .collect();
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -162,6 +207,7 @@ impl Watcher {
             by_path,
             by_dir,
             rescan: AtomicBool::new(false),
+            targets: RwLock::default(),
             waker,
             metrics,
         });
@@ -184,6 +230,8 @@ impl Watcher {
             inner,
             shared,
             dirs,
+            targets: vec![None; files.len()],
+            files: files.to_vec(),
         };
         watcher.reconcile_watches();
         watcher
@@ -214,9 +262,104 @@ impl Watcher {
     }
 
     /// Ensures every directory is watched, re-registering watches for
-    /// directories that appeared or were replaced. Failures are reported
-    /// once per transition and retried on the next call.
+    /// directories that appeared or were replaced, and re-resolves symlink
+    /// targets. Failures are reported once per transition and retried on
+    /// the next call.
     pub fn reconcile_watches(&mut self) {
+        self.register_dirs();
+        self.refresh_targets();
+    }
+
+    /// Re-resolves the targets of symlinked files and moves the extra
+    /// directory watches accordingly. Cheap when nothing changed: one
+    /// `lstat` per file, plus a resolution for each symlink.
+    pub fn refresh_targets(&mut self) {
+        if self.inner.is_none() {
+            return;
+        }
+        let targets: Vec<Option<Target>> = self.files.iter().map(|p| self.resolve(p)).collect();
+        if targets == self.targets {
+            return;
+        }
+        self.targets = targets;
+
+        let mut map = Targets::default();
+        for (i, t) in self.targets.iter().enumerate() {
+            let Some(t) = t else { continue };
+            map.files.entry(t.event_path.clone()).or_default().push(i);
+            if let Some(dir) = &t.extra_dir {
+                map.dirs.entry(dir.clone()).or_default().push(i);
+            }
+        }
+        // Drop extra watches nobody needs any more, then add new ones.
+        let mut removed = Vec::new();
+        if let Some(inner) = self.inner.as_mut() {
+            self.dirs.retain(|d| {
+                if !d.extra || map.dirs.contains_key(&d.path) {
+                    return true;
+                }
+                if let Some(id) = d.watched {
+                    let _ = inner.unwatch(&d.path);
+                    removed.push(id);
+                }
+                debug!(dir = %d.path.display(), "stopped watching symlink target directory");
+                false
+            });
+        }
+        // The kernel shares one watch per directory inode, so the removal
+        // also ended any other watch on the same directory: re-register it.
+        for d in &mut self.dirs {
+            if d.watched.is_some_and(|id| removed.contains(&id)) {
+                d.watched = None;
+            }
+        }
+        for dir in map.dirs.keys() {
+            if !self.dirs.iter().any(|d| &d.path == dir) {
+                self.dirs.push(DirWatch {
+                    path: dir.clone(),
+                    watched: None,
+                    failed: false,
+                    extra: true,
+                });
+            }
+        }
+        *self
+            .shared
+            .targets
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = map;
+        self.register_dirs();
+    }
+
+    /// The target of `path` if it is a symlink whose target can be resolved.
+    fn resolve(&self, path: &Path) -> Option<Target> {
+        let link = fs::symlink_metadata(path).ok()?;
+        if !link.file_type().is_symlink() {
+            return None;
+        }
+        let target = fs::canonicalize(path).ok()?;
+        let (dir, name) = (target.parent()?, target.file_name()?);
+        let dir_id = FileId::of(&fs::metadata(dir).ok()?);
+        // inotify keeps one watch per directory inode: if the directory is
+        // already watched (possibly under another path), events arrive with
+        // that path, and a second watch must not be added.
+        let watched = self
+            .dirs
+            .iter()
+            .find(|d| d.watched == Some(dir_id) && !(d.extra && d.path != dir));
+        Some(match watched {
+            Some(d) => Target {
+                event_path: d.path.join(name),
+                extra_dir: d.extra.then(|| d.path.clone()),
+            },
+            None => Target {
+                event_path: target.clone(),
+                extra_dir: Some(dir.to_path_buf()),
+            },
+        })
+    }
+
+    fn register_dirs(&mut self) {
         let Some(inner) = self.inner.as_mut() else {
             return;
         };
@@ -245,10 +388,18 @@ impl Watcher {
                     dir.watched = Some(id);
                     dir.failed = false;
                     // Anything may have happened while unwatched.
-                    if let Some(files) = self.shared.by_dir.get(&dir.path) {
-                        for &i in files {
-                            self.shared.dirty[i].store(true, Ordering::Relaxed);
-                        }
+                    let targets = self
+                        .shared
+                        .targets
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let files = if dir.extra {
+                        targets.dirs.get(&dir.path)
+                    } else {
+                        self.shared.by_dir.get(&dir.path)
+                    };
+                    for &i in files.into_iter().flatten() {
+                        self.shared.dirty[i].store(true, Ordering::Relaxed);
                     }
                 }
                 Err(e) => {
@@ -338,6 +489,86 @@ mod tests {
         .add_path("/logs".into())));
         assert!(w.take_dirty(0) && w.take_dirty(1) && !w.take_dirty(2));
         assert!(w.shared.rescan.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn event_on_symlink_target_marks_file() {
+        let (w, rx, _) = setup();
+        w.shared
+            .targets
+            .write()
+            .unwrap()
+            .files
+            .insert("/data/2026.log".into(), vec![0, 2]);
+        w.shared.handle(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/data/2026.log".into())
+        ));
+        assert!(w.take_dirty(0) && !w.take_dirty(1) && w.take_dirty(2));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    fn real_watcher(files: &[PathBuf]) -> Watcher {
+        let (waker, _rx) = wake_channel();
+        let w = Watcher::new(files, true, waker, Arc::new(Metrics::default()));
+        assert!(w.is_active());
+        w
+    }
+
+    #[test]
+    fn symlink_target_directory_watch_follows_retarget() {
+        let base = tempfile::tempdir().unwrap();
+        let (links, d1, d2) = (
+            base.path().join("l"),
+            base.path().join("d1"),
+            base.path().join("d2"),
+        );
+        for d in [&links, &d1, &d2] {
+            fs::create_dir(d).unwrap();
+        }
+        let (t1, t2) = (d1.join("a.log"), d2.join("b.log"));
+        fs::write(&t1, "").unwrap();
+        fs::write(&t2, "").unwrap();
+        let link = links.join("current.log");
+        std::os::unix::fs::symlink(&t1, &link).unwrap();
+
+        let mut w = real_watcher(std::slice::from_ref(&link));
+        assert_eq!(w.watched_dirs(), 2, "configured dir + target dir");
+        let canon1 = fs::canonicalize(&t1).unwrap();
+        assert_eq!(w.targets[0].as_ref().unwrap().event_path, canon1);
+
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&t2, &link).unwrap();
+        w.refresh_targets();
+        assert_eq!(
+            w.watched_dirs(),
+            2,
+            "old target dir unwatched, new one watched"
+        );
+        let extra: Vec<_> = w.dirs.iter().filter(|d| d.extra).map(|d| &d.path).collect();
+        assert_eq!(extra, [&fs::canonicalize(&d2).unwrap()]);
+
+        // No longer a symlink: the extra watch goes away.
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, "").unwrap();
+        w.refresh_targets();
+        assert_eq!(w.watched_dirs(), 1);
+        assert!(w.shared.targets.read().unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn symlink_target_in_watched_directory_needs_no_extra_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("2026.log");
+        fs::write(&target, "").unwrap();
+        let link = dir.path().join("current.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let w = real_watcher(std::slice::from_ref(&link));
+        assert_eq!(w.watched_dirs(), 1);
+        // Events arrive with the configured directory's path.
+        let t = w.targets[0].as_ref().unwrap();
+        assert_eq!(t.event_path, target);
+        assert_eq!(t.extra_dir, None);
     }
 
     #[test]

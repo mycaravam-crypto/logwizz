@@ -41,11 +41,12 @@ use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use memchr::memchr;
+use memchr::{memchr, memrchr};
 use tracing::{debug, info, warn};
 
 use crate::config::StartupMode;
 use crate::metrics::{self, Metrics};
+use crate::state::{FINGERPRINT_BYTES, FileState, Fingerprint};
 
 /// Default size of the shared read buffer.
 pub const READ_BUF_BYTES: usize = 64 * 1024;
@@ -159,7 +160,7 @@ impl LineSplitter {
             self.count_skipped(&seg[fill..], true, m);
             emit_truncated(&self.pending, m, on_line);
         }
-        self.pending.clear();
+        self.reset_pending();
     }
 
     /// `seg` is a non-empty tail with no newline yet.
@@ -182,7 +183,7 @@ impl LineSplitter {
         let fill = self.cut_pending(seg);
         self.count_skipped(&seg[fill..], false, m);
         emit_truncated(&self.pending, m, on_line);
-        self.pending.clear();
+        self.reset_pending();
         self.skip = Skip::Oversize;
     }
 
@@ -222,13 +223,17 @@ impl LineSplitter {
         if !self.pending.is_empty() {
             metrics::inc(&m.partial_lines_flushed);
             emit(&self.pending, self.max, m, on_line);
-            self.pending.clear();
         }
+        self.reset_pending();
         if self.held_cr {
             metrics::inc(&m.bytes_skipped);
             self.held_cr = false;
         }
         self.skip = Skip::None;
+    }
+
+    fn reset_pending(&mut self) {
+        self.pending.clear();
         // Do not keep a large allocation around after a single long line.
         if self.pending.capacity() > READ_BUF_BYTES {
             self.pending = Vec::new();
@@ -267,6 +272,12 @@ struct Source {
     file: File,
     id: FileId,
     offset: u64,
+    /// Just past the last newline read: where reading would restart after
+    /// a restart, so that no partially read line is lost.
+    line_end: u64,
+    /// Cached fingerprint for checkpoints; final once it covers
+    /// `FINGERPRINT_BYTES`.
+    fingerprint: Option<Fingerprint>,
     splitter: LineSplitter,
     /// Last read error kind, to report each distinct failure once.
     error: Option<ErrorKind>,
@@ -299,6 +310,8 @@ impl Source {
             metrics::inc(&m.truncations);
             self.splitter.flush(m, on_line);
             self.offset = 0;
+            self.line_end = 0;
+            self.fingerprint = None;
         }
         loop {
             if *budget == 0 {
@@ -308,10 +321,14 @@ impl Source {
             match self.file.read_at(&mut buf[..want], self.offset) {
                 Ok(0) => return Ok(ReadEnd::Eof),
                 Ok(n) => {
+                    let start = self.offset;
                     self.offset += n as u64;
                     *budget -= n;
                     metrics::add(&m.bytes_read, n as u64);
                     self.splitter.feed(&buf[..n], m, on_line);
+                    if let Some(i) = memrchr(b'\n', &buf[..n]) {
+                        self.line_end = start + i as u64 + 1;
+                    }
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
@@ -367,9 +384,15 @@ pub struct TailedFile {
     /// Start position for the very first open; later opens always start at 0
     /// because a file that appears while we run consists entirely of new data.
     startup: Option<StartupMode>,
+    /// Saved position from a previous run, used (if still valid) instead of
+    /// `startup` for the very first open.
+    resume: Option<FileState>,
     current: Option<Source>,
     draining: Option<(Source, Instant)>,
     state: PathState,
+    /// The file whose open was last refused with `EACCES` without being
+    /// reported; see `open`.
+    access_retried: Option<FileId>,
 }
 
 impl TailedFile {
@@ -378,9 +401,11 @@ impl TailedFile {
             path,
             opts,
             startup: Some(startup),
+            resume: None,
             current: None,
             draining: None,
             state: PathState::Ok,
+            access_retried: None,
         }
     }
 
@@ -390,6 +415,37 @@ impl TailedFile {
 
     pub fn is_open(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// Uses `saved` for the first open if it still matches the file.
+    pub fn set_resume(&mut self, saved: FileState) {
+        self.resume = Some(saved);
+    }
+
+    /// The position to save for this file: the current source's offset just
+    /// past its last complete line. A file being drained after rotation is
+    /// not included, so a restart does not return to it.
+    pub fn checkpoint(&mut self) -> Option<FileState> {
+        let cur = self.current.as_mut()?;
+        let limit = cur.line_end.min(FINGERPRINT_BYTES);
+        let fingerprint = match cur.fingerprint {
+            Some(fp) if fp.len == limit => fp,
+            _ => {
+                let fp = Fingerprint::of(&cur.file, limit).ok()?;
+                cur.fingerprint = Some(fp);
+                fp
+            }
+        };
+        Some(FileState {
+            id: cur.id,
+            offset: cur.line_end,
+            fingerprint,
+        })
+    }
+
+    /// Identity of the file currently read at the path, if any.
+    pub fn current_id(&self) -> Option<FileId> {
+        self.current.as_ref().map(|s| s.id)
     }
 
     pub fn is_draining(&self) -> bool {
@@ -509,6 +565,21 @@ impl TailedFile {
                 self.set_state(PathState::Missing, m);
                 return;
             }
+            // Tools such as `install -o -g` and logrotate's `create` make a new
+            // file root-only before they chown or chmod it. Opening it in
+            // that window is not a real permission problem, so a file that
+            // appeared or was rotated in while we run gets one silent retry;
+            // the next poll (its chmod or chown wakes us) reports the error if
+            // it is still there. A file present at startup is reported at once.
+            Err(e)
+                if e.kind() == ErrorKind::PermissionDenied
+                    && self.startup.is_none()
+                    && self.access_retried != Some(FileId::of(path_meta)) =>
+            {
+                self.access_retried = Some(FileId::of(path_meta));
+                debug!(path = %self.path.display(), "new file not readable yet; will retry");
+                return;
+            }
             Err(e) => {
                 self.report_open_error(&e, m);
                 return;
@@ -528,21 +599,44 @@ impl TailedFile {
             return;
         }
         let mut splitter = LineSplitter::new(self.opts.max_line_bytes);
+        let id = FileId::of(&meta);
+        let size = meta.len();
+        let resume = self.resume.take();
         let offset = match self.startup.take() {
-            Some(StartupMode::Tail) => {
-                let size = meta.len();
-                if size > 0 && !ends_with_newline(&file, size) {
-                    splitter.skip = Skip::StartupPartial;
+            None => 0,
+            Some(mode) => match resume.map(|r| r.resume_offset(&file, id, size)) {
+                Some(Ok(offset)) => {
+                    info!(path = %self.path.display(), offset, "resuming from saved offset");
+                    offset
                 }
-                size
-            }
-            Some(StartupMode::Beginning) | None => 0,
+                Some(Err(why)) => {
+                    warn!(
+                        path = %self.path.display(),
+                        reason = why.as_str(),
+                        "saved offset not usable; reading from the beginning"
+                    );
+                    0
+                }
+                None if mode == StartupMode::Tail => size,
+                None => 0,
+            },
         };
+        // Starting in the middle of a line (tail mode, or a saved offset
+        // that was itself a tail-mode start position): skip to the next
+        // line start. Saved offsets are otherwise always line starts.
+        if offset > 0 && !ends_with_newline(&file, offset) {
+            splitter.skip = Skip::StartupPartial;
+        }
         debug!(path = %self.path.display(), offset, "opened");
+        // Inode numbers are reused, so a later file with this identity gets
+        // its own retry.
+        self.access_retried = None;
         self.current = Some(Source {
             file,
-            id: FileId::of(&meta),
+            id,
             offset,
+            line_end: offset,
+            fingerprint: None,
             splitter,
             error: None,
         });
@@ -556,6 +650,7 @@ impl TailedFile {
         // Whatever failed, the first open attempt is over: a file that
         // appears later is read from the beginning.
         self.startup = None;
+        self.resume = None;
         if self.state != PathState::Error(e.kind()) {
             metrics::inc(&m.read_errors);
             warn!(path = %self.path.display(), error = %e, "cannot access file; will retry");
@@ -590,6 +685,7 @@ impl TailedFile {
 
     fn set_state(&mut self, state: PathState, m: &Metrics) {
         self.startup = None;
+        self.resume = None;
         if self.state == state {
             return;
         }
@@ -789,6 +885,88 @@ mod tests {
         s.flush(&m, &mut |l| out.push(l.bytes.to_vec()));
         assert_eq!(out, [b"abcd".to_vec()]);
         assert_eq!(m.snapshot().bytes_skipped, 3);
+    }
+
+    #[test]
+    fn long_line_buffer_is_released() {
+        let m = Metrics::default();
+        let max = 4 * READ_BUF_BYTES;
+        let mut s = LineSplitter::new(max);
+        let long = vec![b'x'; max - 1];
+        s.feed(&long, &m, &mut |_| {});
+        assert!(s.pending.capacity() >= long.len());
+        s.feed(b"\n", &m, &mut |_| {});
+        assert!(s.pending.capacity() <= READ_BUF_BYTES);
+    }
+
+    /// Whole-stream reference: split on `\n`, strip one `\r`, cut at `max`.
+    /// An unterminated tail is treated as a line, as `flush` does; if it is
+    /// cut, a trailing `\r` is content and counted as skipped.
+    fn reference(max: usize, data: &[u8]) -> (Vec<(Vec<u8>, bool)>, u64) {
+        let mut out = Vec::new();
+        let mut skipped = 0;
+        let terminated = data.ends_with(b"\n");
+        let mut parts: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
+        if parts.last().is_some_and(|p| p.is_empty()) {
+            parts.pop();
+        }
+        let n = parts.len();
+        for (i, p) in parts.into_iter().enumerate() {
+            let c = strip_cr(p);
+            if c.len() > max {
+                let tail = i + 1 == n && !terminated;
+                let len = if tail { p.len() } else { c.len() };
+                skipped += (len - max) as u64;
+                out.push((c[..max].to_vec(), true));
+            } else {
+                out.push((c.to_vec(), false));
+            }
+        }
+        (out, skipped)
+    }
+
+    fn strip_cr(line: &[u8]) -> &[u8] {
+        line.strip_suffix(b"\r").unwrap_or(line)
+    }
+
+    #[test]
+    fn matches_reference_under_arbitrary_chunking() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut rand = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for case in 0..20_000 {
+            let max = 1 + rand(6);
+            let len = rand(40);
+            let data: Vec<u8> = (0..len).map(|_| b"aab\r\n"[rand(5)]).collect();
+            let m = Metrics::default();
+            let mut s = LineSplitter::new(max);
+            let mut out = Vec::new();
+            let mut rest = &data[..];
+            while !rest.is_empty() {
+                let n = 1 + rand(rest.len().min(8));
+                s.feed(&rest[..n], &m, &mut |l| {
+                    out.push((l.bytes.to_vec(), l.truncated))
+                });
+                rest = &rest[n..];
+                assert!(s.pending.len() <= max + 1);
+            }
+            s.flush(&m, &mut |l| out.push((l.bytes.to_vec(), l.truncated)));
+            let (want, skipped) = reference(max, &data);
+            let ctx = format!(
+                "case {case}: max={max} data={:?}",
+                String::from_utf8_lossy(&data)
+            );
+            assert_eq!(out, want, "{ctx}");
+            let snap = m.snapshot();
+            assert_eq!(snap.bytes_skipped, skipped, "{ctx}");
+            assert_eq!(snap.lines_processed, want.len() as u64, "{ctx}");
+            let truncated = want.iter().filter(|l| l.1).count() as u64;
+            assert_eq!(snap.lines_truncated, truncated, "{ctx}");
+        }
     }
 
     #[test]

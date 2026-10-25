@@ -22,6 +22,12 @@ rotation_drain_ms = 5000
 diagnostics = "warn"
 # Log a statistics snapshot at "info" level at this interval. 0 disables.
 stats_interval_secs = 0
+# Persist read offsets so that a restart resumes where logwizz stopped
+# (at-least-once delivery). Unset (the default) keeps offsets in memory only.
+# The systemd unit provides /var/lib/logwizz for this.
+#state_file = "/var/lib/logwizz/offsets.json"
+# Minimum time between writes of the state file.
+state_flush_ms = 1000
 
 [output]
 # "json" (JSON Lines) or "human".
@@ -30,6 +36,9 @@ format = "json"
 destination = "stdout"
 # Maximum number of events buffered between readers and the output writer.
 queue_capacity = 4096
+# Maximum memory held by buffered events, in bytes. The queue is full when
+# either this or queue_capacity is reached.
+max_queue_bytes = 8388608
 # When the queue is full: "block" pauses reading (no loss while running);
 # "drop" discards the event and counts it.
 on_full = "block"
@@ -49,8 +58,11 @@ dedup_max_entries = 4096
 path = "/var/log/auth.log"
 enabled = true
 
+# Kernel messages. On Debian/Ubuntu /var/log/syslog also has them, but it
+# receives logwizz's own output too unless the service runs in its own journal
+# namespace (as the packaged unit does).
 [[files]]
-path = "/var/log/syslog"
+path = "/var/log/kern.log"
 enabled = true
 
 [[files]]

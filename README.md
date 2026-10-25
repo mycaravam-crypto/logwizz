@@ -103,6 +103,8 @@ Only `[[files]]` and `[[rules]]` are required.
 | `rotation_drain_ms` | `5000` | 0 – 600000 | After rotation, keep reading the old file until it has been idle this long. |
 | `diagnostics` | `"warn"` | `error` … `trace` | Verbosity of logwizz's own messages on stderr. |
 | `stats_interval_secs` | `0` | 0 – 86400 | Log a statistics line at `info` level at this interval. `0` disables it. |
+| `state_file` | unset | absolute path | Persist read offsets here, so a restart resumes where it stopped (at-least-once delivery). Unset keeps offsets in memory only. See [Delivery guarantees](#delivery-guarantees). |
+| `state_flush_ms` | `1000` | 100 – 600000 | Minimum time between writes of `state_file`. |
 
 ### `[output]`
 
@@ -111,6 +113,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | `format` | `"json"` | `json` (JSON Lines) or `human`. |
 | `destination` | `"stdout"` | `stdout` or `stderr`. |
 | `queue_capacity` | `4096` | Maximum events buffered between the reader and the output writer (1 – 1048576). |
+| `max_queue_bytes` | `8388608` | Maximum memory held by buffered events, in bytes (64 KiB – 1 GiB): each event counts its line plus a small fixed overhead. The queue is full when either limit is reached. An event larger than this is still accepted into an empty queue. |
 | `on_full` | `"block"` | Full queue: `block` pauses reading, `drop` discards the event and counts it. See [Backpressure](#backpressure). |
 | `max_excerpt_bytes` | unset | If set (16 – 16 MiB), events include at most this many bytes of the line, cut on a UTF-8 boundary, with `truncated: true`. |
 
@@ -120,7 +123,7 @@ Only `[[files]]` and `[[rules]]` are required.
 |---|---|---|
 | `rate_limit_events` | `0` | Maximum events per rule per window. `0` means unlimited. |
 | `rate_limit_window_secs` | `60` | Length of the fixed rate-limit window. |
-| `dedup_window_secs` | `0` | Suppress an identical (rule, line) pair seen within this many seconds of its first occurrence. `0` disables it. |
+| `dedup_window_secs` | `0` | Suppress an identical (rule, line) pair within this many seconds of the event first emitted for it. `0` disables it. Lines suppressed by the rate limit are not remembered, so a line that was never reported is never treated as a duplicate. |
 | `dedup_max_entries` | `4096` | Maximum remembered pairs. When the table is full and nothing has expired, new lines are emitted but not remembered: deduplication never suppresses an event wrongly. |
 
 Suppressed events are counted (`events_rate_limited`, `events_deduplicated`).
@@ -204,6 +207,11 @@ wakeup, and on every reconciliation tick, logwizz checks the file itself
   `reconcile_interval_ms`.
 - a directory that is missing at startup, or deleted and recreated, is
   watched again within one reconciliation interval.
+- if a configured path is a symlink whose target is in another directory,
+  that directory is watched too, so writes to the target are detected just
+  as quickly. When the link is retargeted, the watch moves with it, right
+  after the rotation is detected. Intermediate links in a chain are only
+  re-checked on reconciliation.
 - if inotify is unavailable altogether (for example,
   `fs.inotify.max_user_instances` is exhausted), logwizz warns and
   continues with reconciliation only.
@@ -247,8 +255,8 @@ tick, within the drain window.
 ### Backpressure
 
 Events pass from the monitor thread to a single output thread through a
-bounded queue (`queue_capacity`). Output is buffered and flushed whenever the
-queue runs empty.
+bounded queue (`queue_capacity` events, `max_queue_bytes` bytes). Output is
+buffered and flushed whenever the queue runs empty.
 
 - `on_full = "block"` (default): the monitor waits for queue space. Unread
   data stays in the log files, so nothing is lost while the process runs,
@@ -263,14 +271,48 @@ exits with status 1. Continuing would only hide the loss.
 
 ### Delivery guarantees
 
-logwizz provides **best-effort, at-most-once delivery within one process
-lifetime**. It does **not** provide durable or exactly-once processing:
+Without `state_file`, logwizz provides **best-effort, at-most-once delivery
+within one process lifetime**:
 
 - Offsets are kept in memory only. After a restart, `startup_mode` decides
   where reading resumes: `tail` skips anything written while logwizz was
   down, and `beginning` re-emits events for existing content.
 - Events still queued when the process is killed with SIGKILL, or crashes,
-  are lost. On SIGTERM/SIGINT the queue is flushed before exit.
+  are lost. On SIGTERM/SIGINT the queue is flushed before exit. Flushing
+  waits for the output to accept the data, so with a stalled consumer the
+  process does not exit until it is killed (the systemd unit does so after
+  `TimeoutStopSec`).
+
+With `state_file`, delivery across restarts is **at-least-once**:
+
+- For each file, logwizz saves the offset just past the last complete line,
+  but only once every event from the lines before it has been written and
+  flushed to the output. After a crash or SIGKILL, reading resumes from the
+  last saved offset, so events since then are emitted again, but no line is
+  skipped. After SIGTERM/SIGINT the final offsets are saved once the queue
+  has been flushed, so nothing is repeated.
+- On startup, a saved offset is used only if the file at the path is still
+  the same file (`dev`, `ino`), is at least as long as the offset, and still
+  starts with the same bytes (a fingerprint of the first 256 bytes, which
+  detects a reused inode). Otherwise the file changed while logwizz was
+  stopped: it is read from the beginning, with a warning. Files without a
+  saved offset follow `startup_mode`.
+- The state file is written atomically (temporary file, `fsync`, rename,
+  directory `fsync`), at most every `state_flush_ms`, with mode `0600`. If
+  it is missing, unreadable or invalid, logwizz warns and falls back to
+  `startup_mode`; it never refuses to start. Failed writes are counted in
+  `state_save_errors` and retried.
+- Not covered: a file rotated away while logwizz was stopped is not read
+  again, so lines appended to it after the last save and before the
+  rotation are missed; the same applies to a file that was still being
+  drained after a rotation at shutdown. A line still incomplete at a
+  restart is read again from its start.
+- `on_full = "drop"` does not hold back saved offsets: events it drops
+  are lost, as configured.
+
+In both modes:
+
+- Incomplete trailing lines (no newline yet) are not emitted at shutdown.
 - `copytruncate` is inherently racy. Lines written between the copy and the
   truncation are lost for every reader. Lines written after the truncation
   but before logwizz notices it, beyond the old offset, cannot be told apart
@@ -294,13 +336,51 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
 being drained. All other values are counters since startup. Error counters
 count episodes: a file that stays unreadable is counted once, not once per
 retry.
+
+| Counter | Meaning |
+|---|---|
+| `bytes_read` | Bytes read from monitored files. |
+| `lines_processed` | Lines passed to the rules, including truncated ones. |
+| `lines_truncated` | Lines cut at `max_line_bytes`. |
+| `bytes_skipped` | Content bytes beyond `max_line_bytes` that were not matched. |
+| `partial_lines_flushed` | Unterminated lines emitted because their file was truncated, rotated or deleted. |
+| `rule_matches` | (line, rule) matches, before rate limiting and deduplication. |
+| `events_emitted` | Events accepted into the output queue. An event is written unless the output fails or the process is killed first. |
+| `events_dropped` | Events discarded because the queue was full (`on_full = "drop"`), the output had failed, or shutdown interrupted a blocked send. |
+| `events_rate_limited`, `events_deduplicated` | Matches suppressed by `[limits]`. |
+| `output_errors` | Output write failures (each one stops the daemon). |
+| `read_errors` | Episodes of unreadable files or paths that are not regular files. A new file that is briefly unreadable while its owner or mode is set is not counted. |
+| `notify_overflows` | inotify queue overflows (each one triggers a full rescan). |
+| `rotations`, `truncations` | Detected replacements and truncations. |
+
+`rule_matches` = `events_emitted` + `events_dropped` + `events_rate_limited` +
+`events_deduplicated`.
+
+### Memory use
+
+Every buffer has a configured bound. The worst case is approximately:
+
+- per monitored file: up to 2 × `max_line_bytes` of incomplete-line data
+  (the current file plus one rotated file being drained)
+- the output queue: `max_queue_bytes`, plus one event
+- the output writer: 64 KiB, plus one formatted event. Escaping can make a
+  formatted event up to about 6 × the line length (`\u0001` for each control
+  byte)
+- deduplication: about 100 bytes × `dedup_max_entries` (≈ 0.4 MiB by default)
+- a fixed 64 KiB read buffer, plus the compiled rules (at most 2 MiB each)
+
+With the defaults, this is about 9 MiB plus 128 KiB per monitored file,
+whatever the log content, on top of a baseline of roughly 5 MiB. With the
+systemd unit's `MemoryMax=128M`, that leaves room for several hundred files.
+If you raise `max_line_bytes`, `max_queue_bytes`, the number of files or
+`dedup_max_entries`, check the sum against `MemoryMax`.
 
 ### Diagnostics
 
@@ -314,15 +394,25 @@ same stream.
 [`packaging/logwizz.service`](packaging/logwizz.service) runs logwizz as a
 transient unprivileged user (`DynamicUser=yes`) with read-only access to the
 filesystem, no capabilities, no network, and a `@system-service` system call
-filter. Events go to the journal through stdout.
+filter. Events go to stdout, and from there to the journal in a separate
+`logwizz` namespace (`LogNamespace=logwizz`, systemd 245 or newer).
 
 ```sh
-install -D -m 0640 config/logwizz.example.toml /etc/logwizz/logwizz.toml
+install -D -m 0640 -g adm config/logwizz.example.toml /etc/logwizz/logwizz.toml
 install -m 0644 packaging/logwizz.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now logwizz
-journalctl -u logwizz -o cat -f
+journalctl --namespace=logwizz -u logwizz -o cat -f
 ```
+
+The service user only exists while the service runs, so it reads the
+configuration through its supplementary group: keep the file group-owned by
+`adm` (or the group from your drop-in) and not world-writable. A config that
+only root can read makes `--check-config` fail with "Permission denied" and the
+service never starts.
+
+The unit provides `/var/lib/logwizz` (`StateDirectory=`) for
+`state_file = "/var/lib/logwizz/offsets.json"`.
 
 Read access to logs comes from `SupplementaryGroups=adm`, which is right for
 Debian and Ubuntu. On other distributions, grant read access with a group or
@@ -331,15 +421,26 @@ an ACL. For example, `/var/log/secure` on RHEL-family systems is root-only:
 ```sh
 groupadd -r logwizz
 setfacl -m g:logwizz:r /var/log/secure
+chgrp logwizz /etc/logwizz/logwizz.toml
 # Then set SupplementaryGroups=logwizz in a drop-in (systemctl edit logwizz).
 ```
 
 The unit passes `systemd-analyze verify`, and `systemd-analyze security`
 rates it **0.4 SAFE**. The remaining findings are deliberate:
 `SupplementaryGroups` provides log access, and `PrivateUsers=yes` would unmap
-that group and break it. The hardening has been verified statically only. It
-has not yet been exercised on a booted systemd host, so check it against
-your own log locations before relying on it.
+that group and break it. The unit has also been exercised on a booted Ubuntu
+24.04 host (systemd 255): reading `auth.log` and `syslog` through `adm`, real
+logrotate runs, no sandbox denials, restart on failure and a clean stop. See
+[docs/HOST-VERIFICATION.md](docs/HOST-VERIFICATION.md). CI reruns it (the
+**host** workflow), and `tests/host/run-vm.sh` runs it locally.
+
+The namespace keeps logwizz's output out of the main journal. That matters:
+on Debian and Ubuntu, rsyslog copies the main journal into `/var/log/syslog`,
+so without the namespace a watched syslog file would contain every event
+logwizz writes, and the rules would match them again. The same applies when
+you run logwizz outside the packaged unit: **do not watch a file that receives
+logwizz's own output.** The namespace has its own retention settings in
+`/etc/systemd/journald@logwizz.conf`.
 
 ## Security
 
@@ -349,12 +450,15 @@ your own log locations before relying on it.
 - Regexes use the Rust `regex` crate, which guarantees linear-time matching
   (no catastrophic backtracking), with a compiled-size limit per pattern.
 - Bounded resources: configuration size (1 MiB), line length, per-file
-  partial-line buffer, event queue, dedup table, rule and file counts.
+  partial-line buffer, event queue (by count and by bytes), dedup table, rule
+  and file counts. See [Memory use](#memory-use).
 - Configured paths are followed if they are symlinks. The identity tracked is
   the target's, and retargeting the link counts as a rotation. Paths are
   validated to be absolute and normalised.
 - A world-writable configuration file is refused.
-- Human output escapes control characters. JSON output is escaped by
+- Human output escapes control characters, Unicode bidi controls,
+  zero-width characters and line separators, so log content cannot inject
+  terminal sequences or visually reorder a line. JSON output is escaped by
   `serde_json`.
 - Diagnostics never contain log line content.
 
@@ -365,11 +469,12 @@ your own log locations before relying on it.
   requires Linux 3.2 or newer, and other distributions and kernels are
   expected to work, but only the configuration above has been tested.
 - **inotify limits:** logwizz uses one inotify instance and one watch per
-  distinct parent directory. Overflows of `fs.inotify.max_queued_events` are
+  distinct parent directory, plus at most one per configured symlink whose
+  target is in another directory. Overflows of `fs.inotify.max_queued_events` are
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
-- Not supported in 0.1.0: glob patterns, persistent offsets, runtime
+- Not supported in 0.1.0: glob patterns, runtime
   configuration reload, compressed or rotated-file catch-up, multi-line
   records.
 - Rule evaluation is sequential per line. Throughput falls roughly linearly
@@ -422,6 +527,9 @@ GitHub Actions run on every pull request and on `main`:
 - **test**: `fmt`, `clippy -D warnings`, `cargo test`, the release build and the systemd unit check
   (`systemd-analyze verify` and a `security` threshold); the `msrv` job builds the release binary on the
   `rust-version` from `Cargo.toml`.
+- **host**: boots an Ubuntu 24.04 VM under KVM and runs the real-host check of the installed unit
+  (`tests/host/run-vm.sh`). Runs on PRs that change `src/`, `packaging/`, `tests/host/` or the Cargo files, on
+  `main`, and weekly. The check's output and the VM's console log are uploaded as an artifact.
 - **security**: Trivy scans `Cargo.lock` for CVEs (weekly too). A fixable CRITICAL fails the job.
 - **codeql**: CodeQL `security-and-quality` analysis of the Rust code and the workflows (weekly too).
 - **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has

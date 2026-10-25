@@ -131,6 +131,82 @@ fn unreadable_path_is_reported_once_and_recovers() {
     assert_eq!(h.poll(), ["ok"]);
 }
 
+/// Root bypasses file permission checks, so the EACCES tests need a normal user (as on CI runners).
+fn permissions_enforced() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    if root {
+        eprintln!("running as root: permission checks do not apply, nothing to test");
+    }
+    !root
+}
+
+fn chmod(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn new_file_unreadable_until_chmod_is_not_an_error() {
+    if !permissions_enforced() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.log");
+    let mut h = Harness::new(path.clone(), StartupMode::Tail);
+    h.poll();
+    // Like `install -o root -g adm`: created without access, chmod follows.
+    write_new(&path, "first\n");
+    chmod(&path, 0o000);
+    assert!(h.poll().is_empty());
+    assert_eq!(h.metrics.snapshot().read_errors, 0);
+    chmod(&path, 0o640);
+    assert_eq!(h.poll(), ["first"]);
+
+    // Same for the file a rotation puts in place.
+    fs::rename(&path, dir.path().join("app.log.1")).unwrap();
+    write_new(&path, "second\n");
+    chmod(&path, 0o000);
+    assert!(h.poll().is_empty());
+    chmod(&path, 0o640);
+    assert_eq!(h.poll(), ["second"]);
+    assert_eq!(h.metrics.snapshot().read_errors, 0);
+}
+
+#[test]
+fn new_file_that_stays_unreadable_is_reported_once() {
+    if !permissions_enforced() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.log");
+    let mut h = Harness::new(path.clone(), StartupMode::Tail);
+    h.poll();
+    write_new(&path, "secret\n");
+    chmod(&path, 0o000);
+    h.poll();
+    assert_eq!(h.metrics.snapshot().read_errors, 0);
+    h.poll();
+    h.poll();
+    assert_eq!(h.metrics.snapshot().read_errors, 1);
+    chmod(&path, 0o640);
+    assert_eq!(h.poll(), ["secret"]);
+}
+
+#[test]
+fn unreadable_file_at_startup_is_reported_at_once() {
+    if !permissions_enforced() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.log");
+    write_new(&path, "x\n");
+    chmod(&path, 0o000);
+    let mut h = Harness::new(path.clone(), StartupMode::Tail);
+    h.poll();
+    assert_eq!(h.metrics.snapshot().read_errors, 1);
+}
+
 #[test]
 fn fifo_does_not_block() {
     let dir = tempfile::tempdir().unwrap();

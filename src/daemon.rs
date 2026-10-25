@@ -5,6 +5,7 @@
 //! * `output`: formats and writes events
 //! * `signals`: waits synchronously for SIGTERM/SIGINT/SIGUSR1/SIGHUP
 //! * `stats` (optional): periodic statistics diagnostics
+//! * `state` (optional): saves read offsets (`general.state_file`)
 //! * the notify crate's inotify thread
 //!
 //! Signals are blocked in every thread (the mask is set before any thread is
@@ -26,6 +27,7 @@ use crate::error::RuntimeError;
 use crate::event::{Event, excerpt};
 use crate::metrics::{self, Metrics};
 use crate::monitor::Monitor;
+use crate::state::{self, Checkpoint, StateWriter};
 use crate::watcher::Waker;
 
 /// Runs the daemon until a termination signal or an output failure.
@@ -35,6 +37,9 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
     let metrics = Arc::new(Metrics::default());
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut monitor = Monitor::new(&cfg, Arc::clone(&metrics), true);
+    if let Some(path) = &cfg.general.state_file {
+        monitor.resume(state::load(path));
+    }
     let waker = monitor.waker();
 
     spawn_signal_thread(
@@ -71,6 +76,20 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
         waker,
     )
     .map_err(RuntimeError::Output)?;
+    let progress = dispatcher.progress();
+    let state_writer = match &cfg.general.state_file {
+        Some(path) => Some(
+            StateWriter::spawn(
+                path.clone(),
+                cfg.files.clone(),
+                Duration::from_millis(cfg.general.state_flush_ms),
+                Arc::clone(&progress),
+                Arc::clone(&metrics),
+            )
+            .map_err(RuntimeError::Startup)?,
+        ),
+        None => None,
+    };
     let mut limiter = Limiter::new(&cfg.limits, engine.rules().len());
     let max_excerpt = cfg.output.max_excerpt_bytes;
 
@@ -81,34 +100,61 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
         "logwizz started"
     );
 
-    monitor.run(&shutdown, &mut |file, line| {
-        engine.for_each_match(line.bytes, |rule| {
-            metrics::inc(&metrics.rule_matches);
-            let id = &engine.rules()[rule].id;
-            match limiter.admit(rule, id, line.bytes, Instant::now()) {
-                Admit::Yes => {}
-                Admit::RateLimited => {
-                    metrics::inc(&metrics.events_rate_limited);
-                    return;
-                }
-                Admit::Duplicate => {
-                    metrics::inc(&metrics.events_deduplicated);
-                    return;
-                }
-            }
-            let (bytes, cut) = excerpt(line.bytes, max_excerpt);
-            dispatcher.send(Event {
-                time: SystemTime::now(),
-                file,
-                rule,
-                line: bytes.into(),
-                truncated: line.truncated || cut,
+    let mut record = |files| {
+        if let Some(w) = &state_writer {
+            w.record(Checkpoint {
+                events: progress.sent(),
+                files,
             });
-        });
+        }
+    };
+    let checkpoints = state_writer.as_ref().map(|_| {
+        (
+            Duration::from_millis(cfg.general.state_flush_ms),
+            &mut record as &mut dyn FnMut(_),
+        )
     });
+    monitor.run_with(
+        &shutdown,
+        &mut |file, line| {
+            engine.for_each_match(line.bytes, |rule| {
+                metrics::inc(&metrics.rule_matches);
+                let id = &engine.rules()[rule].id;
+                match limiter.admit(rule, id, line.bytes, Instant::now()) {
+                    Admit::Yes => {}
+                    Admit::RateLimited => {
+                        metrics::inc(&metrics.events_rate_limited);
+                        return;
+                    }
+                    Admit::Duplicate => {
+                        metrics::inc(&metrics.events_deduplicated);
+                        return;
+                    }
+                }
+                let (bytes, cut) = excerpt(line.bytes, max_excerpt);
+                dispatcher.send(Event {
+                    time: SystemTime::now(),
+                    file,
+                    rule,
+                    line: bytes.into(),
+                    truncated: line.truncated || cut,
+                });
+            });
+        },
+        checkpoints,
+    );
 
     info!("shutting down; flushing queued events");
+    let final_checkpoint = Checkpoint {
+        events: progress.sent(),
+        files: monitor.checkpoint(),
+    };
     let result = dispatcher.finish();
+    if let Some(w) = state_writer {
+        // Saved only if the output really flushed everything.
+        w.record(final_checkpoint);
+        w.finish();
+    }
     info!(stats = %metrics.snapshot(), "logwizz stopped");
     result.map_err(RuntimeError::Output)
 }
@@ -116,10 +162,9 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
 /// Signals handled by the signal thread.
 const HANDLED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGUSR1, libc::SIGHUP];
 
+/// An initialised signal set. `sigset_t` is plain data, so this is `Send`
+/// without any `unsafe impl`.
 struct SigSet(libc::sigset_t);
-
-// SAFETY: sigset_t is plain data; it is only read by sigwait.
-unsafe impl Send for SigSet {}
 
 /// Blocks the handled signals in the calling thread (and so in every thread
 /// spawned afterwards). Must be called before any other thread exists.

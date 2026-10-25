@@ -25,7 +25,10 @@ pub const MIN_LINE_BYTES: usize = 256;
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub const MIN_RECONCILE_MS: u64 = 50;
 pub const MAX_RECONCILE_MS: u64 = 600_000;
+pub const MIN_STATE_FLUSH_MS: u64 = 100;
 pub const MAX_QUEUE_CAPACITY: usize = 1 << 20;
+pub const MIN_QUEUE_BYTES: usize = 64 * 1024;
+pub const MAX_QUEUE_BYTES: usize = 1 << 30;
 pub const MAX_FILES: usize = 1024;
 pub const MAX_RULES: usize = 1024;
 pub const MAX_PATTERN_BYTES: usize = 4096;
@@ -112,6 +115,11 @@ pub struct General {
     /// After rotation, keep reading the old file until it has been idle
     /// for this long.
     pub rotation_drain_ms: u64,
+    /// Where read offsets are persisted across restarts; unset disables
+    /// persistence.
+    pub state_file: Option<PathBuf>,
+    /// Minimum time between writes of `state_file`.
+    pub state_flush_ms: u64,
 }
 
 impl Default for General {
@@ -123,6 +131,8 @@ impl Default for General {
             diagnostics: DiagnosticLevel::Warn,
             stats_interval_secs: 0,
             rotation_drain_ms: 5000,
+            state_file: None,
+            state_flush_ms: 1000,
         }
     }
 }
@@ -133,6 +143,9 @@ pub struct Output {
     pub format: OutputFormat,
     pub destination: Destination,
     pub queue_capacity: usize,
+    /// Upper bound on the memory held by queued events. The queue counts as
+    /// full when either limit is reached.
+    pub max_queue_bytes: usize,
     pub on_full: OnFull,
     /// Maximum number of bytes of the matching line included in an event.
     /// Unset means the whole (already length-limited) line.
@@ -145,6 +158,7 @@ impl Default for Output {
             format: OutputFormat::Json,
             destination: Destination::Stdout,
             queue_capacity: 4096,
+            max_queue_bytes: 8 * 1024 * 1024,
             on_full: OnFull::Block,
             max_excerpt_bytes: None,
         }
@@ -318,6 +332,13 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
     );
     check_range(
         &mut problems,
+        "general.state_flush_ms",
+        general.state_flush_ms,
+        MIN_STATE_FLUSH_MS,
+        MAX_RECONCILE_MS,
+    );
+    check_range(
+        &mut problems,
         "general.stats_interval_secs",
         general.stats_interval_secs,
         0,
@@ -329,6 +350,13 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         output.queue_capacity,
         1,
         MAX_QUEUE_CAPACITY,
+    );
+    check_range(
+        &mut problems,
+        "output.max_queue_bytes",
+        output.max_queue_bytes,
+        MIN_QUEUE_BYTES,
+        MAX_QUEUE_BYTES,
     );
     if let Some(n) = output.max_excerpt_bytes {
         check_range(
@@ -386,6 +414,15 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
     }
     if files.is_empty() {
         problems.push("no enabled [[files]] entries".to_string());
+    }
+    if let Some(state) = &general.state_file {
+        let label = format!("general.state_file ({})", state.display());
+        if let Err(msg) = check_path(state) {
+            problems.push(format!("{label}: {msg}"));
+        }
+        if seen_paths.contains(state) {
+            problems.push(format!("{label}: must not be a monitored file"));
+        }
     }
 
     if raw_rules.len() > MAX_RULES {
@@ -557,6 +594,7 @@ mod tests {
         assert_eq!(cfg.output.format, OutputFormat::Json);
         assert_eq!(cfg.output.destination, Destination::Stdout);
         assert_eq!(cfg.output.on_full, OnFull::Block);
+        assert_eq!(cfg.output.max_queue_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.limits.rate_limit_events, 0);
         assert_eq!(cfg.files, vec![PathBuf::from("/var/log/syslog")]);
         assert_eq!(cfg.rules.len(), 1);
@@ -632,6 +670,37 @@ mod tests {
     }
 
     #[test]
+    fn state_file_is_optional_and_validated() {
+        let cfg = parse_str(MINIMAL).unwrap();
+        assert_eq!(cfg.general.state_file, None);
+        assert_eq!(cfg.general.state_flush_ms, 1000);
+
+        let ok = format!(
+            "[general]\nstate_file = \"/var/lib/logwizz/offsets.json\"\nstate_flush_ms = 250\n{MINIMAL}"
+        );
+        let cfg = parse_str(&ok).unwrap();
+        assert_eq!(
+            cfg.general.state_file.as_deref(),
+            Some(Path::new("/var/lib/logwizz/offsets.json"))
+        );
+        assert_eq!(cfg.general.state_flush_ms, 250);
+
+        let bad =
+            format!("[general]\nstate_file = \"/var/log/syslog\"\nstate_flush_ms = 10\n{MINIMAL}");
+        let p = problems(&bad);
+        assert!(
+            p.iter().any(|m| m.contains("must not be a monitored file")),
+            "{p:?}"
+        );
+        assert!(
+            p.iter().any(|m| m.contains("general.state_flush_ms")),
+            "{p:?}"
+        );
+        let rel = format!("[general]\nstate_file = \"offsets.json\"\n{MINIMAL}");
+        assert!(problems(&rel)[0].contains("must be absolute"));
+    }
+
+    #[test]
     fn oversized_regex_is_rejected() {
         let text = MINIMAL
             .replace("\"literal\"", "\"regex\"")
@@ -684,10 +753,12 @@ mod tests {
 
             [output]
             queue_capacity = 0
+            max_queue_bytes = 1024
             "
         );
         let p = problems(&text);
-        assert_eq!(p.len(), 3, "{p:?}");
+        assert_eq!(p.len(), 4, "{p:?}");
+        assert!(p.iter().any(|m| m.starts_with("output.max_queue_bytes")));
     }
 
     #[test]
