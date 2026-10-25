@@ -11,6 +11,7 @@ Use this page to find the right level of detail.
 ## Guides
 
 - [Detection guide](DETECTION.md): configure firewall logging and detect port scans, SSH brute force, scanner probes and log floods.
+- [Notification operations](NOTIFICATIONS.md): Telegram setup, aggregation windows, delivery guarantees and security.
 - [Benchmarks](BENCHMARKS.md): performance methodology and results.
 - [Host verification](HOST-VERIFICATION.md): real systemd service validation and filesystem access.
 
@@ -21,4 +22,4 @@ Use this page to find the right level of detail.
 - [Systemd service](../packaging/logwizz.service)
 - [Notification service and example environment](../packaging/logwizz-notify.service), [environment template](../packaging/notify.env.example)
 
-The notification transport is intentionally separate from the core daemon. The intended default is aggregate detection summaries, not raw log forwarding; see [Project direction](PROJECT.md).
+The notification transport is intentionally separate from the core daemon. It sends aggregate detection summaries, not raw log forwarding; see [Project direction](PROJECT.md).

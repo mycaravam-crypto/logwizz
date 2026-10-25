@@ -41,7 +41,9 @@ jobs:
           # The notifier needs network access, so it scores higher (13 = "1.3 OK").
           systemd-analyze security --offline=yes --threshold=20 packaging/logwizz-notify.service
       - name: Check shell scripts
-        run: shellcheck packaging/logwizz-notify
+        run: shellcheck packaging/logwizz-notify tests/notify/aggregate-smoke.sh
+      - name: Test aggregate notification behavior
+        run: bash tests/notify/aggregate-smoke.sh
       - name: Check versioning policy
         run: bash .github/scripts/semver-next.test.sh
   msrv:

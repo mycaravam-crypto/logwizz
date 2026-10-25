@@ -84,57 +84,73 @@ else
   res journal_priority FAIL "LWZ-SYSLOG=$(prio LWZ-SYSLOG) LWZ-AUTH=$(prio LWZ-AUTH)"
 fi
 
-# 3c. logwizz-notify: warning events reach a local webhook once, info events do
-# not, and a restart resumes at the saved cursor.
+# 3c. logwizz-notify: warning events reach a local webhook as one aggregate
+# summary per rule and window, info events do not, no raw log text leaves the
+# host, and a restart flushes the open window and resumes at the saved cursor.
 command -v jq >/dev/null || { apt-get update -q && apt-get install -qy jq; } >/dev/null 2>&1
 install -m 0755 "$P/logwizz-notify" /usr/bin/logwizz-notify
 install -m 0644 "$P/logwizz-notify.service" /etc/systemd/system/
-printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=webhook\n' > /etc/logwizz/notify.env
+# The notifier only accepts HTTPS endpoints: serve the sink with a throwaway
+# certificate that the guest trusts system-wide.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
+  -keyout /root/sink.key -out /usr/local/share/ca-certificates/lwz-sink.crt >/dev/null 2>&1
+update-ca-certificates >/dev/null 2>&1
+printf 'NOTIFY_URL=https://127.0.0.1:8099/\nNOTIFY_KIND=webhook\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
 chmod 0600 /etc/logwizz/notify.env
 python3 - /root/sink.txt <<'PY' &
-import http.server, json, sys
+import http.server, json, ssl, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(s):
         body = s.rfile.read(int(s.headers["Content-Length"])).decode()
         rec = {"title": s.headers["Title"], "auth": s.headers["Authorization"], "body": body}
         with open(sys.argv[1], "a") as f: f.write(json.dumps(rec) + "\n")
-        s.send_response(200); s.end_headers()
+        s.send_response(200); s.send_header("Content-Length", "0"); s.end_headers()
     def log_message(*a): pass
-http.server.HTTPServer(("127.0.0.1", 8099), H).serve_forever()
+srv = http.server.HTTPServer(("127.0.0.1", 8099), H)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain("/usr/local/share/ca-certificates/lwz-sink.crt", "/root/sink.key")
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
 PY
 SINK=$!
 systemd-analyze verify /etc/systemd/system/logwizz-notify.service || res notify_verify FAIL
 systemctl daemon-reload; systemctl start logwizz-notify; sleep 2
 # The notifier's own messages, for FAIL details.
 notify_log() { journalctl -u logwizz-notify -n 15 -o cat --no-pager | tr '\n' ';'; }
-sunk() { grep -cF -- "$1" /root/sink.txt 2>/dev/null; }
-wait_sunk() { local t=0; while (( t < 100 )); do [[ $(sunk "$1") -ge 1 ]] && return 0; sleep 0.1; t=$((t+1)); done; return 1; }
+# Sum of webhook summary counts for a rule; a window boundary may split them.
+summed() { local n; n=$(jq -rs --arg r "$1" '[.[] | .body | fromjson? | select(.rule == $r) | .count] | add // 0' /root/sink.txt 2>/dev/null | head -1); echo "${n:-0}"; }
+wait_count() { local t=0; while (( t < 300 )); do (( $(summed "$1") >= $2 )) && return 0; sleep 0.1; t=$((t+1)); done; return 1; }
+logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY1 from 192.0.2.1"
 logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY1 from 192.0.2.1"
 echo "LWZ-T0 info event, below the notify threshold" >> /var/log/lwtest.log
-wait_sunk LWZ-NOTIFY1
-systemctl restart logwizz-notify; sleep 2
+wait_count ssh_failed_login 2
 logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY2 from 192.0.2.1"
-wait_sunk LWZ-NOTIFY2
-if [[ $(sunk LWZ-NOTIFY1) == 1 && $(sunk LWZ-NOTIFY2) == 1 && $(sunk LWZ-T0) == 0 ]] &&
-   jq -e '.body | fromjson | select(.rule == "ssh_failed_login")' < <(grep -F LWZ-NOTIFY2 /root/sink.txt) >/dev/null; then
-  res notify PASS "warning events posted once across a restart, info filtered"
+sleep 1
+systemctl restart logwizz-notify; sleep 2  # flushes NOTIFY2 as a partial window
+wait_count ssh_failed_login 3
+if [[ $(summed ssh_failed_login) == 3 && $(summed lwtest) == 0 ]] && ! grep -qF LWZ-NOTIFY /root/sink.txt &&
+   jq -se 'all(.[]; .body | fromjson | .schema == "logwizz.notification/v1" and (has("line") | not))' /root/sink.txt >/dev/null; then
+  res notify PASS "warning events summarized once across a restart, info filtered, no raw log text"
 else
-  res notify FAIL "NOTIFY1=$(sunk LWZ-NOTIFY1) NOTIFY2=$(sunk LWZ-NOTIFY2) T0=$(sunk LWZ-T0) $(notify_log)"
+  res notify FAIL "ssh=$(summed ssh_failed_login) lwtest=$(summed lwtest) $(tr '\n' ' ' < /root/sink.txt) $(notify_log)"
 fi
 # ntfy format with an auth header, and log content that tries shell injection.
-printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\n' > /etc/logwizz/notify.env
+# Start from an empty queue and sink so only the NOTIFY3 summary is seen.
+systemctl stop logwizz-notify; rm -f /var/lib/private/logwizz-notify/agg-*.json; : > /root/sink.txt
+printf 'NOTIFY_URL=https://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
 systemctl restart logwizz-notify; sleep 2
 logger -p auth.notice "Failed password for LWZ-NOTIFY3 '\$(touch \$STATE_DIRECTORY/pwned)' \`touch \$STATE_DIRECTORY/pwned\` from 192.0.2.1"
-wait_sunk LWZ-NOTIFY3
-n3=$(grep -F LWZ-NOTIFY3 /root/sink.txt)
-if jq -e 'select(.title == "logwizz lwz-hostcheck: ssh_failed_login" and .auth == "Bearer tk_LWZ" and (.body | contains("'"'"'$(touch $STATE_DIRECTORY/pwned)'"'"'")))' <<<"$n3" >/dev/null &&
-   [[ ! -e /var/lib/private/logwizz-notify/pwned ]]; then
-  res notify_ntfy PASS "title, auth header file, log content not executed"
+t=0; until [[ -s /root/sink.txt ]] || (( t >= 300 )); do sleep 0.1; t=$((t+1)); done
+n3=$(cat /root/sink.txt)
+if jq -e 'select(.title == "logwizz lwz-hostcheck: ssh_failed_login" and .auth == "Bearer tk_LWZ" and (.body | contains("Matches: 1")))' <<<"$n3" >/dev/null &&
+   ! grep -qF LWZ-NOTIFY3 /root/sink.txt && [[ ! -e /var/lib/private/logwizz-notify/pwned ]]; then
+  res notify_ntfy PASS "title, auth header file, summary only, log content not executed"
 else
   res notify_ntfy FAIL "$n3 $(ls /var/lib/private/logwizz-notify/) $(notify_log)"
 fi
 res notify_security PASS "$(systemd-analyze security logwizz-notify --no-pager | tail -1)"
 systemctl stop logwizz-notify; kill "$SINK"
+rm -f /usr/local/share/ca-certificates/lwz-sink.crt /root/sink.key; update-ca-certificates --fresh >/dev/null 2>&1
 
 # 4. Test file: append, rename+create rotation with a late write to the old file.
 echo "LWZ-T1 append" >> /var/log/lwtest.log
