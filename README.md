@@ -19,27 +19,28 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 
 ## Contents
 
-- [Installing](#installing)
-- [Building](#building)
+- [Install](#install)
+- [Quick start](#quick-start)
 - [Usage](#usage)
+- [Exit codes](#exit-codes)
 - [Configuration](#configuration)
 - [Event format](#event-format)
 - [Behaviour and guarantees](#behaviour-and-guarantees)
 - [Operations](#operations)
 - [Deployment with systemd](#deployment-with-systemd)
 - [Security](#security)
-- [Compatibility and limitations](#compatibility-and-limitations)
+- [Known limitations](#known-limitations)
 - [Development](#development)
 - [CI and releases](#ci-and-releases)
 
-## Installing
+## Install
 
 Each [GitHub release](https://github.com/mycaravam-crypto/logwizz/releases)
 has a static Linux x64 binary (musl, no runtime dependencies, any
 distribution), the systemd unit, the example configuration and
 `SHA256SUMS.txt`:
 
-```sh
+```bash
 v=X.Y.Z   # the release to install
 base=https://github.com/mycaravam-crypto/logwizz/releases/download/v$v
 curl -fL -O "$base/logwizz-v$v-linux-x64" -O "$base/SHA256SUMS.txt"
@@ -50,16 +51,40 @@ logwizz --version
 
 Then continue with [Deployment with systemd](#deployment-with-systemd).
 
-## Building
-
-Requires Rust 1.85 or newer (the minimum supported Rust version, MSRV) on
+From source, logwizz requires Rust 1.85 or newer (the minimum supported Rust version, MSRV) on
 Linux. Running the tests and benchmarks needs 1.86, because of the
 `criterion` dev-dependency. Development and the full CI gates use the latest
 stable release.
 
-```sh
+```bash
 cargo build --release --locked
 install -m 0755 target/release/logwizz /usr/bin/logwizz
+```
+
+## Quick start
+
+Watch one file for lines containing `ERROR`, no root needed:
+
+```bash
+touch demo.log
+cat > demo.toml <<EOF
+[[files]]
+path = "$PWD/demo.log"
+
+[[rules]]
+id = "error"
+match_type = "literal"
+pattern = "ERROR"
+severity = "error"
+EOF
+logwizz -c demo.toml --check-config   # configuration OK: 1 file(s) (0 disabled), 1 rule(s) (0 disabled)
+logwizz -c demo.toml                  # runs until Ctrl+C
+```
+
+In a second terminal, `echo "ERROR disk full" >> demo.log`, and logwizz prints:
+
+```
+{"v":1,"ts":"2026-10-25T08:17:28.449076Z","host":"web1","pid":9419,"file":"/home/me/demo.log","rule":"error","description":"","severity":"error","match_type":"literal","line":"ERROR disk full","truncated":false}
 ```
 
 ## Usage
@@ -75,10 +100,15 @@ logwizz --version | --help
 | `--check-config` | Load, validate and compile the configuration, print a summary and exit. Does not start monitoring. |
 | `-V, --version` / `-h, --help` | Print version or help. |
 
-Exit codes: `0` for a clean shutdown or a valid configuration, `1` for a
-runtime failure (for example, the output became unwritable), and `2` for an
-invalid configuration. Every configuration problem is listed, not only the
-first one.
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | clean shutdown (`SIGTERM`, `SIGINT`), or `--check-config`: the configuration is valid |
+| `1` | runtime failure, for example the output became unwritable |
+| `2` | invalid configuration, or invalid command-line arguments |
+
+Every configuration problem is listed, not only the first one:
 
 ```
 $ logwizz --check-config -c bad.toml
@@ -397,7 +427,7 @@ filesystem, no capabilities, no network, and a `@system-service` system call
 filter. Events go to stdout, and from there to the journal in a separate
 `logwizz` namespace (`LogNamespace=logwizz`, systemd 245 or newer).
 
-```sh
+```bash
 install -D -m 0640 -g adm config/logwizz.example.toml /etc/logwizz/logwizz.toml
 install -m 0644 packaging/logwizz.service /etc/systemd/system/
 systemctl daemon-reload
@@ -418,7 +448,7 @@ Read access to logs comes from `SupplementaryGroups=adm`, which is right for
 Debian and Ubuntu. On other distributions, grant read access with a group or
 an ACL. For example, `/var/log/secure` on RHEL-family systems is root-only:
 
-```sh
+```bash
 groupadd -r logwizz
 setfacl -m g:logwizz:r /var/log/secure
 chgrp logwizz /etc/logwizz/logwizz.toml
@@ -462,7 +492,7 @@ logwizz's own output.** The namespace has its own retention settings in
   `serde_json`.
 - Diagnostics never contain log line content.
 
-## Compatibility and limitations
+## Known limitations
 
 - **Platform:** Linux only (inotify, `sigwait`, `pread`). Developed and
   tested on Ubuntu 24.04 with kernel 6.18 on ext4. Rust's standard library
@@ -474,7 +504,7 @@ logwizz's own output.** The namespace has its own retention settings in
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
-- Not supported in 0.1.0: glob patterns, runtime
+- **Not supported in 0.1.0:** glob patterns, runtime
   configuration reload, compressed or rotated-file catch-up, multi-line
   records.
 - **Truncation is detected by size:** a file is treated as truncated when it
@@ -483,14 +513,14 @@ logwizz's own output.** The namespace has its own retention settings in
   reading continues from the old offset, so the rewritten lines before it are
   missed. `tail -F` has the same limitation. Rename-based rotation
   (logrotate `create`) does not have it.
-- Rule evaluation is sequential per line. Throughput falls roughly linearly
+- **Rule evaluation is sequential per line.** Throughput falls roughly linearly
   with the number of regex rules. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Development
 
 Quality gates (also run in CI):
 
-```sh
+```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
@@ -505,7 +535,7 @@ together.
 
 Benchmarks and load tests are run separately:
 
-```sh
+```bash
 cargo bench --bench rule_engine
 cargo test --release --test load -- --ignored --nocapture --test-threads=1
 ```
