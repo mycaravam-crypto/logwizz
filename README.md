@@ -477,6 +477,12 @@ logwizz's own output.** The namespace has its own retention settings in
 - Not supported in 0.1.0: glob patterns, runtime
   configuration reload, compressed or rotated-file catch-up, multi-line
   records.
+- **Truncation is detected by size:** a file is treated as truncated when it
+  is smaller than the read offset. If it is truncated and rewritten past the
+  old offset before logwizz checks it, the truncation goes unnoticed and
+  reading continues from the old offset, so the rewritten lines before it are
+  missed. `tail -F` has the same limitation. Rename-based rotation
+  (logrotate `create`) does not have it.
 - Rule evaluation is sequential per line. Throughput falls roughly linearly
   with the number of regex rules. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
