@@ -117,7 +117,9 @@ cooldown_secs = 3600
 id = "ssh_login"
 description = "Successful SSH login"
 match_type = "regex"
-pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for \S+ from (?P<src>[0-9A-Fa-f.:]+) port \d+'
+# logwizz-notify shows the `login` capture as login@src. Use it only on
+# successful logins: failed ones can carry a password typed as the username.
+pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for (?P<login>\S+) from (?P<src>[0-9A-Fa-f.:]+) port \d+'
 severity = "warning"           # every login notifies; drop this rule if that is too chatty
 
 [[rules]]

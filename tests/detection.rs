@@ -97,7 +97,7 @@ fn rules_match_real_log_lines() {
             &cfg,
             "2026-10-25T14:20:12.5+01:00 web1 sshd-session[56533]: Accepted publickey for deploy from 10.0.0.5 port 34092 ssh2: ED25519 SHA256:x"
         ),
-        ["ssh_login src=10.0.0.5"]
+        ["ssh_login login=deploy src=10.0.0.5"]
     );
     assert_eq!(
         hits(

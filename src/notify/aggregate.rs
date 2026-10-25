@@ -98,7 +98,13 @@ impl Detection {
         let source = field("src")
             .or_else(|| field("source"))
             .or(ev.threshold.as_ref().and_then(|t| t.group.as_deref()))
-            .map(|s| clean(s, MAX_SOURCE_BYTES))
+            // A `login` capture (successful logins) is shown as login@source.
+            // Other captures, `user` included, never leave the host.
+            .map(|s| match field("login") {
+                Some(u) if !u.is_empty() => format!("{u}@{s}"),
+                _ => s.to_string(),
+            })
+            .map(|s| clean(&s, MAX_SOURCE_BYTES))
             .filter(|s| !s.is_empty());
         Ok((
             Detection {
@@ -508,6 +514,11 @@ mod tests {
         assert!(!fallback);
         assert_eq!(d.time, 1_792_932_007);
         assert_eq!(d.source.as_deref(), Some("203.0.113.8"));
+        let login = msg.replace(r#""user":"root""#, r#""login":"root""#);
+        assert_eq!(
+            Detection::parse(&login, None).unwrap().0.source.as_deref(),
+            Some("root@203.0.113.8")
+        );
         assert_eq!(d.description, "d x");
         assert_eq!(d.severity, Severity::Warning);
         assert!(!format!("{d:?}").contains("RAW SECRET"));
