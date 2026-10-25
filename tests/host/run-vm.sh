@@ -24,51 +24,11 @@ rm -rf payload && mkdir payload
 install -m 0755 "$root/target/x86_64-unknown-linux-musl/release/logwizz" payload/logwizz
 cp "$root/packaging/logwizz.service" "$root/packaging/logwizz-notify" "$root/packaging/logwizz-notify.service" \
   "$here/hostcheck.sh" "$root/docs/DETECTION.md" payload/
-# Combine the host config with any detection log sources not already monitored,
-# then append the shipped rules. Avoid duplicate paths (auth.log is in both configs).
-{
-  cat "$here/logwizz.toml"
-  echo
-  awk '
-    function flush_file() {
-      if (in_file && path != "" && !(path in existing)) printf "%s", block
-    }
-    FNR == NR {
-      if (match($0, /path = "[^"]+"/)) {
-        value = substr($0, RSTART, RLENGTH)
-        sub(/^path = "/, "", value)
-        sub(/"$/, "", value)
-        existing[value] = 1
-      }
-      next
-    }
-    /^\[\[files\]\][[:space:]]*$/ {
-      flush_file()
-      in_file = 1
-      block = $0 ORS
-      path = ""
-      next
-    }
-    /^\[/ {
-      flush_file()
-      in_file = 0
-      block = ""
-      path = ""
-      next
-    }
-    in_file {
-      block = block $0 ORS
-      if (match($0, /path = "[^"]+"/)) {
-        path = substr($0, RSTART, RLENGTH)
-        sub(/^path = "/, "", path)
-        sub(/"$/, "", path)
-      }
-    }
-    END { flush_file() }
-  ' "$here/logwizz.toml" "$root/config/detection.toml"
-  echo
-  sed -n '/^\[\[rules\]\]/,$p' "$root/config/detection.toml"
-} > payload/logwizz.toml
+# The host config already watches auth.log and syslog. On Ubuntu 24.04, rsyslog
+# copies kernel messages to syslog, so adding detection.toml's kern.log here
+# would monitor each firewall line twice. Append the shipped rules only; the
+# production detection config uses kern.log on its own to avoid that duplicate.
+{ cat "$here/logwizz.toml"; echo; sed -n '/^\[\[rules\]\]/,$p' "$root/config/detection.toml"; } > payload/logwizz.toml
 
 cat > user-data <<'EOF'
 #cloud-config
