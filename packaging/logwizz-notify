@@ -30,6 +30,7 @@ fi
 
 post() { # body [curl options...]
   body=$1; shift
+  # -H @file reads the header from the file (curl >= 7.55).
   curl -fsS -o /dev/null --max-time 10 --retry 5 --retry-all-errors \
     ${auth:+-H "@$auth"} "$@" --data-binary "$body" "$NOTIFY_URL"
 }
@@ -39,8 +40,9 @@ send() { # event JSON
     post "$1" -H 'Content-Type: application/json'
     return
   fi
-  # @sh quotes every value for the shell, so eval only assigns.
-  eval "$(printf '%s' "$1" | jq -r '@sh "host=\(.host) rule=\(.rule) sev=\(.severity) desc=\(.description) line=\(.line)"')" || return
+  # Each value is quoted for the shell by @sh, so eval only assigns.
+  host='' rule='' sev='' desc='' line=''
+  eval "$(printf '%s' "$1" | jq -r '"host=\(.host | @sh) rule=\(.rule | @sh) sev=\(.severity | @sh) desc=\(.description | @sh) line=\(.line | @sh)"')" || return
   case $sev in
     critical) prio=5 ;; error | warning) prio=4 ;; notice) prio=3 ;; info) prio=2 ;; *) prio=1 ;;
   esac

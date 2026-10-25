@@ -92,11 +92,12 @@ install -m 0644 "$P/logwizz-notify.service" /etc/systemd/system/
 printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=webhook\n' > /etc/logwizz/notify.env
 chmod 0600 /etc/logwizz/notify.env
 python3 - /root/sink.txt <<'PY' &
-import http.server, sys
+import http.server, json, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(s):
-        body = s.rfile.read(int(s.headers["Content-Length"]))
-        with open(sys.argv[1], "ab") as f: f.write(body + b"\n")
+        body = s.rfile.read(int(s.headers["Content-Length"])).decode()
+        rec = {"title": s.headers["Title"], "auth": s.headers["Authorization"], "body": body}
+        with open(sys.argv[1], "a") as f: f.write(json.dumps(rec) + "\n")
         s.send_response(200); s.end_headers()
     def log_message(*a): pass
 http.server.HTTPServer(("127.0.0.1", 8099), H).serve_forever()
@@ -113,10 +114,22 @@ systemctl restart logwizz-notify; sleep 2
 logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY2 from 192.0.2.1"
 wait_sunk LWZ-NOTIFY2
 if [[ $(sunk LWZ-NOTIFY1) == 1 && $(sunk LWZ-NOTIFY2) == 1 && $(sunk LWZ-T0) == 0 ]] &&
-   jq -e 'select(.rule == "ssh_failed_login")' < <(grep -F LWZ-NOTIFY2 /root/sink.txt) >/dev/null; then
+   jq -e '.body | fromjson | select(.rule == "ssh_failed_login")' < <(grep -F LWZ-NOTIFY2 /root/sink.txt) >/dev/null; then
   res notify PASS "warning events posted once across a restart, info filtered"
 else
   res notify FAIL "NOTIFY1=$(sunk LWZ-NOTIFY1) NOTIFY2=$(sunk LWZ-NOTIFY2) T0=$(sunk LWZ-T0) $(systemctl status logwizz-notify --no-pager | tail -5 | tr '\n' ';')"
+fi
+# ntfy format with an auth header, and log content that tries shell injection.
+printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\n' > /etc/logwizz/notify.env
+systemctl restart logwizz-notify; sleep 2
+logger -p auth.notice "Failed password for LWZ-NOTIFY3 '\$(touch \$STATE_DIRECTORY/pwned)' \`touch \$STATE_DIRECTORY/pwned\` from 192.0.2.1"
+wait_sunk LWZ-NOTIFY3
+n3=$(grep -F LWZ-NOTIFY3 /root/sink.txt)
+if jq -e 'select(.title == "logwizz lwz-hostcheck: ssh_failed_login" and .auth == "Bearer tk_LWZ" and (.body | contains("'"'"'$(touch $STATE_DIRECTORY/pwned)'"'"'")))' <<<"$n3" >/dev/null &&
+   [[ ! -e /var/lib/private/logwizz-notify/pwned ]]; then
+  res notify_ntfy PASS "title, auth header file, log content not executed"
+else
+  res notify_ntfy FAIL "$n3 $(ls /var/lib/private/logwizz-notify/)"
 fi
 res notify_security PASS "$(systemd-analyze security logwizz-notify --no-pager | tail -1)"
 systemctl stop logwizz-notify; kill "$SINK"
