@@ -138,28 +138,34 @@ struct State {
     summaries: Vec<Summary>,
 }
 
-fn load_state(dir: &Path, window_secs: u64) -> State {
+fn load_state(dir: &Path, window_secs: u64) -> io::Result<State> {
     let path = dir.join(STATE_FILE);
     match fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<State>(&bytes) {
-            Ok(s) if s.v == STATE_VERSION => s,
-            Ok(s) => {
-                warn!(
-                    version = s.v,
-                    "unsupported state file version; starting empty"
-                );
-                State::default()
+        Ok(bytes) => {
+            let state: State = serde_json::from_slice(&bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("state file {} is invalid: {e}", path.display()),
+                )
+            })?;
+            if state.v != STATE_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "state file {} uses unsupported version {} (expected {})",
+                        path.display(),
+                        state.v,
+                        STATE_VERSION
+                    ),
+                ));
             }
-            Err(e) => {
-                warn!(error = %e, "state file is invalid; starting empty");
-                State::default()
-            }
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => load_legacy(dir, window_secs),
-        Err(e) => {
-            warn!(error = %e, "cannot read the state file; starting empty");
-            State::default()
+            Ok(state)
         }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(load_legacy(dir, window_secs)),
+        Err(e) => Err(io::Error::new(
+            e.kind(),
+            format!("cannot read state file {}: {e}", path.display()),
+        )),
     }
 }
 
@@ -517,7 +523,7 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
     spawn_signal_thread(Arc::clone(&stop))?;
     fs::create_dir_all(&settings.state_dir)?;
 
-    let state = load_state(&settings.state_dir, settings.window_secs);
+    let state = load_state(&settings.state_dir, settings.window_secs)?;
     let legacy = legacy_files(&settings.state_dir);
     let mut n = Notifier {
         agg: Aggregator::new(settings.window_secs, settings.max_pending, state.summaries),
@@ -693,6 +699,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_or_unsupported_state_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_FILE);
+
+        fs::write(&path, b"{").unwrap();
+        let err = load_state(dir.path(), 60).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("state file"));
+        assert!(!err.to_string().contains("starting empty"));
+
+        fs::write(
+            &path,
+            serde_json::to_vec(&State {
+                v: STATE_VERSION + 1,
+                cursor: Some("saved-cursor".into()),
+                summaries: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let err = load_state(dir.path(), 60).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("unsupported version"));
+    }
+
+    #[test]
     fn imports_shell_notifier_state() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("cursor"), "s=abc;i=9\n").unwrap();
@@ -704,7 +736,7 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.path().join("agg-bad.json"), "{").unwrap();
-        let st = load_state(dir.path(), 60);
+        let st = load_state(dir.path(), 60).unwrap();
         assert_eq!(st.cursor.as_deref(), Some("s=abc;i=9"));
         assert_eq!(st.summaries.len(), 1);
         let s = &st.summaries[0];
