@@ -409,6 +409,15 @@ impl TailedFile {
         }
     }
 
+    /// A file that appeared while running (found by a glob): it consists
+    /// entirely of new data, so it is read from offset 0.
+    pub fn appeared(path: PathBuf, opts: ReaderOptions) -> Self {
+        TailedFile {
+            startup: None,
+            ..TailedFile::new(path, StartupMode::Beginning, opts)
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

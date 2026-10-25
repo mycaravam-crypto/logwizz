@@ -1,6 +1,8 @@
 //! Event and severity types.
 
 use std::fmt::{self, Write as _};
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -45,8 +47,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone)]
 pub struct Event {
     pub time: SystemTime,
-    /// Index into the configured file list.
-    pub file: usize,
+    /// The monitored path the line was read from.
+    pub file: Arc<Path>,
     /// Index into the engine's rule list.
     pub rule: usize,
     /// The matching line, or its excerpt.

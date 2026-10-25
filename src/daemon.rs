@@ -59,7 +59,6 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
 
     let engine = Engine::new(cfg.rules.clone());
     let tables = Arc::new(Tables {
-        files: cfg.files.clone(),
         rules: cfg.rules.clone(),
         meta: Meta::current(),
     });
@@ -81,7 +80,6 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
         Some(path) => Some(
             StateWriter::spawn(
                 path.clone(),
-                cfg.files.clone(),
                 Duration::from_millis(cfg.general.state_flush_ms),
                 Arc::clone(&progress),
                 Arc::clone(&metrics),
@@ -95,7 +93,8 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        files = cfg.files.len(),
+        files = monitor.files(),
+        globs = cfg.globs.len(),
         rules = engine.rules().len(),
         "logwizz started"
     );
@@ -134,7 +133,7 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
                 let (bytes, cut) = excerpt(line.bytes, max_excerpt);
                 dispatcher.send(Event {
                     time: SystemTime::now(),
-                    file,
+                    file: Arc::clone(file),
                     rule,
                     line: bytes.into(),
                     truncated: line.truncated || cut,

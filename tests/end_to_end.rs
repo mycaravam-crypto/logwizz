@@ -336,3 +336,30 @@ fn diagnostics_do_not_contain_log_content() {
     let err: Vec<String> = d.stderr.try_iter().collect();
     assert!(!err.iter().any(|l| l.contains("SECRET-TOKEN")), "{err:?}");
 }
+
+#[test]
+fn glob_events_name_the_matched_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("app");
+    fs::create_dir(&logs).unwrap();
+    let a = logs.join("a.log");
+    write_new(&a, "Failed password at startup\n");
+    let glob = format!(
+        "[[files]]\nglob = {:?}\n",
+        logs.join("*.log").display().to_string()
+    );
+    let mut d = Daemon::start(
+        dir.path(),
+        &config("startup_mode = \"beginning\"", &[], &glob),
+    );
+    let ev = d.event();
+    assert_eq!(ev["file"], a.display().to_string());
+    assert_eq!(ev["line"], "Failed password at startup");
+
+    let b = logs.join("b.log");
+    write_new(&b, "Failed password in a new file\n");
+    let ev = d.event();
+    assert_eq!(ev["file"], b.display().to_string());
+    assert_eq!(ev["line"], "Failed password in a new file");
+    assert!(d.stop().success());
+}

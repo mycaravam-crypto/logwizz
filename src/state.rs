@@ -252,12 +252,12 @@ pub fn save(path: &Path, files: &[(&Path, FileState)]) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-/// The offsets of all files (by configured index) at one moment, and how
-/// many events had been queued by then.
+/// The offsets of all open files at one moment, and how many events had
+/// been queued by then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub events: u64,
-    pub files: Vec<Option<FileState>>,
+    pub files: Vec<(Arc<Path>, FileState)>,
 }
 
 /// Checkpoints recorded by the monitor and not yet saved.
@@ -299,7 +299,6 @@ pub struct StateWriter {
 impl StateWriter {
     pub fn spawn(
         path: PathBuf,
-        files: Vec<PathBuf>,
         interval: Duration,
         progress: Arc<Progress>,
         metrics: Arc<Metrics>,
@@ -308,7 +307,6 @@ impl StateWriter {
         let stop = Arc::new(AtomicBool::new(false));
         let mut saver = Saver {
             path,
-            files,
             last: None,
             last_warning: None,
             metrics,
@@ -358,8 +356,7 @@ impl StateWriter {
 
 struct Saver {
     path: PathBuf,
-    files: Vec<PathBuf>,
-    last: Option<Vec<Option<FileState>>>,
+    last: Option<Vec<(Arc<Path>, FileState)>>,
     last_warning: Option<Instant>,
     metrics: Arc<Metrics>,
 }
@@ -369,12 +366,7 @@ impl Saver {
         if self.last.as_ref() == Some(&cp.files) {
             return;
         }
-        let entries: Vec<(&Path, FileState)> = self
-            .files
-            .iter()
-            .zip(&cp.files)
-            .filter_map(|(p, st)| st.map(|st| (p.as_path(), st)))
-            .collect();
+        let entries: Vec<(&Path, FileState)> = cp.files.iter().map(|(p, st)| (&**p, *st)).collect();
         match save(&self.path, &entries) {
             Ok(()) => {
                 metrics::inc(&self.metrics.state_saves);
@@ -419,7 +411,7 @@ mod tests {
     fn cp(events: u64, offset: u64) -> Checkpoint {
         Checkpoint {
             events,
-            files: vec![Some(st(offset)), None],
+            files: vec![(Path::new("/a.log").into(), st(offset))],
         }
     }
 

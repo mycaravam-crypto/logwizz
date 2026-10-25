@@ -30,14 +30,13 @@ impl Running {
         let metrics = Arc::new(Metrics::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut monitor = Monitor::new(&cfg, Arc::clone(&metrics), notifications);
-        let paths = cfg.files.clone();
         let waker = monitor.waker();
         let (tx, lines) = channel();
         let flag = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
             monitor.run(&flag, &mut |file, line| {
                 let text = String::from_utf8_lossy(line.bytes).into_owned();
-                let _ = tx.send((paths[file].clone(), text));
+                let _ = tx.send((file.to_path_buf(), text));
             });
         });
         Running {
@@ -268,4 +267,133 @@ fn symlink_target_in_other_directory_is_watched() {
         worst < Duration::from_millis(500),
         "worst latency {worst:?}"
     );
+}
+
+/// `general` and `file` are extra lines for `[general]` and the
+/// `[[files]]` entry.
+fn glob_cfg(glob: &Path, general: &str, file: &str, reconcile_ms: u64) -> Config {
+    let text = format!(
+        "[general]\nreconcile_interval_ms = {reconcile_ms}\nrotation_drain_ms = 200\n{general}\n\
+         [[rules]]\nid = \"any\"\nmatch_type = \"literal\"\npattern = \"x\"\nseverity = \"info\"\n\
+         [[files]]\nglob = {:?}\n{file}\n",
+        glob.display().to_string()
+    );
+    config::parse(&text, Path::new("test")).unwrap()
+}
+
+#[test]
+fn glob_follows_present_and_new_files() {
+    let _g = SERIAL.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.log");
+    write_new(&a, "old\n");
+    write_new(&dir.path().join("notes.txt"), "");
+    // Long reconcile interval: only inotify can explain fast detection.
+    let r = Running::start(glob_cfg(&dir.path().join("*.log"), "", "", 60_000), true);
+    r.wait_open(1);
+    // Present at startup: startup_mode "tail" applies.
+    append(&a, "from a\n");
+    assert_eq!(
+        r.next(Duration::from_secs(2)),
+        Some((a.clone(), "from a".into()))
+    );
+
+    // Appeared while running: read from the beginning.
+    let b = dir.path().join("b.log");
+    write_new(&b, "first\n");
+    assert_eq!(
+        r.next(Duration::from_secs(2)),
+        Some((b.clone(), "first".into()))
+    );
+    append(&b, "second\n");
+    r.expect("second", Duration::from_secs(2));
+
+    // A file renamed into a matching name is a new match too.
+    let tmp = dir.path().join("c.tmp");
+    write_new(&tmp, "renamed in\n");
+    fs::rename(&tmp, dir.path().join("c.log")).unwrap();
+    r.expect("renamed in", Duration::from_secs(2));
+
+    append(&dir.path().join("notes.txt"), "not matched\n");
+    assert!(r.next(Duration::from_millis(200)).is_none());
+    assert_eq!(r.metrics.snapshot().files_monitored, 3);
+}
+
+#[test]
+fn glob_finds_new_files_by_reconciliation_alone() {
+    let _g = SERIAL.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("later");
+    let r = Running::start(glob_cfg(&sub.join("*.log"), "", "", 100), false);
+    thread::sleep(Duration::from_millis(150));
+    fs::create_dir(&sub).unwrap();
+    write_new(&sub.join("x.log"), "polled\n");
+    r.expect("polled", Duration::from_secs(2));
+}
+
+#[test]
+fn glob_rotation_with_exclude_does_not_duplicate() {
+    let _g = SERIAL.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("app.log");
+    write_new(&log, "");
+    // "app.log*" also matches rotated names; exclude keeps them out.
+    let glob = dir.path().join("app.log*");
+    let r = Running::start(glob_cfg(&glob, "", "exclude = \"*.log.*\"", 60_000), true);
+    r.wait_open(1);
+    append(&log, "before\n");
+    r.expect("before", Duration::from_secs(2));
+    fs::rename(&log, dir.path().join("app.log.1")).unwrap();
+    append(&dir.path().join("app.log.1"), "late write\n");
+    write_new(&log, "after\n");
+    let mut got = vec![
+        r.next(Duration::from_secs(2)).unwrap().1,
+        r.next(Duration::from_secs(2)).unwrap().1,
+    ];
+    got.sort();
+    assert_eq!(got, ["after", "late write"]);
+    // Nothing is read a second time from the rotated file.
+    assert!(r.next(Duration::from_millis(500)).is_none());
+}
+
+#[test]
+fn glob_limit_is_enforced_and_counted() {
+    let _g = SERIAL.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let r = Running::start(
+        glob_cfg(&dir.path().join("*.log"), "max_glob_files = 2", "", 60_000),
+        true,
+    );
+    let names = ["a.log", "b.log", "c.log"];
+    for n in names {
+        write_new(&dir.path().join(n), &format!("hello from {n}\n"));
+    }
+    let mut got: Vec<_> = (0..2)
+        .map(|_| r.next(Duration::from_secs(2)).unwrap().0)
+        .collect();
+    assert!(
+        r.next(Duration::from_millis(300)).is_none(),
+        "third refused"
+    );
+    let m = r.metrics.snapshot();
+    assert_eq!(m.files_monitored, 2);
+    assert_eq!(m.glob_matches_refused, 1);
+
+    // Deleting a followed file frees its slot for the refused one.
+    fs::remove_file(&got[0]).unwrap();
+    let (third, text) = r
+        .next(Duration::from_secs(2))
+        .expect("refused file picked up");
+    got.push(third.clone());
+    got.sort();
+    got.dedup();
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(
+        text,
+        format!(
+            "hello from {}",
+            third.file_name().unwrap().to_str().unwrap()
+        )
+    );
+    assert_eq!(r.metrics.snapshot().glob_matches_refused, 1, "counted once");
 }
