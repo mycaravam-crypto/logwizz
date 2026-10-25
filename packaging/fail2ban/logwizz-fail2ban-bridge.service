@@ -6,6 +6,7 @@ Wants=logwizz.service
 [Service]
 Type=simple
 DynamicUser=yes
+SupplementaryGroups=systemd-journal
 LogsDirectory=logwizz
 LogsDirectoryMode=0750
 ExecStart=/usr/local/libexec/logwizz-fail2ban-bridge
