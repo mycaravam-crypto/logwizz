@@ -252,11 +252,15 @@ pub fn save(path: &Path, files: &[(&Path, FileState)]) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-/// The offsets of all files (by configured index) at one moment, and how
-/// many events had been queued by then.
+/// The offsets of all files at one moment, and how many events had been
+/// queued by then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub events: u64,
+    /// The configured files when the checkpoint was taken; a configuration
+    /// reload can change them while older checkpoints are still pending.
+    pub paths: Arc<[PathBuf]>,
+    /// The position of each of `paths`, by index.
     pub files: Vec<Option<FileState>>,
 }
 
@@ -268,7 +272,11 @@ pub struct Pending {
 
 impl Pending {
     pub fn push(&mut self, cp: Checkpoint) {
-        if self.queue.back().is_some_and(|b| b.files == cp.files) {
+        if self
+            .queue
+            .back()
+            .is_some_and(|b| b.paths == cp.paths && b.files == cp.files)
+        {
             // Nothing moved; keep the older (more easily flushed) one.
             return;
         }
@@ -299,7 +307,6 @@ pub struct StateWriter {
 impl StateWriter {
     pub fn spawn(
         path: PathBuf,
-        files: Vec<PathBuf>,
         interval: Duration,
         progress: Arc<Progress>,
         metrics: Arc<Metrics>,
@@ -308,7 +315,6 @@ impl StateWriter {
         let stop = Arc::new(AtomicBool::new(false));
         let mut saver = Saver {
             path,
-            files,
             last: None,
             last_warning: None,
             metrics,
@@ -358,19 +364,23 @@ impl StateWriter {
 
 struct Saver {
     path: PathBuf,
-    files: Vec<PathBuf>,
-    last: Option<Vec<Option<FileState>>>,
+    /// The last checkpoint saved, to skip rewriting an unchanged file.
+    last: Option<Checkpoint>,
     last_warning: Option<Instant>,
     metrics: Arc<Metrics>,
 }
 
 impl Saver {
     fn save(&mut self, cp: Checkpoint) {
-        if self.last.as_ref() == Some(&cp.files) {
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|l| l.paths == cp.paths && l.files == cp.files)
+        {
             return;
         }
-        let entries: Vec<(&Path, FileState)> = self
-            .files
+        let entries: Vec<(&Path, FileState)> = cp
+            .paths
             .iter()
             .zip(&cp.files)
             .filter_map(|(p, st)| st.map(|st| (p.as_path(), st)))
@@ -382,7 +392,7 @@ impl Saver {
                     info!(path = %self.path.display(), "state file written again");
                 }
                 debug!(files = entries.len(), "offsets saved");
-                self.last = Some(cp.files);
+                self.last = Some(cp);
             }
             Err(e) => {
                 metrics::inc(&self.metrics.state_save_errors);
@@ -419,6 +429,7 @@ mod tests {
     fn cp(events: u64, offset: u64) -> Checkpoint {
         Checkpoint {
             events,
+            paths: [PathBuf::from("/a.log"), PathBuf::from("/b.log")].into(),
             files: vec![Some(st(offset)), None],
         }
     }
@@ -491,6 +502,38 @@ mod tests {
         assert_eq!(p.take_flushed(4), None);
         assert_eq!(p.take_flushed(9), Some(cp(9, 30)));
         assert_eq!(p.take_flushed(100), None);
+    }
+
+    #[test]
+    fn checkpoints_with_other_files_are_not_merged() {
+        let mut p = Pending::default();
+        p.push(cp(1, 1));
+        let mut reloaded = cp(2, 1);
+        reloaded.paths = [PathBuf::from("/c.log"), PathBuf::from("/a.log")].into();
+        p.push(reloaded.clone());
+        assert_eq!(p.queue.len(), 2, "same offsets, other files");
+        assert_eq!(p.take_flushed(2), Some(reloaded));
+    }
+
+    #[test]
+    fn saved_entries_follow_the_checkpoint_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offsets.json");
+        let mut saver = Saver {
+            path: path.clone(),
+            last: None,
+            last_warning: None,
+            metrics: Arc::new(Metrics::default()),
+        };
+        saver.save(cp(0, 5));
+        assert_eq!(load(&path)[Path::new("/a.log")], st(5));
+        let mut reloaded = cp(1, 5);
+        reloaded.paths = [PathBuf::from("/c.log"), PathBuf::from("/a.log")].into();
+        reloaded.files = vec![None, Some(st(7))];
+        saver.save(reloaded);
+        let map = load(&path);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[Path::new("/a.log")], st(7));
     }
 
     #[test]

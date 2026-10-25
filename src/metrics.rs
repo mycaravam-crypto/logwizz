@@ -71,6 +71,10 @@ counters! {
     state_saves,
     /// Failed writes of the offset state file (retried later).
     state_save_errors,
+    /// Configuration reloads applied (SIGHUP).
+    config_reloads,
+    /// Configuration reloads rejected; the running configuration was kept.
+    config_reload_failures,
 }
 
 #[inline]

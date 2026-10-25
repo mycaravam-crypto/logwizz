@@ -328,7 +328,35 @@ In both modes:
 |---|---|
 | `SIGTERM`, `SIGINT` | Stop reading, flush queued events, log final statistics, exit 0. |
 | `SIGUSR1` | Log a statistics line at `info` level. |
-| `SIGHUP` | Logs that reload is not supported. Runtime reload is not implemented in 0.1.0: restart to apply configuration changes. |
+| `SIGHUP` | Reload the configuration (see below). `systemctl reload logwizz` sends it. |
+
+### Configuration reload
+
+On `SIGHUP`, logwizz reads and validates the configuration file again and
+compiles every rule. If anything is wrong, it logs the problems
+(`configuration reload failed`), counts `config_reload_failures` and keeps
+running with the old configuration unchanged. Otherwise it applies the new
+configuration between two reads, so no line is matched against a partly
+applied one, and logs `configuration reloaded`:
+
+- **Rules** are replaced. Rate-limit windows and dedup entries carry over
+  for rules whose id and definition are unchanged, and start fresh for new
+  or changed rules.
+- **Files** still configured keep reading where they were, including a
+  rotated file still being drained. Removed files are closed after any
+  incomplete last line is emitted. Added files are read from the beginning,
+  since all of their content is new to this process (as for a file that
+  appears while logwizz runs).
+- **Applied:** `[limits]`, `reconcile_interval_ms`, `rotation_drain_ms`,
+  `stats_interval_secs`, `max_excerpt_bytes`, `max_queue_bytes` and
+  `on_full`.
+- **Need a restart:** `startup_mode`, `max_line_bytes`, `diagnostics`,
+  `state_file`, `state_flush_ms`, `format`, `destination` and
+  `queue_capacity`. A change to any of them is logged as a warning naming
+  the settings, and their running values are kept.
+
+Events queued before the reload are written with the file and rule names
+they were matched with.
 
 ### Statistics
 
@@ -336,7 +364,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -359,6 +387,7 @@ retry.
 | `read_errors` | Episodes of unreadable files or paths that are not regular files. A new file that is briefly unreadable while its owner or mode is set is not counted. |
 | `notify_overflows` | inotify queue overflows (each one triggers a full rescan). |
 | `rotations`, `truncations` | Detected replacements and truncations. |
+| `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
 `rule_matches` = `events_emitted` + `events_dropped` + `events_rate_limited` +
 `events_deduplicated`.
@@ -474,9 +503,8 @@ logwizz's own output.** The namespace has its own retention settings in
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
-- Not supported in 0.1.0: glob patterns, runtime
-  configuration reload, compressed or rotated-file catch-up, multi-line
-  records.
+- Not supported: glob patterns, compressed or rotated-file catch-up,
+  multi-line records.
 - Rule evaluation is sequential per line. Throughput falls roughly linearly
   with the number of regex rules. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 

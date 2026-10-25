@@ -4,38 +4,46 @@
 //! * main: the monitor loop (reading, matching, limiting, enqueueing)
 //! * `output`: formats and writes events
 //! * `signals`: waits synchronously for SIGTERM/SIGINT/SIGUSR1/SIGHUP
-//! * `stats` (optional): periodic statistics diagnostics
+//! * `stats`: periodic statistics diagnostics (`stats_interval_secs`)
 //! * `state` (optional): saves read offsets (`general.state_file`)
 //! * the notify crate's inotify thread
+//!
+//! SIGHUP reloads the configuration: the signal thread sets a flag, and the
+//! monitor thread applies the new configuration between polls (see
+//! [`apply_reload`]).
 //!
 //! Signals are blocked in every thread (the mask is set before any thread is
 //! spawned and is inherited) and consumed only by `sigwait` in the signal
 //! thread, so no code runs in async-signal context.
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{info, warn};
 
-use crate::config::{Config, Destination};
+use crate::config::{self, Config, Destination};
 use crate::dispatcher::{Admit, Dispatcher, Limiter, Meta, Tables};
 use crate::engine::Engine;
 use crate::error::RuntimeError;
 use crate::event::{Event, excerpt};
 use crate::metrics::{self, Metrics};
-use crate::monitor::Monitor;
+use crate::monitor::{Monitor, Stopped};
+use crate::reader::Line;
 use crate::state::{self, Checkpoint, StateWriter};
 use crate::watcher::Waker;
 
 /// Runs the daemon until a termination signal or an output failure.
-pub fn run(cfg: Config) -> Result<(), RuntimeError> {
+/// `config_path` is read again on SIGHUP.
+pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     let signals = block_signals().map_err(RuntimeError::Startup)?;
 
     let metrics = Arc::new(Metrics::default());
     let shutdown = Arc::new(AtomicBool::new(false));
+    let reload = Arc::new(AtomicBool::new(false));
     let mut monitor = Monitor::new(&cfg, Arc::clone(&metrics), true);
     if let Some(path) = &cfg.general.state_file {
         monitor.resume(state::load(path));
@@ -45,29 +53,26 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
     spawn_signal_thread(
         signals,
         Arc::clone(&shutdown),
+        Arc::clone(&reload),
         waker.clone(),
         Arc::clone(&metrics),
     )
     .map_err(RuntimeError::Startup)?;
-    if cfg.general.stats_interval_secs > 0 {
-        spawn_stats_thread(
-            Duration::from_secs(cfg.general.stats_interval_secs),
-            Arc::clone(&metrics),
-        )
+    let stats_interval = Arc::new(AtomicU64::new(cfg.general.stats_interval_secs));
+    spawn_stats_thread(Arc::clone(&stats_interval), Arc::clone(&metrics))
         .map_err(RuntimeError::Startup)?;
-    }
 
-    let engine = Engine::new(cfg.rules.clone());
+    let meta = Meta::current();
     let tables = Arc::new(Tables {
         files: cfg.files.clone(),
         rules: cfg.rules.clone(),
-        meta: Meta::current(),
+        meta: meta.clone(),
     });
     let writer: Box<dyn io::Write + Send> = match cfg.output.destination {
         Destination::Stdout => Box::new(io::stdout()),
         Destination::Stderr => Box::new(io::stderr()),
     };
-    let mut dispatcher = Dispatcher::spawn(
+    let dispatcher = Dispatcher::spawn(
         &cfg,
         tables,
         writer,
@@ -77,12 +82,12 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
     )
     .map_err(RuntimeError::Output)?;
     let progress = dispatcher.progress();
+    let state_flush = Duration::from_millis(cfg.general.state_flush_ms);
     let state_writer = match &cfg.general.state_file {
         Some(path) => Some(
             StateWriter::spawn(
                 path.clone(),
-                cfg.files.clone(),
-                Duration::from_millis(cfg.general.state_flush_ms),
+                state_flush,
                 Arc::clone(&progress),
                 Arc::clone(&metrics),
             )
@@ -90,66 +95,63 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
         ),
         None => None,
     };
-    let mut limiter = Limiter::new(&cfg.limits, engine.rules().len());
-    let max_excerpt = cfg.output.max_excerpt_bytes;
+    let mut pipeline = Pipeline {
+        engine: Engine::new(cfg.rules.clone()),
+        limiter: Limiter::new(&cfg.limits, cfg.rules.len()),
+        dispatcher,
+        metrics: Arc::clone(&metrics),
+        meta,
+        max_excerpt: cfg.output.max_excerpt_bytes,
+    };
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
         files = cfg.files.len(),
-        rules = engine.rules().len(),
+        rules = cfg.rules.len(),
         "logwizz started"
     );
 
-    let mut record = |files| {
-        if let Some(w) = &state_writer {
-            w.record(Checkpoint {
-                events: progress.sent(),
-                files,
-            });
-        }
-    };
-    let checkpoints = state_writer.as_ref().map(|_| {
-        (
-            Duration::from_millis(cfg.general.state_flush_ms),
-            &mut record as &mut dyn FnMut(_),
-        )
-    });
-    monitor.run_with(
-        &shutdown,
-        &mut |file, line| {
-            engine.for_each_match(line.bytes, |rule| {
-                metrics::inc(&metrics.rule_matches);
-                let id = &engine.rules()[rule].id;
-                match limiter.admit(rule, id, line.bytes, Instant::now()) {
-                    Admit::Yes => {}
-                    Admit::RateLimited => {
-                        metrics::inc(&metrics.events_rate_limited);
-                        return;
-                    }
-                    Admit::Duplicate => {
-                        metrics::inc(&metrics.events_deduplicated);
-                        return;
-                    }
-                }
-                let (bytes, cut) = excerpt(line.bytes, max_excerpt);
-                dispatcher.send(Event {
-                    time: SystemTime::now(),
-                    file,
-                    rule,
-                    line: bytes.into(),
-                    truncated: line.truncated || cut,
+    let mut running = cfg;
+    let mut paths: Arc<[PathBuf]> = running.files.clone().into();
+    loop {
+        let mut record = |files| {
+            if let Some(w) = &state_writer {
+                w.record(Checkpoint {
+                    events: progress.sent(),
+                    paths: Arc::clone(&paths),
+                    files,
                 });
-            });
-        },
-        checkpoints,
-    );
+            }
+        };
+        let checkpoints = state_writer
+            .as_ref()
+            .map(|_| (state_flush, &mut record as &mut dyn FnMut(_)));
+        let stopped = monitor.run_with(
+            &shutdown,
+            Some(&reload),
+            &mut |file, line| pipeline.line(file, line),
+            checkpoints,
+        );
+        if stopped == Stopped::Shutdown {
+            break;
+        }
+        apply_reload(
+            config_path,
+            &mut running,
+            &mut monitor,
+            &mut pipeline,
+            &stats_interval,
+        );
+        paths = running.files.clone().into();
+    }
 
     info!("shutting down; flushing queued events");
     let final_checkpoint = Checkpoint {
         events: progress.sent(),
+        paths,
         files: monitor.checkpoint(),
     };
-    let result = dispatcher.finish();
+    let result = pipeline.dispatcher.finish();
     if let Some(w) = state_writer {
         // Saved only if the output really flushed everything.
         w.record(final_checkpoint);
@@ -157,6 +159,131 @@ pub fn run(cfg: Config) -> Result<(), RuntimeError> {
     }
     info!(stats = %metrics.snapshot(), "logwizz stopped");
     result.map_err(RuntimeError::Output)
+}
+
+/// Everything a line passes through on the monitor thread: matching,
+/// limiting and queueing.
+struct Pipeline {
+    engine: Engine,
+    limiter: Limiter,
+    dispatcher: Dispatcher,
+    metrics: Arc<Metrics>,
+    meta: Meta,
+    max_excerpt: Option<usize>,
+}
+
+impl Pipeline {
+    fn line(&mut self, file: usize, line: Line<'_>) {
+        let Pipeline {
+            engine,
+            limiter,
+            dispatcher,
+            metrics,
+            max_excerpt,
+            ..
+        } = self;
+        engine.for_each_match(line.bytes, |rule| {
+            metrics::inc(&metrics.rule_matches);
+            let id = &engine.rules()[rule].id;
+            match limiter.admit(rule, id, line.bytes, Instant::now()) {
+                Admit::Yes => {}
+                Admit::RateLimited => {
+                    metrics::inc(&metrics.events_rate_limited);
+                    return;
+                }
+                Admit::Duplicate => {
+                    metrics::inc(&metrics.events_deduplicated);
+                    return;
+                }
+            }
+            let (bytes, cut) = excerpt(line.bytes, *max_excerpt);
+            dispatcher.send(Event {
+                time: SystemTime::now(),
+                file,
+                rule,
+                line: bytes.into(),
+                truncated: line.truncated || cut,
+            });
+        });
+    }
+}
+
+/// Reads and validates the configuration again and, only if that fully
+/// succeeds, applies it; otherwise the running configuration stays as it
+/// is. Runs on the monitor thread between polls, so no line is matched
+/// against a partly applied configuration.
+fn apply_reload(
+    path: &Path,
+    running: &mut Config,
+    monitor: &mut Monitor,
+    pipeline: &mut Pipeline,
+    stats_interval: &AtomicU64,
+) {
+    let new = match config::load(path) {
+        Ok(cfg) => keep_restart_only(running, cfg),
+        Err(e) => {
+            metrics::inc(&pipeline.metrics.config_reload_failures);
+            warn!(error = %e, "configuration reload failed; keeping the running configuration");
+            return;
+        }
+    };
+    // Lines still pending in removed files are matched with the old rules
+    // and refer to the old file list, which the output still has.
+    monitor.reconfigure(&new, &mut |file, line| pipeline.line(file, line));
+    let kept: Vec<Option<usize>> = new
+        .rules
+        .iter()
+        .map(|r| running.rules.iter().position(|old| old.same_definition(r)))
+        .collect();
+    pipeline.limiter.reconfigure(&new.limits, &kept);
+    pipeline.engine = Engine::new(new.rules.clone());
+    pipeline.max_excerpt = new.output.max_excerpt_bytes;
+    pipeline.dispatcher.set_policy(&new.output);
+    pipeline.dispatcher.set_tables(Arc::new(Tables {
+        files: new.files.clone(),
+        rules: new.rules.clone(),
+        meta: pipeline.meta.clone(),
+    }));
+    stats_interval.store(new.general.stats_interval_secs, Ordering::Relaxed);
+    metrics::inc(&pipeline.metrics.config_reloads);
+    info!(
+        files = new.files.len(),
+        rules = new.rules.len(),
+        rules_unchanged = kept.iter().flatten().count(),
+        "configuration reloaded"
+    );
+    *running = new;
+}
+
+/// Settings that only take effect at startup keep their running values,
+/// with a warning naming the ones that changed.
+fn keep_restart_only(running: &Config, mut new: Config) -> Config {
+    let mut kept = Vec::new();
+    macro_rules! keep {
+        ($($section:ident . $field:ident),* $(,)?) => {$(
+            if new.$section.$field != running.$section.$field {
+                kept.push(concat!(stringify!($section), ".", stringify!($field)));
+                new.$section.$field = running.$section.$field.clone();
+            }
+        )*};
+    }
+    keep!(
+        general.startup_mode,
+        general.max_line_bytes,
+        general.diagnostics,
+        general.state_file,
+        general.state_flush_ms,
+        output.format,
+        output.destination,
+        output.queue_capacity,
+    );
+    if !kept.is_empty() {
+        warn!(
+            settings = %kept.join(", "),
+            "changed settings take effect only after a restart; keeping their running values"
+        );
+    }
+    new
 }
 
 /// Signals handled by the signal thread.
@@ -188,6 +315,7 @@ fn block_signals() -> io::Result<SigSet> {
 fn spawn_signal_thread(
     set: SigSet,
     shutdown: Arc<AtomicBool>,
+    reload: Arc<AtomicBool>,
     waker: Waker,
     metrics: Arc<Metrics>,
 ) -> io::Result<()> {
@@ -212,10 +340,11 @@ fn spawn_signal_thread(
                         waker.wake();
                     }
                     libc::SIGUSR1 => info!(stats = %metrics.snapshot(), "statistics"),
-                    libc::SIGHUP => warn!(
-                        "SIGHUP received: configuration reload is not supported in this version; \
-                     restart the service to apply changes"
-                    ),
+                    libc::SIGHUP => {
+                        info!("configuration reload requested");
+                        reload.store(true, Ordering::Relaxed);
+                        waker.wake();
+                    }
                     _ => {}
                 }
             }
@@ -223,11 +352,19 @@ fn spawn_signal_thread(
     Ok(())
 }
 
-fn spawn_stats_thread(interval: Duration, metrics: Arc<Metrics>) -> io::Result<()> {
+/// Logs statistics every `interval` seconds (0 = never). The interval is
+/// re-read every second, so a reload takes effect without a restart.
+fn spawn_stats_thread(interval: Arc<AtomicU64>, metrics: Arc<Metrics>) -> io::Result<()> {
     thread::Builder::new().name("stats".into()).spawn(move || {
+        let mut waited = 0u64;
         loop {
-            thread::sleep(interval);
-            info!(stats = %metrics.snapshot(), "statistics");
+            thread::sleep(Duration::from_secs(1));
+            waited += 1;
+            let every = interval.load(Ordering::Relaxed);
+            if every > 0 && waited >= every {
+                info!(stats = %metrics.snapshot(), "statistics");
+                waited = 0;
+            }
         }
     })?;
     Ok(())

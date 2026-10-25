@@ -49,7 +49,7 @@ fn main() -> ExitCode {
         .with_target(false)
         .init();
 
-    match daemon::run(cfg) {
+    match daemon::run(cfg, &cli.config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");

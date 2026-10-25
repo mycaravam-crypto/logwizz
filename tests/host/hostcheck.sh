@@ -111,6 +111,19 @@ sleep 1
 logger -p auth.notice "Failed password for root LWZ-AFTER-LOGROTATE"
 expect_event logrotate_auth LWZ-AFTER-LOGROTATE ssh_failed_login /var/log/auth.log
 
+# 16. Reload (systemctl reload = SIGHUP): a rule added to the config matches without a restart.
+rpid=$(systemctl show -p MainPID --value logwizz)
+printf '\n[[rules]]\nid = "reload_added"\nmatch_type = "literal"\npattern = "LWZ-RELOAD"\nseverity = "info"\n' \
+  >> /etc/logwizz/logwizz.toml
+systemctl reload logwizz
+if wait_for "configuration reloaded" 10; then
+  echo "LWZ-RELOAD after reload" >> /var/log/lwtest.log
+  if wait_for LWZ-RELOAD 10 && events | grep -F LWZ-RELOAD | grep -q '"rule":"reload_added"' &&
+     [[ $(systemctl show -p MainPID --value logwizz) == "$rpid" ]]; then
+    res reload PASS "new rule matched, same PID $rpid"
+  else res reload FAIL "no event for the added rule, or the PID changed"; fi
+else res reload FAIL "no 'configuration reloaded' in the journal"; fi
+
 # 9. SIGUSR1 statistics and error counters.
 systemctl kill -s USR1 logwizz; sleep 1
 re=$(stat_of read_errors); oe=$(stat_of output_errors)
