@@ -61,6 +61,10 @@ fn rules_match_real_log_lines() {
         "Oct 25 10:00:02 web1 sshd-session[1240]: Failed password for root from 192.0.2.7 port 52144 ssh2",
         "Oct 25 10:00:02 web1 sshd[1240]: Invalid user oracle from 192.0.2.7 port 52144",
         "2026-10-25T10:00:02.123+00:00 web1 sshd[1240]: Failed publickey for git from 192.0.2.7 port 52144 ssh2: ED25519 SHA256:x",
+        // PasswordAuthentication no: a real user's attempt only logs how it ended.
+        "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Connection closed by authenticating user root 192.0.2.7 port 34280 [preauth]",
+        "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Disconnected from authenticating user root 192.0.2.7 port 34280 [preauth]",
+        "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Connection reset by authenticating user root 192.0.2.7 port 34280 [preauth]",
     ] {
         assert_eq!(hits(&cfg, line), ["ssh_bruteforce src=192.0.2.7"], "{line}");
     }
@@ -70,11 +74,48 @@ fn rules_match_real_log_lines() {
     ] {
         assert_eq!(hits(&cfg, line), ["ssh_probe src=192.0.2.8"], "{line}");
     }
+    for line in [
+        "Oct 25 10:00:03 web1 sudo: pam_unix(sudo:auth): authentication failure; logname=deploy uid=1000 euid=0 tty=/dev/pts/0 ruser=deploy rhost=  user=deploy",
+        "Oct 25 10:00:03 web1 sudo:   deploy : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/sh",
+        "Oct 25 10:00:03 web1 sudo:   guest : user NOT in sudoers ; TTY=pts/0 ; PWD=/home/guest ; USER=root ; COMMAND=/bin/sh",
+    ] {
+        assert_eq!(hits(&cfg, line), ["sudo_auth_failure "], "{line}");
+    }
+    for line in [
+        "2026-10-25T14:19:50.1+01:00 web1 usermod[56460]: add 'deploy' to group 'adm'",
+        "Oct 25 10:00:04 web1 useradd[2001]: new user: name=backdoor, UID=1001, GID=1001, home=/home/backdoor, shell=/bin/bash, from=/dev/pts/0",
+        "Oct 25 10:00:04 web1 passwd[2002]: pam_unix(passwd:chauthtok): password changed for root",
+    ] {
+        assert_eq!(hits(&cfg, line), ["account_change "], "{line}");
+    }
     let nse = r#"192.0.2.9 - - [25/Oct/2026:10:00:04 +0000] "GET /nmaplowercheck1729 HTTP/1.1" 404 153 "-" "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)""#;
     assert_eq!(hits(&cfg, nse), ["scanner_user_agent src=192.0.2.9"]);
+    let caddy = r#"{"level":"info","ts":1761398404.5,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"192.0.2.9","remote_port":"51000","client_ip":"192.0.2.9","proto":"HTTP/1.1","method":"GET","host":"example.org","uri":"/?id=1","headers":{"User-Agent":["sqlmap/1.8.4#stable (https://sqlmap.org)"]}},"status":404}"#;
+    assert_eq!(hits(&cfg, caddy), ["scanner_user_agent src=192.0.2.9"]);
+    assert_eq!(
+        hits(
+            &cfg,
+            "2026-10-25T14:20:12.5+01:00 web1 sshd-session[56533]: Accepted publickey for deploy from 10.0.0.5 port 34092 ssh2: ED25519 SHA256:x"
+        ),
+        ["ssh_login src=10.0.0.5"]
+    );
+    assert_eq!(
+        hits(
+            &cfg,
+            "2026-10-25 01:08:51,101 fail2ban.actions        [46533]: NOTICE  [sshd] Ban 192.0.2.10"
+        ),
+        ["fail2ban_ban src=192.0.2.10"]
+    );
     // Normal traffic matches nothing.
     for line in [
-        "Oct 25 10:00:05 web1 sshd[1260]: Accepted publickey for deploy from 10.0.0.5 port 52144 ssh2",
+        "2026-10-25 01:08:51,105 fail2ban.observer       [46533]: NOTICE  [sshd] Increase Ban 192.0.2.10 (2 # 2h -> 2026-10-25 02:08:50)",
+        "2026-10-25 00:49:38,450 fail2ban.actions        [46533]: NOTICE  [sshd] Unban 192.0.2.10",
+        r#"{"level":"info","logger":"http.log.access","msg":"handled request","request":{"remote_ip":"10.0.0.9","headers":{"User-Agent":["Mozilla/5.0"]}},"status":200}"#,
+        // Invalid users are counted by their "Invalid user" line only.
+        "Oct 25 10:00:05 web1 sshd-session[1260]: Connection closed by invalid user admin 192.0.2.7 port 52144 [preauth]",
+        "Oct 25 10:00:05 web1 sshd-session[1260]: Received disconnect from 192.0.2.7 port 52144:11: Bye Bye [preauth]",
+        "Oct 25 10:00:05 web1 sudo:   deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/apt update",
+        "Oct 25 10:00:05 web1 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by deploy(uid=1000)",
         r#"10.0.0.9 - - [25/Oct/2026:10:00:05 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/8.5.0""#,
         "Oct 25 10:00:05 web1 kernel: eth0: link up, 1000Mbps, full-duplex",
     ] {
