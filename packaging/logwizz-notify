@@ -1,72 +1,75 @@
-#!/bin/sh
-# logwizz-notify: forwards logwizz events from the journal to a webhook or ntfy.
-#
-# Reads the logwizz journal namespace from where it stopped (cursor in
-# $STATE_DIRECTORY), keeps events at or above NOTIFY_MIN_PRIORITY, and POSTs
-# each one. Needs logwizz with format = "json" and syslog_prefix = true, plus
-# curl and jq. Configuration comes from the environment, see notify.env.example.
-set -u
-
-: "${NOTIFY_URL:?NOTIFY_URL is not set}"
-kind=${NOTIFY_KIND:-webhook}
+#!/usr/bin/env bash
+set -uo pipefail
+umask 077
+kind=${NOTIFY_KIND:-telegram}
 min=${NOTIFY_MIN_PRIORITY:-warning}
-[ "$min" = critical ] && min=crit # journalctl spells it crit
+window=${NOTIFY_WINDOW_SECS:-60}
+max_pending=${NOTIFY_MAX_PENDING:-4096}
 state=${STATE_DIRECTORY:-/var/lib/logwizz-notify}
-cursor=$state/cursor
+runtime=${RUNTIME_DIRECTORY:-/run/logwizz-notify}
+cursor_file=$state/cursor
+auth_file=
+telegram_config=
+die() { echo "logwizz-notify: $*" >&2; exit 2; }
+log() { echo "logwizz-notify: $*" >&2; }
+[[ $min == critical ]] && min=crit
+[[ $window =~ ^[0-9]+$ ]] && (( window >= 10 && window <= 3600 )) || die "NOTIFY_WINDOW_SECS must be 10..3600"
+[[ $max_pending =~ ^[0-9]+$ ]] && (( max_pending >= 1 && max_pending <= 65536 )) || die "NOTIFY_MAX_PENDING must be 1..65536"
 case $kind in
-  webhook | ntfy) ;;
-  *) echo "logwizz-notify: NOTIFY_KIND must be webhook or ntfy, not '$kind'" >&2; exit 2 ;;
+telegram) [[ -n ${TELEGRAM_BOT_TOKEN:-} ]] || die "TELEGRAM_BOT_TOKEN is not set"; [[ ${TELEGRAM_BOT_TOKEN} =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "TELEGRAM_BOT_TOKEN has invalid format"; [[ -n ${TELEGRAM_CHAT_ID:-} ]] || die "TELEGRAM_CHAT_ID is not set" ;;
+webhook|ntfy) [[ -n ${NOTIFY_URL:-} ]] || die "NOTIFY_URL is not set" ;;
+*) die "NOTIFY_KIND must be telegram, ntfy or webhook" ;;
 esac
-for cmd in journalctl curl jq; do
-  command -v "$cmd" >/dev/null || { echo "logwizz-notify: $cmd not found" >&2; exit 2; }
-done
-
-# The token goes to curl through a file, never on its command line.
-auth=
-if [ -n "${NOTIFY_AUTH:-}" ]; then
-  auth=${RUNTIME_DIRECTORY:-$state}/auth-header
-  (umask 077 && printf 'Authorization: %s\n' "$NOTIFY_AUTH" > "$auth")
-fi
-
-post() { # body [curl options...]
-  body=$1; shift
-  # -H @file reads the header from the file (curl >= 7.55).
-  curl -fsS -o /dev/null --max-time 10 --retry 5 --retry-all-errors \
-    ${auth:+-H "@$auth"} "$@" --data-binary "$body" "$NOTIFY_URL"
+for cmd in journalctl curl jq date sha256sum find wc tr; do command -v "$cmd" >/dev/null || die "$cmd not found"; done
+mkdir -p "$state" "$runtime" || die "cannot create state/runtime directory"
+chmod 0700 "$state" "$runtime" 2>/dev/null || true
+if [[ -n ${NOTIFY_AUTH:-} ]]; then auth_file=$runtime/auth-header; printf 'Authorization: %s\n' "${NOTIFY_AUTH}" > "$auth_file" || die "cannot write auth header"; chmod 0600 "$auth_file"; fi
+if [[ $kind == telegram ]]; then telegram_config=$runtime/telegram-curl.conf; printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "${TELEGRAM_BOT_TOKEN}" > "$telegram_config" || die "cannot write Telegram curl config"; chmod 0600 "$telegram_config"; fi
+curl_opts=(--silent --show-error --fail --max-time 10 --retry 3 --retry-all-errors --retry-delay 1)
+[[ -n $auth_file ]] && curl_opts+=(--header "@$auth_file")
+save_cursor() { local value=$1 tmp="$cursor_file.tmp.$$"; printf '%s\n' "$value" > "$tmp" && mv -f "$tmp" "$cursor_file"; }
+pending_count() { find "$state" -maxdepth 1 -type f -name 'agg-*.json' -print | wc -l | tr -d ' '; }
+send_summary() {
+local file=$1 partial=$2 summary message host rule severity priority response
+summary=$(jq -c --argjson partial "$partial" 'del(.bucket,.last_cursor,.source_seen) | .schema="logwizz.notification/v1" | .partial=$partial' "$file") || return 1
+host=$(jq -r '.host' "$file"); rule=$(jq -r '.rule' "$file"); severity=$(jq -r '.severity' "$file")
+message=$(jq -r --argjson partial "$partial" 'def clean: tostring | gsub("[\\r\\n]"; " "); "logwizz alert - " + (.host | clean) + "\nRule: " + (.rule | clean) + (if (.description // "") != "" then "\nDescription: " + (.description | clean) else "" end) + "\nSeverity: " + (.severity | clean) + "\nMatches: " + (.count | tostring) + "\nWindow: " + .window_start + " - " + .window_end + (if (.source // "") != "" then "\nSource: " + (.source | clean) else "" end) + (if $partial then "\nPartial window (shutdown or delayed delivery)" else "" end)' "$file") || return 1
+case $kind in
+webhook) curl "${curl_opts[@]}" -H 'Content-Type: application/json' --data-binary "$summary" "$NOTIFY_URL" >/dev/null ;;
+ntfy) case $severity in critical) priority=5 ;; error|warning) priority=4 ;; notice) priority=3 ;; info) priority=2 ;; *) priority=1 ;; esac; curl "${curl_opts[@]}" -H "Title: logwizz $host: $rule" -H "Priority: $priority" -H "Tags: $severity" --data-binary "$message" "$NOTIFY_URL" >/dev/null ;;
+telegram) response=$(curl "${curl_opts[@]}" --config "$telegram_config" --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=$message" --data-urlencode "disable_web_page_preview=true") || return 1; printf '%s' "$response" | jq -e '.ok == true' >/dev/null || return 1 ;;
+esac
 }
-
-send() { # event JSON
-  if [ "$kind" = webhook ]; then
-    post "$1" -H 'Content-Type: application/json'
-    return
-  fi
-  # Each value is quoted for the shell by @sh, so eval only assigns.
-  host='' rule='' sev='' desc='' line=''
-  eval "$(printf '%s' "$1" | jq -r '"host=\(.host | @sh) rule=\(.rule | @sh) sev=\(.severity | @sh) desc=\(.description | @sh) line=\(.line | @sh)"')" || return
-  case $sev in
-    critical) prio=5 ;; error | warning) prio=4 ;; notice) prio=3 ;; info) prio=2 ;; *) prio=1 ;;
-  esac
-  post "${desc:+$desc
-}$line" -H "Title: logwizz $host: $rule" -H "Priority: $prio" -H "Tags: $sev"
-}
-
-if [ -s "$cursor" ]; then
-  from="--after-cursor=$(cat "$cursor")"
+flush_file() { local file=$1 partial=$2; if send_summary "$file" "$partial"; then rm -f -- "$file"; return 0; fi; log "delivery failed; summary retained for retry"; return 1; }
+flush_due() { local now file bucket failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; if (( bucket + window <= now )); then flush_file "$file" false || failed=1; fi; done; return "$failed"; }
+flush_all() { local now file bucket partial failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; partial=false; (( bucket + window > now )) && partial=true; flush_file "$file" "$partial" || failed=1; done; return "$failed"; }
+record_event() {
+local event=$1 cursor=$2 ts epoch bucket start end rule key host severity description source file
+rule=$(jq -er '.rule | strings | select(length > 0)' <<<"$event") || return 1
+ts=$(jq -r '.ts // empty' <<<"$event"); epoch=$(date -u -d "$ts" +%s 2>/dev/null) || epoch=$(date -u +%s)
+bucket=$(( epoch / window * window )); start=$(date -u -d "@$bucket" '+%Y-%m-%dT%H:%M:%SZ') || return 1; end=$(date -u -d "@$((bucket + window))" '+%Y-%m-%dT%H:%M:%SZ') || return 1
+host=$(jq -r '(.host // "unknown") | tostring | gsub("[\\r\\n]"; " ") | .[0:128]' <<<"$event")
+severity=$(jq -r '(.severity // "notice") | tostring | .[0:32]' <<<"$event")
+description=$(jq -r '(.description // "") | tostring | gsub("[\\r\\n]"; " ") | .[0:160]' <<<"$event")
+source=$(jq -r '(.fields.src // .fields.source // .threshold.group // "") | tostring | gsub("[\\r\\n]"; " ") | .[0:128]' <<<"$event")
+key=$(printf '%s' "$rule" | sha256sum | cut -c1-16); file=$state/agg-"$bucket"-"$key".json
+if [[ ! -f $file ]]; then
+if (( $(pending_count) >= max_pending )); then flush_due || true; (( $(pending_count) < max_pending )) || { log "pending summary limit reached; stopping before cursor advance"; return 2; }; fi
+jq -cn --argjson bucket "$bucket" --arg start "$start" --arg end "$end" --arg host "$host" --arg rule "$rule" --arg severity "$severity" --arg description "$description" --arg source "$source" --arg cursor "$cursor" '{bucket:$bucket,window_start:$start,window_end:$end,host:$host,rule:$rule,severity:$severity,description:$description,source:$source,source_seen:true,count:1,last_cursor:$cursor}' > "$file.tmp.$$" || return 1
+mv -f "$file.tmp.$$" "$file" || return 1
 else
-  from=--lines=0 # first start: only events from now on
+if jq -e --arg cursor "$cursor" '.last_cursor == $cursor' "$file" >/dev/null; then save_cursor "$cursor" || return 1; return 0; fi
+jq --arg cursor "$cursor" --arg host "$host" --arg source "$source" '.count += 1 | .last_cursor=$cursor | .host=(if .host == $host then .host else "multiple" end) | .source=(if .source_seen then (if .source == $source then .source else "multiple" end) else $source end) | .source_seen=true' "$file" > "$file.tmp.$$" || return 1
+mv -f "$file.tmp.$$" "$file" || return 1
 fi
-
-journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" |
-  while IFS= read -r entry; do
-    c=$(printf '%s' "$entry" | jq -er .__CURSOR) || continue # -e: no cursor, no save
-    ev=$(printf '%s' "$entry" | jq -r '.MESSAGE | strings')
-    case $ev in
-      '{'*) send "$ev" || echo "logwizz-notify: delivery failed, event skipped: $(printf '%s' "$ev" | jq -r .rule)" >&2 ;;
-      *) ;; # logwizz's own diagnostics, not events
-    esac
-    # Advance after each event, delivered or not: one broken endpoint must not
-    # stall the queue. A crash resends at most the event in flight.
-    printf '%s\n' "$c" > "$cursor.tmp" && mv "$cursor.tmp" "$cursor"
-  done
-echo "logwizz-notify: journalctl exited" >&2
+save_cursor "$cursor"
+}
+process_entry() { local entry=$1 cursor event; cursor=$(jq -er '.__CURSOR | strings | select(length > 0)' <<<"$entry") || return 0; event=$(jq -r '.MESSAGE | strings' <<<"$entry"); if [[ $event == "{"* ]] && jq -e '.v == 1 and (.rule | type == "string") and (.ts | type == "string")' >/dev/null 2>&1 <<<"$event"; then record_event "$event" "$cursor"; else save_cursor "$cursor"; fi; }
+if [[ -s $cursor_file ]]; then from="--after-cursor=$(cat "$cursor_file")"; else from=--lines=0; fi
+journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" | {
+trap 'if flush_all; then exit 0; else exit 1; fi' TERM INT
+while true; do entry=; IFS= read -r -t 1 entry; rc=$?; if (( rc == 0 )); then process_entry "$entry" || { log "could not persist event; stopping before cursor advance"; break; }; elif (( rc > 128 )); then flush_due || true; continue; else break; fi; flush_due || true; done
+flush_all || true
+log "journalctl exited; systemd will restart the notifier"
 exit 1
+}
