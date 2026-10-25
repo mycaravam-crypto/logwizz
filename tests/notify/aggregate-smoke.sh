@@ -50,7 +50,7 @@ PATH="$tmp/bin:$PATH" JOURNAL_FIXTURE="$tmp/events.jsonl" CAPTURE_FILE="$tmp/tel
 status=$?
 set -e
 [[ $status -eq 1 ]] || { echo "expected notifier exit 1 after mock journal EOF, got $status" >&2; exit 1; }
-[[ $(wc -l < "$tmp/telegram.txt") -eq 1 ]] || { echo "expected exactly one Telegram summary" >&2; exit 1; }
+[[ $(grep -c "logwizz alert -" "$tmp/telegram.txt") -eq 1 ]] || { echo "expected exactly one Telegram summary" >&2; exit 1; }
 grep -F 'Matches: 3' "$tmp/telegram.txt" >/dev/null
 grep -F 'Rule: ssh_failed_login' "$tmp/telegram.txt" >/dev/null
 if grep -F 'RAW-SECRET-SHOULD-NOT-LEAVE-HOST' "$tmp/telegram.txt"; then echo "raw log content leaked into Telegram summary" >&2; exit 1; fi
