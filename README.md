@@ -673,15 +673,60 @@ The unit provides `/var/lib/logwizz` (`StateDirectory=`) for
 `state_file = "/var/lib/logwizz/offsets.json"`.
 
 Read access to logs comes from `SupplementaryGroups=adm`, which is right for
-Debian and Ubuntu. On other distributions, grant read access with a group or
-an ACL. For example, `/var/log/secure` on RHEL-family systems is root-only:
+Debian and Ubuntu. RHEL, Fedora, Rocky and Alma use different permissions;
+for a file-based configuration, use the packaged drop-in and ACLs below.
+
+### RHEL / Fedora / Rocky / Alma
+
+The base unit uses `SupplementaryGroups=adm`. Install the RHEL-family drop-in
+to clear that group and use a dedicated `logwizz` group instead. The daemon
+remains a `DynamicUser`; do not change it to root or add broad capabilities.
 
 ```bash
-groupadd -r logwizz
-setfacl -m g:logwizz:r /var/log/secure
-chgrp logwizz /etc/logwizz/logwizz.toml
-# Then set SupplementaryGroups=logwizz in a drop-in (systemctl edit logwizz).
+sudo dnf install acl
+sudo groupadd --system logwizz
+sudo install -D -m 0644 packaging/rhel/logwizz.conf \
+  /etc/systemd/system/logwizz.service.d/rhel.conf
+sudo install -D -m 0640 -o root -g logwizz config/logwizz.example.toml \
+  /etc/logwizz/logwizz.toml
+for f in /var/log/secure /var/log/messages; do
+  if [ -e "$f" ]; then sudo setfacl -m g:logwizz:r "$f"; fi
+done
+sudo systemctl daemon-reload
+sudo systemctl restart logwizz
 ```
+
+Apply ACLs only to the log files that exist and are configured in
+`logwizz.toml`. If using the `[journal]` source instead, add
+`systemd-journal` to `SupplementaryGroups=` in the drop-in and set
+`ProcSubset=all`, as described in the [journal section](#journal).
+
+**Keep access after log rotation.** The new file created by logrotate does
+not automatically inherit an ACL applied to the old file. Choose one approach:
+
+- **Postrotate hook (most explicit):** add
+  `setfacl -m g:logwizz:r /var/log/secure /var/log/messages` to the existing
+  relevant logrotate stanza's `postrotate` block. Keep the existing service
+  reload/restart commands in that block; do not create a second stanza that
+  rotates the same files.
+- **Create mode plus default ACL:** set a default ACL on `/var/log` with
+  `sudo setfacl -d -m g:logwizz:r /var/log`, and ensure the applicable
+  logrotate stanza creates readable group permissions, for example
+  `create 0640 root root`. An explicit `create 0600` masks group ACL access,
+  so a default ACL alone is not enough.
+
+Verify access after applying the drop-in and again after a forced rotation:
+
+```bash
+sudo systemctl restart logwizz
+sudo systemd-analyze security logwizz.service
+sudo logrotate -f /etc/logrotate.d/syslog
+sudo getfacl /var/log/secure /var/log/messages
+```
+
+The exact logrotate file and the names of existing logs vary by distribution.
+Use the stanza that actually rotates your configured files; the command above
+is an example, not a promise that every distro names its config `syslog`.
 
 The unit passes `systemd-analyze verify`, and `systemd-analyze security`
 rates it **0.4 SAFE**. The remaining findings are deliberate:
