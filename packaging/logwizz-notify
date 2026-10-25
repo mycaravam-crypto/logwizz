@@ -84,6 +84,7 @@ save_cursor "$cursor"
 }
 process_entry() { local entry=$1 cursor event; cursor=$(jq -er '.__CURSOR | strings | select(length > 0)' <<<"$entry") || return 0; event=$(jq -r '.MESSAGE | strings' <<<"$entry"); if [[ $event == "{"* ]] && jq -e '.v == 1 and (.rule | type == "string") and (.ts | type == "string")' >/dev/null 2>&1 <<<"$event"; then record_event "$event" "$cursor"; else save_cursor "$cursor"; fi; }
 if [[ -s $cursor_file ]]; then from="--after-cursor=$(cat "$cursor_file")"; else from=--lines=0; fi
+# shellcheck disable=SC2329 # invoked by the trap below
 shutdown() { if flush_all; then exit 0; else exit 1; fi; }
 trap shutdown TERM INT
 journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" | {
