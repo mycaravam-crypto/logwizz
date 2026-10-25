@@ -79,6 +79,7 @@ Notification setup, window semantics, retry behavior and Telegram configuration 
 - [Documentation index](docs/README.md)
 - [Configuration, event schema, behavior, operations, security and deployment reference](docs/REFERENCE.md)
 - [Detection guide: port scans, SSH attacks and log floods](docs/DETECTION.md)
+- [Optional Fail2ban integration](docs/FAIL2BAN.md)
 - [Benchmarks](docs/BENCHMARKS.md)
 - [Host verification and systemd sandboxing](docs/HOST-VERIFICATION.md)
 - [Example configuration](config/logwizz.example.toml)
