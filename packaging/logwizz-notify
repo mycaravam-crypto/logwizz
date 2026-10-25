@@ -13,9 +13,14 @@ min=${NOTIFY_MIN_PRIORITY:-warning}
 [ "$min" = critical ] && min=crit # journalctl spells it crit
 state=${STATE_DIRECTORY:-/var/lib/logwizz-notify}
 cursor=$state/cursor
+log_success=${NOTIFY_LOG_SUCCESS:-no}
 case $kind in
   webhook | ntfy) ;;
   *) echo "logwizz-notify: NOTIFY_KIND must be webhook or ntfy, not '$kind'" >&2; exit 2 ;;
+esac
+case $log_success in
+  yes | no) ;;
+  *) echo "logwizz-notify: NOTIFY_LOG_SUCCESS must be yes or no, not '$log_success'" >&2; exit 2 ;;
 esac
 for cmd in journalctl curl jq; do
   command -v "$cmd" >/dev/null || { echo "logwizz-notify: $cmd not found" >&2; exit 2; }
@@ -61,12 +66,25 @@ journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" |
     c=$(printf '%s' "$entry" | jq -er .__CURSOR) || continue # -e: no cursor, no save
     ev=$(printf '%s' "$entry" | jq -r '.MESSAGE | strings')
     case $ev in
-      '{'*) send "$ev" || echo "logwizz-notify: delivery failed, event skipped: $(printf '%s' "$ev" | jq -r .rule)" >&2 ;;
+      '{'*)
+        rule=$(printf '%s' "$ev" | jq -r '.rule // "unknown" | tostring')
+        if send "$ev"; then
+          if [ "$log_success" = yes ]; then
+            echo "logwizz-notify: delivered event for rule '$rule'" >&2
+          fi
+        else
+          echo "logwizz-notify: delivery failed for rule '$rule'; cursor unchanged, stopping for retry" >&2
+          exit 1
+        fi
+        ;;
       *) ;; # logwizz's own diagnostics, not events
     esac
-    # Advance after each event, delivered or not: one broken endpoint must not
-    # stall the queue. A crash resends at most the event in flight.
-    printf '%s\n' "$c" > "$cursor.tmp" && mv "$cursor.tmp" "$cursor"
+    # Persist only after delivery (or after deliberately ignoring a non-event).
+    # If persistence fails, exit so the event is replayed after restart.
+    if ! { printf '%s\n' "$c" > "$cursor.tmp" && mv "$cursor.tmp" "$cursor"; }; then
+      echo "logwizz-notify: failed to persist journal cursor; stopping (event may be redelivered)" >&2
+      exit 1
+    fi
   done
 echo "logwizz-notify: journalctl exited" >&2
 exit 1
