@@ -239,6 +239,17 @@ pub struct Rule {
     pub matcher: Matcher,
 }
 
+impl Rule {
+    /// Same id and definition; the compiled matcher follows from these.
+    pub fn same_definition(&self, other: &Rule) -> bool {
+        self.id == other.id
+            && self.description == other.description
+            && self.match_type == other.match_type
+            && self.pattern == other.pattern
+            && self.severity == other.severity
+    }
+}
+
 /// A fully validated configuration. Only enabled files and rules are kept.
 #[derive(Debug, Clone)]
 pub struct Config {

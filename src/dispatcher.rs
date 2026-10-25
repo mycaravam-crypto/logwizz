@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, Limits, OnFull, OutputFormat, Rule};
+use crate::config::{Config, Limits, OnFull, Output, OutputFormat, Rule};
 use crate::event::{Event, SCHEMA_VERSION, format_rfc3339};
 use crate::metrics::{self, Metrics};
 use crate::watcher::Waker;
@@ -212,9 +212,27 @@ pub fn event_cost(ev: &Event) -> usize {
     std::mem::size_of::<Event>() + ev.line.len()
 }
 
+/// What the output queue carries.
+enum Msg {
+    Event(Event),
+    /// Tables for the events queued after this message (configuration
+    /// reload). Sent through the queue so that every event is formatted
+    /// with the file and rule lists its indices refer to.
+    Tables(Arc<Tables>),
+}
+
+/// The event inside a message handed back by a failed send; only events
+/// are sent with `try_enqueue`.
+fn into_event(msg: Msg) -> Event {
+    match msg {
+        Msg::Event(ev) => ev,
+        Msg::Tables(_) => unreachable!("table updates are not sent with try_enqueue"),
+    }
+}
+
 /// Producer side of the output queue.
 pub struct Dispatcher {
-    tx: Option<SyncSender<Event>>,
+    tx: Option<SyncSender<Msg>>,
     /// Sum of [`event_cost`] over events queued or being written. Only the
     /// monitor thread adds to it and only the output thread subtracts.
     queued_bytes: Arc<AtomicUsize>,
@@ -250,7 +268,7 @@ impl Dispatcher {
         let handle = thread::Builder::new()
             .name("output".into())
             .spawn(move || {
-                let result = write_loop(rx, &in_flight, format, &tables, writer, &flushed);
+                let result = write_loop(rx, &in_flight, format, tables, writer, &flushed);
                 if let Err(e) = &result {
                     metrics::inc(&m.output_errors);
                     error!(error = %e, "writing events failed; shutting down");
@@ -280,6 +298,34 @@ impl Dispatcher {
     fn queued(&self) {
         metrics::inc(&self.metrics.events_emitted);
         self.progress.sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Applies a reloaded configuration's queue byte limit and full-queue
+    /// policy. The event capacity, format and destination need a restart.
+    pub fn set_policy(&mut self, output: &Output) {
+        self.max_queue_bytes = output.max_queue_bytes;
+        self.on_full = output.on_full;
+    }
+
+    /// Makes events queued from now on refer to `tables`. Waits for queue
+    /// space whatever the `on_full` policy, since the update must not be
+    /// lost; gives up only on shutdown or when the output thread has
+    /// exited.
+    pub fn set_tables(&mut self, tables: Arc<Tables>) {
+        let Some(tx) = &self.tx else {
+            return;
+        };
+        let mut msg = Msg::Tables(tables);
+        loop {
+            match tx.try_send(msg) {
+                Ok(()) | Err(TrySendError::Disconnected(_)) => return,
+                Err(TrySendError::Full(m)) => msg = m,
+            }
+            if self.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(BLOCK_RETRY);
+        }
     }
 
     /// Queues an event according to the `on_full` policy.
@@ -332,15 +378,19 @@ impl Dispatcher {
     }
 
     /// Queues `ev` if both the event count and the byte budget allow it.
-    fn try_enqueue(&self, tx: &SyncSender<Event>, ev: Event) -> Result<(), TrySendError<Event>> {
+    fn try_enqueue(&self, tx: &SyncSender<Msg>, ev: Event) -> Result<(), TrySendError<Event>> {
         let cost = event_cost(&ev);
         let before = self.queued_bytes.fetch_add(cost, Ordering::Relaxed);
         if before > 0 && before + cost > self.max_queue_bytes {
             self.queued_bytes.fetch_sub(cost, Ordering::Relaxed);
             return Err(TrySendError::Full(ev));
         }
-        tx.try_send(ev).inspect_err(|_| {
+        tx.try_send(Msg::Event(ev)).map_err(|e| {
             self.queued_bytes.fetch_sub(cost, Ordering::Relaxed);
+            match e {
+                TrySendError::Full(m) => TrySendError::Full(into_event(m)),
+                TrySendError::Disconnected(m) => TrySendError::Disconnected(into_event(m)),
+            }
         })
     }
 
@@ -374,10 +424,10 @@ impl Dispatcher {
 }
 
 fn write_loop(
-    rx: Receiver<Event>,
+    rx: Receiver<Msg>,
     queued_bytes: &AtomicUsize,
     format: OutputFormat,
-    tables: &Tables,
+    mut tables: Arc<Tables>,
     writer: Box<dyn Write + Send>,
     progress: &Progress,
 ) -> io::Result<()> {
@@ -392,19 +442,24 @@ fn write_loop(
     };
     // Block for the next event; flush whenever the queue runs empty so that
     // output is batched under load but prompt when idle.
-    while let Ok(mut ev) = rx.recv() {
+    while let Ok(mut msg) = rx.recv() {
         let mut last_flush = Instant::now();
         loop {
-            line.clear();
-            format_event(format, tables, &ev, &mut ts, &mut line)?;
-            w.write_all(&line)?;
-            queued_bytes.fetch_sub(event_cost(&ev), Ordering::Relaxed);
-            written += 1;
-            if last_flush.elapsed() >= MAX_FLUSH_DELAY {
-                last_flush = flush(&mut w, written)?;
+            match msg {
+                Msg::Tables(t) => tables = t,
+                Msg::Event(ev) => {
+                    line.clear();
+                    format_event(format, &tables, &ev, &mut ts, &mut line)?;
+                    w.write_all(&line)?;
+                    queued_bytes.fetch_sub(event_cost(&ev), Ordering::Relaxed);
+                    written += 1;
+                    if last_flush.elapsed() >= MAX_FLUSH_DELAY {
+                        last_flush = flush(&mut w, written)?;
+                    }
+                }
             }
             match rx.try_recv() {
-                Ok(next) => ev = next,
+                Ok(next) => msg = next,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return flush(&mut w, written).map(drop),
             }
@@ -475,6 +530,44 @@ impl Limiter {
             seen: HashSet::new(),
             expiry: VecDeque::new(),
         }
+    }
+
+    /// Applies reloaded limits and rule list. `kept[new] = Some(old)` for
+    /// each rule that is unchanged (same id and definition) at a possibly
+    /// different index; its rate-limit window and dedup entries carry
+    /// over. All state of changed and removed rules is dropped.
+    pub fn reconfigure(&mut self, limits: &Limits, kept: &[Option<usize>]) {
+        self.rate_limit = limits.rate_limit_events;
+        self.rate_window = Duration::from_secs(limits.rate_limit_window_secs);
+        self.dedup_window =
+            (limits.dedup_window_secs > 0).then(|| Duration::from_secs(limits.dedup_window_secs));
+        self.dedup_max = limits.dedup_max_entries;
+        self.windows = kept
+            .iter()
+            .map(|old| old.and_then(|i| self.windows.get(i).copied().flatten()))
+            .collect();
+        // Old rule index -> new index, for the dedup keys.
+        let mut renumber = vec![None; kept.iter().flatten().max().map_or(0, |&i| i + 1)];
+        for (new, old) in kept.iter().enumerate() {
+            if let Some(old) = *old {
+                renumber[old] = Some(new);
+            }
+        }
+        let expiry = std::mem::take(&mut self.expiry);
+        self.seen.clear();
+        if self.dedup_window.is_none() {
+            return;
+        }
+        for ((rule, hash), t) in expiry {
+            if let Some(Some(new)) = renumber.get(rule) {
+                self.expiry.push_back(((*new, hash), t));
+            }
+        }
+        // A smaller table keeps the newest entries.
+        while self.expiry.len() > self.dedup_max {
+            self.expiry.pop_front();
+        }
+        self.seen.extend(self.expiry.iter().map(|&(key, _)| key));
     }
 
     /// Decides whether an event for `rule` on `line` should be emitted.
@@ -692,6 +785,43 @@ mod tests {
             l.admit(0, "a", b"x", t0 + Duration::from_secs(5)),
             Admit::Yes
         );
+    }
+
+    #[test]
+    fn reconfigure_keeps_state_of_unchanged_rules_only() {
+        let mut l = Limiter::new(&limits(1, 60, 100), 3);
+        let t0 = Instant::now();
+        for (rule, id) in [(0, "a"), (1, "b"), (2, "c")] {
+            assert_eq!(l.admit(rule, id, b"x", t0), Admit::Yes);
+            assert_eq!(l.admit(rule, id, b"y", t0), Admit::RateLimited);
+        }
+        // New order: c (unchanged, was 2), a new rule, a (unchanged, was 0).
+        // b was removed or changed.
+        l.reconfigure(&limits(1, 60, 100), &[Some(2), None, Some(0)]);
+        assert_eq!(l.admit(0, "c", b"x", t0), Admit::Duplicate);
+        assert_eq!(l.admit(0, "c", b"z", t0), Admit::RateLimited);
+        assert_eq!(l.admit(1, "new", b"x", t0), Admit::Yes, "fresh state");
+        assert_eq!(l.admit(2, "a", b"x", t0), Admit::Duplicate);
+        assert_eq!(l.admit(2, "a", b"z", t0), Admit::RateLimited);
+    }
+
+    #[test]
+    fn reconfigure_applies_new_limits() {
+        let mut l = Limiter::new(&limits(1, 60, 100), 1);
+        let t0 = Instant::now();
+        assert_eq!(l.admit(0, "a", b"x", t0), Admit::Yes);
+        // Dedup off and a higher rate limit.
+        l.reconfigure(&limits(5, 0, 100), &[Some(0)]);
+        assert_eq!(l.admit(0, "a", b"x", t0), Admit::Yes);
+        assert_eq!(l.admit(0, "a", b"x", t0), Admit::Yes);
+        // A smaller dedup table keeps the newest entries.
+        let mut l = Limiter::new(&limits(0, 60, 100), 1);
+        for line in [b"1", b"2", b"3"] {
+            assert_eq!(l.admit(0, "a", line, t0), Admit::Yes);
+        }
+        l.reconfigure(&limits(0, 60, 2), &[Some(0)]);
+        assert_eq!(l.admit(0, "a", b"1", t0), Admit::Yes, "oldest dropped");
+        assert_eq!(l.admit(0, "a", b"3", t0), Admit::Duplicate);
     }
 
     #[test]

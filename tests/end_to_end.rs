@@ -305,15 +305,138 @@ fn sigusr1_logs_statistics_and_limits_are_counted() {
     assert!(d.stop().success());
 }
 
+const NEW_RULE: &str = r#"
+[[rules]]
+id = "new_rule"
+description = "Added on reload"
+match_type = "literal"
+pattern = "NEWMARK"
+severity = "notice"
+"#;
+
+impl Daemon {
+    /// Replaces the configuration file and sends SIGHUP; waits for the
+    /// diagnostic containing `outcome`.
+    fn reload(&self, dir: &Path, config: &str, outcome: &str) {
+        fs::write(dir.join("logwizz.toml"), config).unwrap();
+        self.signal(libc::SIGHUP);
+        self.wait_stderr(outcome);
+    }
+
+    fn stats(&self) -> String {
+        self.signal(libc::SIGUSR1);
+        self.wait_stderr("statistics")
+    }
+
+    fn no_event(&self) {
+        if let Ok(line) = self.stdout.recv_timeout(Duration::from_millis(500)) {
+            panic!("unexpected event {line}");
+        }
+    }
+}
+
 #[test]
-fn sighup_does_not_terminate() {
+fn reload_adds_rules_and_keeps_offsets() {
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.log");
     write_new(&auth, "");
     let mut d = Daemon::start(dir.path(), &config("", &[&auth], ""));
-    d.signal(libc::SIGHUP);
-    d.wait_stderr("reload is not supported");
-    assert!(d.child.try_wait().unwrap().is_none());
+    thread::sleep(Duration::from_millis(300));
+    append(&auth, "Failed password before\nNEWMARK before\n");
+    assert_eq!(d.event()["rule"], "ssh_failed_login");
+    d.no_event();
+
+    // The new rule comes first, so every existing rule changes its index.
+    d.reload(
+        dir.path(),
+        &config("", &[&auth], NEW_RULE),
+        "configuration reloaded",
+    );
+    append(&auth, "NEWMARK after\nFailed password after\n");
+    let ev = d.event();
+    assert_eq!(ev["rule"], "new_rule");
+    assert_eq!(ev["line"], "NEWMARK after");
+    let ev = d.event();
+    assert_eq!(ev["rule"], "ssh_failed_login");
+    assert_eq!(ev["line"], "Failed password after");
+    d.no_event();
+    assert!(d.stats().contains("config_reloads=1"));
+    assert!(d.stop().success());
+}
+
+#[test]
+fn invalid_reload_keeps_running_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    write_new(&auth, "");
+    let mut d = Daemon::start(dir.path(), &config("", &[&auth], ""));
+    let bad = config("", &[&auth], NEW_RULE).replace("pattern = \"NEWMARK\"", "pattern = 7");
+    d.reload(dir.path(), &bad, "configuration reload failed");
+    thread::sleep(Duration::from_millis(300));
+    append(&auth, "NEWMARK\nFailed password\n");
+    assert_eq!(d.event()["rule"], "ssh_failed_login");
+    d.no_event();
+    let stats = d.stats();
+    assert!(stats.contains("config_reloads=0"), "{stats}");
+    assert!(stats.contains("config_reload_failures=1"), "{stats}");
+    assert!(d.stop().success());
+}
+
+#[test]
+fn reload_removes_and_adds_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.log");
+    let b = dir.path().join("b.log");
+    let c = dir.path().join("c.log");
+    write_new(&a, "");
+    write_new(&b, "");
+    write_new(&c, "Failed password already in c\n");
+    let mut d = Daemon::start(dir.path(), &config("", &[&a, &b], ""));
+    thread::sleep(Duration::from_millis(300));
+    append(&a, "Failed password incomplete in a");
+    thread::sleep(Duration::from_millis(300));
+
+    // a is removed, c added before b, so b moves to another index.
+    d.reload(
+        dir.path(),
+        &config("", &[&c, &b], ""),
+        "configuration reloaded",
+    );
+    // a's incomplete last line is still emitted, under its own name.
+    let ev = d.event();
+    assert_eq!(ev["file"], a.display().to_string());
+    assert_eq!(ev["line"], "Failed password incomplete in a");
+    // c is new to this process: read from the beginning.
+    let ev = d.event();
+    assert_eq!(ev["file"], c.display().to_string());
+    assert_eq!(ev["line"], "Failed password already in c");
+
+    append(&a, "\nFailed password a is no longer read\n");
+    d.no_event();
+    append(&b, "Failed password in b\n");
+    let ev = d.event();
+    assert_eq!(ev["file"], b.display().to_string());
+    assert_eq!(ev["line"], "Failed password in b");
+    assert!(d.stop().success());
+}
+
+#[test]
+fn reload_keeps_settings_that_need_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    write_new(&auth, "");
+    let mut d = Daemon::start(dir.path(), &config("", &[&auth], ""));
+    let changed = config("", &[&auth], "[output]\nformat = \"human\"\n");
+    let warning = {
+        fs::write(dir.path().join("logwizz.toml"), &changed).unwrap();
+        d.signal(libc::SIGHUP);
+        d.wait_stderr("only after a restart")
+    };
+    assert!(warning.contains("output.format"), "{warning}");
+    d.wait_stderr("configuration reloaded");
+    thread::sleep(Duration::from_millis(300));
+    append(&auth, "Failed password\n");
+    assert_eq!(d.event()["rule"], "ssh_failed_login", "still JSON");
     assert!(d.stop().success());
 }
 
