@@ -461,6 +461,33 @@ fn diagnostics_do_not_contain_log_content() {
 }
 
 #[test]
+fn glob_events_name_the_matched_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("app");
+    fs::create_dir(&logs).unwrap();
+    let a = logs.join("a.log");
+    write_new(&a, "Failed password at startup\n");
+    let glob = format!(
+        "[[files]]\nglob = {:?}\n",
+        logs.join("*.log").display().to_string()
+    );
+    let mut d = Daemon::start(
+        dir.path(),
+        &config("startup_mode = \"beginning\"", &[], &glob),
+    );
+    let ev = d.event();
+    assert_eq!(ev["file"], a.display().to_string());
+    assert_eq!(ev["line"], "Failed password at startup");
+
+    let b = logs.join("b.log");
+    write_new(&b, "Failed password in a new file\n");
+    let ev = d.event();
+    assert_eq!(ev["file"], b.display().to_string());
+    assert_eq!(ev["line"], "Failed password in a new file");
+    assert!(d.stop().success());
+}
+
+#[test]
 fn ignore_rules_and_catch_all_report_unknown_lines() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("app.log");
@@ -543,5 +570,49 @@ cooldown_secs = 300
     ] {
         assert!(stats.contains(expected), "{expected} missing: {stats}");
     }
+    assert!(d.stop().success());
+}
+
+#[test]
+fn reload_keeps_glob_offsets_and_switches_globs() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("app");
+    fs::create_dir(&logs).unwrap();
+    let (a, b) = (logs.join("a.log"), logs.join("b.txt"));
+    write_new(&a, "");
+    write_new(&b, "Failed password already in b\n");
+    let glob = |pattern: &str| {
+        format!(
+            "[[files]]\nglob = {:?}\n",
+            logs.join(pattern).display().to_string()
+        )
+    };
+    let mut d = Daemon::start(dir.path(), &config("", &[], &glob("*.log")));
+    thread::sleep(Duration::from_millis(300));
+    append(&a, "Failed password before\n");
+    assert_eq!(d.event()["line"], "Failed password before");
+
+    // a.log stays matched and keeps its offset; b.txt is new to this
+    // process and is read from the beginning.
+    d.reload(
+        dir.path(),
+        &config("", &[], &format!("{}{}", glob("*.log"), glob("*.txt"))),
+        "configuration reloaded",
+    );
+    let ev = d.event();
+    assert_eq!(ev["file"], b.display().to_string());
+    assert_eq!(ev["line"], "Failed password already in b");
+    d.no_event();
+
+    // Dropping the *.log glob stops reading a.log.
+    d.reload(
+        dir.path(),
+        &config("", &[], &glob("*.txt")),
+        "configuration reloaded",
+    );
+    append(&a, "Failed password ignored\n");
+    append(&b, "Failed password after\n");
+    assert_eq!(d.event()["line"], "Failed password after");
+    d.no_event();
     assert!(d.stop().success());
 }

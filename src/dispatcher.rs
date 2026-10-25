@@ -28,7 +28,6 @@ use std::collections::hash_map::RandomState;
 use std::collections::{HashSet, VecDeque};
 use std::hash::BuildHasher;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
@@ -105,7 +104,6 @@ fn hostname() -> String {
 /// Static data the formatter needs to render an event.
 #[derive(Debug)]
 pub struct Tables {
-    pub files: Vec<PathBuf>,
     pub rules: Vec<Rule>,
     pub meta: Meta,
 }
@@ -171,7 +169,7 @@ pub fn format_event(
     ts.clear();
     format_rfc3339(ev.time, ts);
     let line = String::from_utf8_lossy(&ev.line);
-    let file = t.files[ev.file].to_string_lossy();
+    let file = ev.file.to_string_lossy();
     let fields = Fields(
         ev.fields
             .iter()
@@ -741,7 +739,6 @@ mod tests {
         )
         .unwrap();
         Tables {
-            files: cfg.files,
             rules: cfg.rules,
             meta: Meta {
                 host: "box".into(),
@@ -753,7 +750,7 @@ mod tests {
     fn event(line: &[u8], truncated: bool) -> Event {
         Event {
             time: UNIX_EPOCH + Duration::from_millis(1_700_000_000_123),
-            file: 0,
+            file: Path::new("/var/log/auth.log").into(),
             rule: 0,
             line: line.into(),
             truncated,
@@ -793,7 +790,6 @@ mod tests {
             ..event(line, false)
         };
         let t = Tables {
-            files: cfg.files,
             rules: cfg.rules,
             meta: Meta {
                 host: "box".into(),
@@ -844,14 +840,13 @@ mod tests {
         let line = b"SRC=192.0.2.7 DPT=22";
         let ev = Event {
             fields: cfg.rules[0].matcher.fields(line),
-            threshold: Some(crate::threshold::Fired {
+            threshold: Some(Box::new(crate::threshold::Fired {
                 group: Some(b"192.0.2.7"[..].into()),
                 count: 20,
-            }),
+            })),
             ..event(line, false)
         };
         let t = Tables {
-            files: cfg.files,
             rules: cfg.rules,
             meta: Meta {
                 host: "box".into(),

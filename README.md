@@ -79,7 +79,7 @@ match_type = "literal"
 pattern = "ERROR"
 severity = "error"
 EOF
-logwizz -c demo.toml --check-config   # configuration OK: 1 file(s) (0 disabled), 1 rule(s) (0 disabled)
+logwizz -c demo.toml --check-config   # configuration OK: 1 file(s), 0 glob(s) (0 disabled), 1 rule(s) (0 disabled)
 logwizz -c demo.toml                  # runs until Ctrl+C
 ```
 
@@ -137,6 +137,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | `stats_interval_secs` | `0` | 0 – 86400 | Log a statistics line at `info` level at this interval. `0` disables it. |
 | `state_file` | unset | absolute path | Persist read offsets here, so a restart resumes where it stopped (at-least-once delivery). Unset keeps offsets in memory only. See [Delivery guarantees](#delivery-guarantees). |
 | `state_flush_ms` | `1000` | 100 – 600000 | Minimum time between writes of `state_file`. |
+| `max_glob_files` | `256` | 1 – 4096 | Maximum number of files followed for one `[[files]] glob`. See [Globs](#globs). |
 
 ### `[output]`
 
@@ -168,10 +169,43 @@ the window ends.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `path` | required | Absolute path without `.`, `..` or `//` components. Up to 1024 entries, no duplicates. |
+| `path` | – | Absolute path without `.`, `..` or `//` components. No duplicates. |
+| `glob` | – | Like `path`, with `*` and `?` wildcards in the final component. See [Globs](#globs). |
+| `exclude` | unset | With `glob` only: names matching this pattern are not followed, e.g. `"*.log.*"`. |
 | `enabled` | `true` | Disabled entries are validated but not monitored. |
 
-Globs are not supported in 0.1.0. List each file explicitly.
+Each entry sets exactly one of `path` and `glob`. Up to 1024 entries.
+
+#### Globs
+
+```toml
+[[files]]
+glob = "/var/log/app/*.log"
+exclude = "*.old.log"
+```
+
+- `*` matches any run of characters, `?` exactly one byte. As in the shell,
+  neither matches a leading `.`. Other glob syntax (`[...]`, `{a,b}`, `\`)
+  is rejected.
+- Wildcards are allowed in the final path component only, so logwizz
+  watches one directory per glob, without recursion. `**` is rejected.
+- The directory is listed at startup, whenever a matching name is created,
+  removed or renamed, and on every reconciliation tick. Files that match at
+  startup follow `startup_mode`. Files that appear later are read from the
+  beginning.
+- A matching file that disappears is handled like any rotated or deleted
+  file, and logwizz stops following it once nothing is left to read. If it
+  appears again, it is a new file and is read from the beginning.
+- **Rotated files:** a pattern such as `app.log*` also matches `app.log.1`
+  after a rename, and reads it again from the beginning as a new file. Use a
+  pattern that excludes rotated names (`*.log` does) or set `exclude`.
+- At most `max_glob_files` files are followed per glob. Further matches are
+  not followed. They are counted in `glob_matches_refused` and reported at
+  most once a minute. Which files are followed is not specified. When a
+  followed file goes away, a refused one takes its place.
+- A file matched by several entries is followed once: a `path` entry takes
+  precedence, then the first matching glob.
+- Directories are skipped. `state_file` must not match a glob.
 
 ### `[[rules]]`
 
@@ -469,13 +503,14 @@ applied one, and logs `configuration reloaded`:
 - **Rules** are replaced. Rate-limit windows and dedup entries carry over
   for rules whose id and definition are unchanged, and start fresh for new
   or changed rules.
-- **Files** still configured keep reading where they were, including a
-  rotated file still being drained. Removed files are closed after any
-  incomplete last line is emitted. Added files are read from the beginning,
-  since all of their content is new to this process (as for a file that
-  appears while logwizz runs).
+- **Files** still followed, as a `path` or as a match of a `glob`, keep
+  reading where they were, including a rotated file still being drained.
+  Files no longer followed are closed after any incomplete last line is
+  emitted. Newly followed files are read from the beginning, since all of
+  their content is new to this process (as for a file that appears while
+  logwizz runs).
 - **Applied:** `[limits]`, `reconcile_interval_ms`, `rotation_drain_ms`,
-  `stats_interval_secs`, `max_excerpt_bytes`, `max_queue_bytes` and
+  `stats_interval_secs`, `max_glob_files`, `max_excerpt_bytes`, `max_queue_bytes` and
   `on_full`.
 - **Need a restart:** `startup_mode`, `max_line_bytes`, `diagnostics`,
   `state_file`, `state_flush_ms`, `format`, `destination`,
@@ -491,7 +526,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -518,6 +553,7 @@ retry.
 | `read_errors` | Episodes of unreadable files or paths that are not regular files. A new file that is briefly unreadable while its owner or mode is set is not counted. |
 | `notify_overflows` | inotify queue overflows (each one triggers a full rescan). |
 | `rotations`, `truncations` | Detected replacements and truncations. |
+| `glob_matches_refused` | Files matching a glob that were not followed because of `max_glob_files`. Each file is counted once while it stays refused. |
 | `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
 `rule_matches` = `threshold_absorbed` + `events_emitted` + `events_dropped` +
@@ -528,7 +564,8 @@ retry.
 Every buffer has a configured bound. The worst case is approximately:
 
 - per monitored file: up to 2 × `max_line_bytes` of incomplete-line data
-  (the current file plus one rotated file being drained)
+  (the current file plus one rotated file being drained). A glob counts as
+  up to `max_glob_files` files
 - the output queue: `max_queue_bytes`, plus one event
 - the output writer: 64 KiB, plus one formatted event. Escaping can make a
   formatted event up to about 6 × the line length (`\u0001` for each control
@@ -678,13 +715,13 @@ logwizz, except that it may open network connections.
   requires Linux 3.2 or newer, and other distributions and kernels are
   expected to work, but only the configuration above has been tested.
 - **inotify limits:** logwizz uses one inotify instance and one watch per
-  distinct parent directory, plus at most one per configured symlink whose
+  distinct parent directory (of a `path`, or the directory of a `glob`), plus at most one per configured symlink whose
   target is in another directory. Overflows of `fs.inotify.max_queued_events` are
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
-- **Not supported:** glob patterns, compressed or rotated-file catch-up,
-  multi-line records.
+- **Not supported:** compressed or rotated-file catch-up, multi-line
+  records.
 - **Truncation is detected by size:** a file is treated as truncated when it
   is smaller than the read offset. If it is truncated and rewritten past the
   old offset before logwizz checks it, the truncation goes unnoticed and

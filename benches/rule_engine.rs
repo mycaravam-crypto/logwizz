@@ -187,7 +187,7 @@ fn bench_threshold(c: &mut Criterion) {
             i = (i + 1) % lines.len();
             let l = lines[i].as_bytes();
             let fields = matcher.fields(black_box(l));
-            th.observe(0, "scan", &t, 0, &fields, now)
+            th.observe(0, "scan", &t, Path::new("kern.log"), &fields, now)
         })
     });
     let mut th = Thresholds::new(1, 4096, Arc::new(Metrics::default()));
@@ -197,7 +197,7 @@ fn bench_threshold(c: &mut Criterion) {
             src = src.wrapping_add(1);
             let l = line(src, 22);
             let fields = matcher.fields(black_box(l.as_bytes()));
-            th.observe(0, "scan", &t, 0, &fields, now)
+            th.observe(0, "scan", &t, Path::new("kern.log"), &fields, now)
         })
     });
     g.finish();

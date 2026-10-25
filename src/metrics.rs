@@ -80,6 +80,11 @@ counters! {
     state_saves,
     /// Failed writes of the offset state file (retried later).
     state_save_errors,
+    /// Files matching a glob that were not followed because the glob had
+    /// reached `general.max_glob_files`. Each file is counted once while it
+    /// stays refused (beyond `max_glob_files` refused files, on every
+    /// directory listing).
+    glob_matches_refused,
     /// Configuration reloads applied (SIGHUP).
     config_reloads,
     /// Configuration reloads rejected; the running configuration was kept.

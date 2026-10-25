@@ -17,7 +17,7 @@
 //! thread, so no code runs in async-signal context.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -65,7 +65,6 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
 
     let meta = Meta::current();
     let tables = Arc::new(Tables {
-        files: cfg.files.clone(),
         rules: cfg.rules.clone(),
         meta: meta.clone(),
     });
@@ -112,19 +111,18 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        files = cfg.files.len(),
+        files = monitor.files(),
+        globs = cfg.globs.len(),
         rules = cfg.rules.len(),
         "logwizz started"
     );
 
     let mut running = cfg;
-    let mut paths: Arc<[PathBuf]> = running.files.clone().into();
     loop {
         let mut record = |files| {
             if let Some(w) = &state_writer {
                 w.record(Checkpoint {
                     events: progress.sent(),
-                    paths: Arc::clone(&paths),
                     files,
                 });
             }
@@ -148,13 +146,11 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
             &mut pipeline,
             &stats_interval,
         );
-        paths = running.files.clone().into();
     }
 
     info!("shutting down; flushing queued events");
     let final_checkpoint = Checkpoint {
         events: progress.sent(),
-        paths,
         files: monitor.checkpoint(),
     };
     let result = pipeline.dispatcher.finish();
@@ -180,7 +176,7 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn line(&mut self, file: usize, line: Line<'_>) {
+    fn line(&mut self, file: &Arc<Path>, line: Line<'_>) {
         let Pipeline {
             engine,
             limiter,
@@ -200,7 +196,7 @@ impl Pipeline {
                 Some(t) => match thresholds.observe(rule, &r.id, t, file, &fields, now) {
                     Some(fired) => {
                         metrics::inc(&metrics.threshold_fired);
-                        Some(fired)
+                        Some(Box::new(fired))
                     }
                     None => {
                         metrics::inc(&metrics.threshold_absorbed);
@@ -222,7 +218,7 @@ impl Pipeline {
             let (bytes, cut) = excerpt(line.bytes, *max_excerpt);
             dispatcher.send(Event {
                 time: SystemTime::now(),
-                file,
+                file: Arc::clone(file),
                 rule,
                 line: bytes.into(),
                 truncated: line.truncated || cut,
@@ -255,8 +251,7 @@ fn apply_reload(
             return;
         }
     };
-    // Lines still pending in removed files are matched with the old rules
-    // and refer to the old file list, which the output still has.
+    // Lines still pending in removed files are matched with the old rules.
     monitor.reconfigure(&new, &mut |file, line| pipeline.line(file, line));
     let kept: Vec<Option<usize>> = new
         .rules
@@ -271,14 +266,14 @@ fn apply_reload(
     pipeline.max_excerpt = new.output.max_excerpt_bytes;
     pipeline.dispatcher.set_policy(&new.output);
     pipeline.dispatcher.set_tables(Arc::new(Tables {
-        files: new.files.clone(),
         rules: new.rules.clone(),
         meta: pipeline.meta.clone(),
     }));
     stats_interval.store(new.general.stats_interval_secs, Ordering::Relaxed);
     metrics::inc(&pipeline.metrics.config_reloads);
     info!(
-        files = new.files.len(),
+        files = monitor.files(),
+        globs = new.globs.len(),
         rules = new.rules.len(),
         rules_unchanged = kept.iter().flatten().count(),
         "configuration reloaded"
