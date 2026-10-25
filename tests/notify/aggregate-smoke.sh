@@ -101,4 +101,24 @@ set -e
 [[ $status -eq 1 ]] || { echo "expected invalid timestamp to stop notifier" >&2; exit 1; }
 [[ ! -e "$tmp/state-invalid/cursor" ]] || { echo "invalid event advanced the journal cursor" >&2; exit 1; }
 
+# A journal line that arrives in two parts across the 1-second read timeout
+# must be reassembled, not dropped or parsed in pieces.
+mkdir -p "$tmp/bin-split" "$tmp/state-split" "$tmp/runtime-split"
+cat > "$tmp/bin-split/journalctl" <<'MOCK'
+#!/bin/sh
+line=$(head -n 1 "$JOURNAL_FIXTURE")
+half=$(( ${#line} / 2 ))
+printf '%s' "$(printf '%s' "$line" | cut -c1-"$half")"
+sleep 2
+printf '%s\n' "$(printf '%s' "$line" | cut -c$((half + 1))-)"
+tail -n +2 "$JOURNAL_FIXTURE"
+MOCK
+chmod +x "$tmp/bin-split/journalctl"
+set +e
+PATH="$tmp/bin-split:$tmp/bin:$PATH" JOURNAL_FIXTURE="$tmp/events.jsonl" CAPTURE_FILE="$tmp/split.jsonl" CURL_ARGS_FILE="$tmp/split.args" STATE_DIRECTORY="$tmp/state-split" RUNTIME_DIRECTORY="$tmp/runtime-split" NOTIFY_KIND=webhook NOTIFY_URL=https://example.invalid/logwizz NOTIFY_WINDOW_SECS=60 bash "$root/packaging/logwizz-notify" 2> "$tmp/split.err"
+status=$?
+set -e
+[[ $status -eq 1 ]] || { echo "expected notifier exit 1 after split stream EOF, got $status" >&2; exit 1; }
+jq -se 'length == 1 and .[0].count == 3' "$tmp/split.jsonl" >/dev/null || { echo "split journal line was not reassembled: $(cat "$tmp/split.jsonl") $(cat "$tmp/split.err")" >&2; exit 1; }
+
 echo "aggregate notification smoke tests passed"
