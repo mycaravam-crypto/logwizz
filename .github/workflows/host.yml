@@ -41,12 +41,16 @@ jobs:
         env:
           WORK: ${{ runner.temp }}/hostcheck
         run: mkdir -p "$WORK" && bash tests/host/run-vm.sh
-      - name: Show the end of the serial log
+      - name: Show the check's output and the end of the guest console
         if: failure()
-        run: tail -n 200 "$RUNNER_TEMP/hostcheck/serial.log" || true
+        run: |
+          cat "$RUNNER_TEMP/hostcheck/hostcheck.log" || true
+          tail -n 100 "$RUNNER_TEMP/hostcheck/serial.log" || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: hostcheck-serial-log
-          path: ${{ runner.temp }}/hostcheck/serial.log
+          name: hostcheck-logs
+          path: |
+            ${{ runner.temp }}/hostcheck/hostcheck.log
+            ${{ runner.temp }}/hostcheck/serial.log
           if-no-files-found: ignore

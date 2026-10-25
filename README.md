@@ -529,7 +529,7 @@ GitHub Actions run on every pull request and on `main`:
   `rust-version` from `Cargo.toml`.
 - **host**: boots an Ubuntu 24.04 VM under KVM and runs the real-host check of the installed unit
   (`tests/host/run-vm.sh`). Runs on PRs that change `src/`, `packaging/`, `tests/host/` or the Cargo files, on
-  `main`, and weekly. The VM's serial log is uploaded as an artifact.
+  `main`, and weekly. The check's output and the VM's console log are uploaded as an artifact.
 - **security**: Trivy scans `Cargo.lock` for CVEs (weekly too). A fixable CRITICAL fails the job.
 - **codeql**: CodeQL `security-and-quality` analysis of the Rust code and the workflows (weekly too).
 - **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has
