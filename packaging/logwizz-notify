@@ -66,7 +66,8 @@ rule=$(jq -er '.rule | strings | select(length > 0) | gsub("[\\r\\n]"; " ") | .[
 ts=$(jq -r '.ts // empty' <<<"$event"); epoch=$(date -u -d "$ts" +%s 2>/dev/null) || { log "invalid timestamp for rule $rule; cursor not advanced"; return 1; }
 bucket=$(( epoch / window * window )); (( bucket > latest_bucket )) && latest_bucket=$bucket; start=$(date -u -d "@$bucket" '+%Y-%m-%dT%H:%M:%SZ') || return 1; end=$(date -u -d "@$((bucket + window))" '+%Y-%m-%dT%H:%M:%SZ') || return 1
 host=$(jq -r '(.host // "unknown") | tostring | gsub("[\\r\\n]"; " ") | .[0:128]' <<<"$event")
-severity=$(jq -r '(.severity // "notice") | tostring | .[0:32]' <<<"$event")
+severity=$(jq -r '(.severity // "notice") | tostring | gsub("[\\r\\n]"; " ") | .[0:32]' <<<"$event")
+  case $severity in debug|info|notice|warning|error|critical) ;; *) severity=notice ;; esac
 description=$(jq -r '(.description // "") | tostring | gsub("[\\r\\n]"; " ") | .[0:160]' <<<"$event")
 source=$(jq -r '(.fields.src // .fields.source // .threshold.group // "") | tostring | gsub("[\\r\\n]"; " ") | .[0:128]' <<<"$event")
 key=$(printf '%s' "$rule" | sha256sum | cut -c1-16); file=$state/agg-"$bucket"-"$key".json
