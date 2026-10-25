@@ -5,14 +5,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::threshold::Fired;
 
 /// Severity attached to a rule and to every event the rule produces.
 ///
 /// Ordered from least to most severe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Debug,
@@ -46,6 +46,23 @@ impl Severity {
             Severity::Error => 3,
             Severity::Critical => 2,
         }
+    }
+}
+
+impl std::str::FromStr for Severity {
+    type Err = ();
+
+    /// Severity names, plus the syslog spellings `crit` and `err`.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "debug" => Severity::Debug,
+            "info" => Severity::Info,
+            "notice" => Severity::Notice,
+            "warning" => Severity::Warning,
+            "error" | "err" => Severity::Error,
+            "critical" | "crit" => Severity::Critical,
+            _ => return Err(()),
+        })
     }
 }
 
@@ -119,6 +136,85 @@ pub fn format_rfc3339(t: SystemTime, out: &mut String) {
         rem % 60,
         d.subsec_micros()
     );
+}
+
+/// Formats whole seconds since the epoch as RFC 3339 UTC, e.g.
+/// `2026-10-24T08:15:30Z`.
+pub fn format_rfc3339_secs(secs: u64) -> String {
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    let rem = secs % 86_400;
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem / 60) % 60,
+        rem % 60
+    )
+}
+
+/// Parses an RFC 3339 timestamp (`2026-10-24T08:15:30.123456Z`, or with a
+/// `+hh:mm`/`-hh:mm` offset) to whole seconds since the epoch. `None` for
+/// anything else, including times before the epoch.
+pub fn parse_rfc3339(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let digits = b.get(r)?;
+        if !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(digits).ok()?.parse().ok()
+    };
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b'T' | b't' | b' ')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    let mut i = 19;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        let start = i;
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+    }
+    let offset = match b.get(i..)? {
+        [b'Z' | b'z'] => 0,
+        [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
+            let (oh, om) = (num(i + 1..i + 3)?, num(i + 4..i + 6)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            let o = oh * 3600 + om * 60;
+            if *sign == b'+' { o } else { -o }
+        }
+        _ => return None,
+    };
+    let days = days_from_civil(y, mo as u32, d as u32);
+    let t = days * 86_400 + h * 3600 + mi * 60 + sec - offset;
+    u64::try_from(t).ok()
+}
+
+/// Proleptic Gregorian (year, month, day) to days since 1970-01-01.
+/// Howard Hinnant's `days_from_civil` algorithm.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = i64::from((m + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Days since 1970-01-01 to a proleptic Gregorian (year, month, day).
@@ -200,6 +296,38 @@ mod tests {
                     y += 1;
                 }
             }
+        }
+    }
+
+    #[test]
+    fn rfc3339_parse_round_trips() {
+        for secs in [0, 951_782_400, 1_709_164_799, 1_798_761_599, 4_102_444_800] {
+            assert_eq!(parse_rfc3339(&fmt(secs, 0)), Some(secs));
+            assert_eq!(parse_rfc3339(&format_rfc3339_secs(secs)), Some(secs));
+        }
+        assert_eq!(format_rfc3339_secs(1_709_251_200), "2024-03-01T00:00:00Z");
+        assert_eq!(parse_rfc3339("2024-03-01T00:00:00.5Z"), Some(1_709_251_200));
+        assert_eq!(
+            parse_rfc3339("2024-03-01T01:30:00+01:30"),
+            Some(1_709_251_200)
+        );
+        assert_eq!(
+            parse_rfc3339("2024-02-29T23:00:00-01:00"),
+            Some(1_709_251_200)
+        );
+        for bad in [
+            "",
+            "not-a-timestamp",
+            "2024-03-01T00:00:00",
+            "2024-03-01T00:00:00.Z",
+            "2024-13-01T00:00:00Z",
+            "2024-03-01T24:00:00Z",
+            "2024-03-01T00:00:00+0100",
+            "1969-12-31T23:59:59Z",
+            "2024-03-01T00:00:00Zjunk",
+            "+024-03-01T00:00:00Z",
+        ] {
+            assert_eq!(parse_rfc3339(bad), None, "{bad}");
         }
     }
 

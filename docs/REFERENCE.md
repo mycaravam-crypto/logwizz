@@ -11,8 +11,8 @@ explicit memory and queue limits.
 It is deliberately small. It is not a SIEM or a log shipper, and the daemon
 itself has no network access: pipe its output into whatever does that job for
 you (journald, a collector, a script). For alerts, the separate
-[`logwizz-notify`](#notifications) unit forwards events from the journal to a
-webhook or [ntfy](https://ntfy.sh).
+[`logwizz-notify`](#notifications) service summarises events from the journal
+and sends them to Telegram, a webhook or [ntfy](https://ntfy.sh).
 
 To detect port scans (nmap, masscan), SSH brute force, scanner probes and log
 floods, see [docs/DETECTION.md](./DETECTION.md): the firewall logging that
@@ -43,9 +43,9 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 ## Install
 
 Each [GitHub release](https://github.com/mycaravam-crypto/logwizz/releases)
-has a static Linux x64 binary (musl, no runtime dependencies, any
-distribution), the systemd unit, the example configuration, the
-[notifier](#notifications) and `SHA256SUMS.txt`:
+has static Linux x64 binaries (musl, no runtime dependencies, any
+distribution) of logwizz and the [notifier](#notifications), the systemd
+units, the example configuration and `SHA256SUMS.txt`:
 
 ```bash
 v=X.Y.Z   # the release to install
@@ -270,6 +270,7 @@ matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIE
 | `pattern` | required | Non-empty, at most 4096 bytes. Regexes are limited to 2 MiB compiled size. Named capture groups (`(?P<src>\S+)`), at most 16 per rule, become the event's `fields`. |
 | `severity` | required for `emit` | `debug`, `info`, `notice`, `warning`, `error`, `critical`. Not allowed for `ignore` rules. |
 | `action` | `"emit"` | `emit`: a match produces an event. `ignore`: a match produces nothing, and no later rule sees the line (counted in `lines_ignored`). |
+| `exclude` | unset | Table of capture group → values whose matches are discarded. See [Excluding trusted sources](#excluding-trusted-sources). |
 
 Rules are compiled once at startup. Every enabled rule is evaluated against
 every line in configuration order, and each matching rule produces its own
@@ -365,6 +366,42 @@ cooldown_secs = 600
 ```
 
 Placed after `ignore` rules, the same catch-all counts only unknown lines.
+
+#### Excluding trusted sources
+
+A `[rules.exclude]` table discards a rule's matches by the value of a named
+capture group, for example your own vulnerability scanner or monitoring
+host:
+
+```toml
+[[rules]]
+id = "ssh_bruteforce"
+match_type = "regex"
+pattern = 'Failed password for .* from (?P<src>\S+)'
+severity = "warning"
+[rules.exclude]
+src = ["192.0.2.10", "10.0.0.0/8", "2001:db8::/32"]
+[rules.threshold]
+group_by = "src"
+count = 10
+window_secs = 60
+```
+
+- Each key names a capture group of the pattern; its list holds IP
+  addresses, CIDR networks, or any other exact text. A captured value that
+  is an IP address is compared with the addresses and networks
+  (IPv4-mapped IPv6 addresses such as `::ffff:10.0.0.1` count as IPv4);
+  other values must equal a text entry exactly.
+- A match is discarded if any listed group's value is excluded. A group
+  that did not take part in the match excludes nothing.
+- Excluded matches produce no event and are not counted towards a
+  threshold. They are counted in `matches_excluded`. Later rules still see
+  the line: `exclude` is not an `ignore`.
+- At most 1024 values per rule. Not allowed on `ignore` rules.
+
+Values are per rule; repeat the list in each rule that should skip the
+source. For firewall-based detectors, excluding the address in the firewall
+rules instead also keeps it out of the kernel log.
 
 Limits: the configuration file may be at most 1 MiB and must not be
 world-writable.
@@ -578,7 +615,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -594,7 +631,8 @@ retry.
 | `bytes_skipped` | Content bytes beyond `max_line_bytes` that were not matched. |
 | `partial_lines_flushed` | Unterminated lines emitted because their file was truncated, rotated or deleted. |
 | `lines_ignored` | Lines that matched an `ignore` rule. |
-| `rule_matches` | (line, rule) matches of emitting rules, before thresholds, rate limiting and deduplication. |
+| `rule_matches` | (line, rule) matches of emitting rules, before exclusions, thresholds, rate limiting and deduplication. |
+| `matches_excluded` | Matches discarded by a rule's `exclude` values. |
 | `threshold_absorbed` | Matches of threshold rules that did not reach their threshold, fell into its cooldown, or lacked the grouping capture. |
 | `threshold_fired` | Thresholds reached (each one is an event before rate limiting and deduplication). |
 | `threshold_evictions` | Threshold groups dropped because a rule's group table was full. |
@@ -610,7 +648,7 @@ retry.
 | `glob_matches_refused` | Files matching a glob that were not followed because of `max_glob_files`. Each file is counted once while it stays refused. |
 | `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
-`rule_matches` = `threshold_absorbed` + `events_emitted` + `events_dropped` +
+`rule_matches` = `matches_excluded` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
 `events_rate_limited` + `events_deduplicated`.
 
 ### Memory use
@@ -747,7 +785,7 @@ logwizz's own output.** The namespace has its own retention settings in
 
 ### Notifications
 
-The notifier aggregates detection events by rule and event-time window, then sends summaries through Telegram, ntfy or a webhook. It does not forward raw log lines. Setup, configuration, flush behavior and delivery guarantees are covered in the [notification operations guide](NOTIFICATIONS.md).
+The `logwizz-notify` binary aggregates detection events by rule and event-time window, then sends summaries through Telegram, ntfy or a webhook, naming the most frequent sources. It does not forward raw log lines. Setup, configuration, flush behavior and delivery guarantees are covered in the [notification operations guide](NOTIFICATIONS.md).
 
 ## Security
 
@@ -828,8 +866,10 @@ Layout:
 | `src/event.rs` | Event and severity types, timestamps, excerpts |
 | `src/dispatcher.rs` | Output thread, bounded queue, formats, rate limiting, dedup |
 | `src/daemon.rs` | Signals, statistics, wiring |
+| `src/notify.rs`, `src/notify/` | `logwizz-notify`: journal input, state file, aggregation, curl delivery |
+| `src/bin/logwizz-notify.rs` | The notifier's entry point |
 | `src/metrics.rs` | Atomic counters |
-| `tests/` | Config, reader, rotation, monitoring loop, end-to-end and load tests |
+| `tests/` | Config, reader, rotation, monitoring loop, end-to-end, notifier and load tests |
 | `benches/` | Criterion benchmarks |
 
 ## CI and releases

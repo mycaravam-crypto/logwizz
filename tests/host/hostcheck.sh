@@ -136,7 +136,7 @@ else
 fi
 # ntfy format with an auth header, and log content that tries shell injection.
 # Start from an empty queue and sink so only the NOTIFY3 summary is seen.
-systemctl stop logwizz-notify; rm -f /var/lib/private/logwizz-notify/agg-*.json; : > /root/sink.txt
+systemctl stop logwizz-notify; rm -f /var/lib/private/logwizz-notify/state.json; : > /root/sink.txt
 printf 'NOTIFY_URL=https://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
 systemctl restart logwizz-notify; sleep 2
 logger -p auth.notice "Failed password for LWZ-NOTIFY3 '\$(touch \$STATE_DIRECTORY/pwned)' \`touch \$STATE_DIRECTORY/pwned\` from 192.0.2.1"
@@ -144,7 +144,7 @@ t=0; until [[ -s /root/sink.txt ]] || (( t >= 300 )); do sleep 0.1; t=$((t+1)); 
 n3=$(cat /root/sink.txt)
 if jq -e 'select(.title == "logwizz lwz-hostcheck: ssh_failed_login" and .auth == "Bearer tk_LWZ" and (.body | contains("Matches: 1")))' <<<"$n3" >/dev/null &&
    ! grep -qF LWZ-NOTIFY3 /root/sink.txt && [[ ! -e /var/lib/private/logwizz-notify/pwned ]]; then
-  res notify_ntfy PASS "title, auth header file, summary only, log content not executed"
+  res notify_ntfy PASS "title, auth header, summary only, log content not executed"
 else
   res notify_ntfy FAIL "$n3 $(ls /var/lib/private/logwizz-notify/) $(notify_log)"
 fi

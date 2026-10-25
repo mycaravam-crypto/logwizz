@@ -92,6 +92,9 @@ match_type = "regex"
 # "Invalid user" alone, not again when their connection ends.
 pattern = 'sshd(?:-session)?\[\d+\]: (?:(?:Failed (?:password|publickey)|Invalid user) .*?from |(?:Connection (?:closed|reset) by|Disconnected from) authenticating user \S+ )(?P<src>[0-9A-Fa-f.:]+) port \d+'
 severity = "error"
+# Your own scanners or jump hosts: addresses or networks never reported.
+#[rules.exclude]
+#src = ["192.0.2.10", "10.0.0.0/8"]
 [rules.threshold]
 group_by = "src"
 count = 10

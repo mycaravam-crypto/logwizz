@@ -257,7 +257,12 @@ pub fn save(
     };
     let mut bytes = serde_json::to_vec(&state).map_err(io::Error::other)?;
     bytes.push(b'\n');
+    write_atomic(path, &bytes)
+}
 
+/// Replaces `path` with `bytes` through a mode-0600 temporary file, `fsync`,
+/// rename and a directory `fsync`.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp_name = path.as_os_str().to_owned();
     tmp_name.push(".tmp");
     let tmp = PathBuf::from(tmp_name);
@@ -267,7 +272,7 @@ pub fn save(
         .truncate(true)
         .mode(0o600)
         .open(&tmp)?;
-    f.write_all(&bytes)?;
+    f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
     fs::rename(&tmp, path)?;

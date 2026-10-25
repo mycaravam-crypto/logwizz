@@ -156,8 +156,12 @@ exactly this in a VM, with these rules.
   minute. Put it after `ignore` rules for known noise (see the README,
   *Reporting unknown lines*) to count only unknown lines.
 - **Known scanners:** your own vulnerability scanner or monitoring will
-  trigger these rules. Exclude its address in the nftables rules
-  (`ip saddr != 192.0.2.10`) rather than in logwizz.
+  trigger these rules. For the firewall detectors, exclude its address in
+  the nftables rules (`ip saddr != 192.0.2.10`), which also keeps it out of
+  the kernel log. For the SSH and web rules, add it to the rule's
+  `[rules.exclude]` table (`src = ["192.0.2.10"]`, networks such as
+  `10.0.0.0/8` work too); see the
+  [reference](REFERENCE.md#excluding-trusted-sources).
 
 ## What this cannot see
 

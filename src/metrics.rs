@@ -59,6 +59,8 @@ counters! {
     /// Lines that matched an `ignore` rule.
     lines_ignored,
     rule_matches,
+    /// Matches discarded by a rule's `exclude` values.
+    matches_excluded,
     /// Matches of threshold rules that did not reach their threshold, or
     /// fell into its cooldown.
     threshold_absorbed,

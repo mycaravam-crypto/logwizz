@@ -14,6 +14,7 @@ pub mod glob;
 pub mod journal;
 pub mod metrics;
 pub mod monitor;
+pub mod notify;
 pub mod reader;
 pub mod state;
 pub mod threshold;

@@ -108,7 +108,11 @@ fn parse(json: &[u8]) -> Option<Entry> {
 /// Reads one line, without its `\n`, into `buf`. `Ok(None)` at end of
 /// input. A line longer than `cap` is skipped up to its newline and
 /// reported as `Ok(Some(false))`.
-fn read_line(r: &mut impl BufRead, cap: usize, buf: &mut Vec<u8>) -> io::Result<Option<bool>> {
+pub(crate) fn read_line(
+    r: &mut impl BufRead,
+    cap: usize,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<bool>> {
     buf.clear();
     let n = io::Read::take(&mut *r, cap as u64 + 1).read_until(b'\n', buf)?;
     if n == 0 {
