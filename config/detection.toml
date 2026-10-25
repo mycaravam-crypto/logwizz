@@ -79,7 +79,10 @@ cooldown_secs = 600
 id = "ssh_bruteforce"
 description = "Many failed SSH logins from one source"
 match_type = "regex"
-pattern = 'sshd(?:-session)?\[\d+\]: (?:Failed (?:password|publickey)|Invalid user) .*?from (?P<src>[0-9A-Fa-f.:]+) port \d+'
+# With PasswordAuthentication no, attempts on a real user (root) log no
+# "Failed" line, only how the connection ended. Invalid users are counted by
+# "Invalid user" alone, not again when their connection ends.
+pattern = 'sshd(?:-session)?\[\d+\]: (?:(?:Failed (?:password|publickey)|Invalid user) .*?from |(?:Connection (?:closed|reset) by|Disconnected from) authenticating user \S+ )(?P<src>[0-9A-Fa-f.:]+) port \d+'
 severity = "error"
 [rules.threshold]
 group_by = "src"
@@ -98,6 +101,22 @@ group_by = "src"
 count = 1
 window_secs = 1
 cooldown_secs = 3600
+
+# --- Privileges and accounts ---
+
+[[rules]]
+id = "sudo_auth_failure"
+description = "Failed sudo authentication or user not in sudoers"
+match_type = "regex"
+pattern = 'sudo(?:-rs)?(?:\[\d+\])?: .*(?:authentication fail|incorrect password attempt|NOT in sudoers|not in the sudoers)'
+severity = "error"
+
+[[rules]]
+id = "account_change"
+description = "User, group or password changed"
+match_type = "regex"
+pattern = '(?:useradd|userdel|usermod|groupadd|groupdel|groupmod|gpasswd|chpasswd|passwd)\[\d+\]: '
+severity = "warning"
 
 # --- Web ---
 
