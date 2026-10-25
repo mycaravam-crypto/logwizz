@@ -96,7 +96,9 @@ fn version_and_help_work() {
     let bin = env!("CARGO_BIN_EXE_logwizz");
     let out = Command::new(bin).arg("--version").output().unwrap();
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("logwizz 0.1.0"));
+    // The release build stamps the tag's version into Cargo.toml, so compare against it rather than a literal.
+    let expected = format!("logwizz {}", env!("CARGO_PKG_VERSION"));
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with(&expected));
 
     let out = Command::new(bin).arg("--help").output().unwrap();
     assert!(out.status.success());
