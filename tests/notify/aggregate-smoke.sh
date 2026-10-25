@@ -56,6 +56,7 @@ set -e
 [[ $(wc -l < "$tmp/webhook.jsonl") -eq 1 ]] || { echo "expected exactly one aggregate webhook" >&2; exit 1; }
 jq -e '.schema == "logwizz.notification/v1" and .count == 3 and .rule == "ssh_failed_login" and .source == "multiple" and .partial == true and (.line == null)' "$tmp/webhook.jsonl" >/dev/null
 if grep -F 'RAW-SECRET-SHOULD-NOT-LEAVE-HOST' "$tmp/webhook.jsonl"; then echo "raw log content leaked into webhook summary" >&2; exit 1; fi
+if grep -F 'https://example.invalid/logwizz' "$tmp/webhook.args"; then echo "webhook URL leaked into curl arguments" >&2; exit 1; fi
 set +e
 PATH="$tmp/bin:$PATH" JOURNAL_FIXTURE="$tmp/events.jsonl" CAPTURE_FILE="$tmp/telegram.txt" CURL_ARGS_FILE="$tmp/telegram.args" STATE_DIRECTORY="$tmp/state-telegram" RUNTIME_DIRECTORY="$tmp/runtime-telegram" NOTIFY_KIND=telegram TELEGRAM_BOT_TOKEN=123456:ABC_def-123 TELEGRAM_CHAT_ID=-100123 NOTIFY_WINDOW_SECS=60 bash "$root/packaging/logwizz-notify"
 status=$?
@@ -87,5 +88,17 @@ set -e
 [[ $status -eq 1 ]] || { echo "expected notifier exit 1 after retry stream EOF, got $status" >&2; exit 1; }
 [[ $(wc -l < "$tmp/retry.jsonl") -eq 1 ]] || { echo "expected one retried aggregate" >&2; exit 1; }
 jq -e '.count == 3 and .rule == "ssh_failed_login"' "$tmp/retry.jsonl" >/dev/null
+
+
+# Invalid event timestamps must not be silently assigned to the current window
+# or advance the journal cursor.
+mkdir -p "$tmp/state-invalid" "$tmp/runtime-invalid"
+jq -cn '{__CURSOR:"cursor-invalid",MESSAGE:({v:1,ts:"not-a-timestamp",host:"test-host",rule:"bad_timestamp",severity:"warning",line:"RAW-SECRET"}|tojson)}' > "$tmp/invalid-events.jsonl"
+set +e
+PATH="$tmp/bin:$PATH" JOURNAL_FIXTURE="$tmp/invalid-events.jsonl" CAPTURE_FILE="$tmp/invalid.jsonl" CURL_ARGS_FILE="$tmp/invalid.args" STATE_DIRECTORY="$tmp/state-invalid" RUNTIME_DIRECTORY="$tmp/runtime-invalid" NOTIFY_KIND=webhook NOTIFY_URL=https://example.invalid/logwizz NOTIFY_WINDOW_SECS=60 bash "$root/packaging/logwizz-notify"
+status=$?
+set -e
+[[ $status -eq 1 ]] || { echo "expected invalid timestamp to stop notifier" >&2; exit 1; }
+[[ ! -e "$tmp/state-invalid/cursor" ]] || { echo "invalid event advanced the journal cursor" >&2; exit 1; }
 
 echo "aggregate notification smoke tests passed"

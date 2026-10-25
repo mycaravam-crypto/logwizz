@@ -22,7 +22,7 @@ if [[ ! $max_pending =~ ^[0-9]+$ ]]; then die "NOTIFY_MAX_PENDING must be an int
 if (( max_pending < 1 || max_pending > 65536 )); then die "NOTIFY_MAX_PENDING must be 1..65536"; fi
 case $kind in
 telegram) [[ -n ${TELEGRAM_BOT_TOKEN:-} ]] || die "TELEGRAM_BOT_TOKEN is not set"; [[ ${TELEGRAM_BOT_TOKEN} =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "TELEGRAM_BOT_TOKEN has invalid format"; [[ -n ${TELEGRAM_CHAT_ID:-} ]] || die "TELEGRAM_CHAT_ID is not set" ;;
-webhook|ntfy) [[ -n ${NOTIFY_URL:-} ]] || die "NOTIFY_URL is not set" ;;
+webhook|ntfy) [[ -n ${NOTIFY_URL:-} ]] || die "NOTIFY_URL is not set"; [[ $NOTIFY_URL == https://* ]] || die "NOTIFY_URL must use HTTPS" ;;
 email)
   # Values end up in an SMTP URL and in mail headers: restrict them to avoid
   # configuration or header injection.
@@ -86,11 +86,12 @@ flush_all() { local now file bucket partial failed=0; now=$(date -u +%s); for fi
 flush_progress() { local file bucket failed=0; for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { failed=1; continue; }; if (( bucket < latest_bucket )); then flush_file "$file" false || failed=1; fi; done; return "$failed"; }
 record_event() {
 local event=$1 cursor=$2 ts epoch bucket start end rule key host severity description source file
-rule=$(jq -er '.rule | strings | select(length > 0)' <<<"$event") || return 1
-ts=$(jq -r '.ts // empty' <<<"$event"); epoch=$(date -u -d "$ts" +%s 2>/dev/null) || epoch=$(date -u +%s)
+rule=$(jq -er '.rule | strings | select(length > 0) | gsub("[\\r\\n]"; " ") | .[0:64]' <<<"$event") || return 1
+ts=$(jq -r '.ts // empty' <<<"$event"); epoch=$(date -u -d "$ts" +%s 2>/dev/null) || { log "invalid timestamp for rule $rule; cursor not advanced"; return 1; }
 bucket=$(( epoch / window * window )); (( bucket > latest_bucket )) && latest_bucket=$bucket; start=$(date -u -d "@$bucket" '+%Y-%m-%dT%H:%M:%SZ') || return 1; end=$(date -u -d "@$((bucket + window))" '+%Y-%m-%dT%H:%M:%SZ') || return 1
 host=$(jq -r '(.host // "unknown") | tostring | gsub("[\\r\\n]"; " ") | .[0:128]' <<<"$event")
-severity=$(jq -r '(.severity // "notice") | tostring | .[0:32]' <<<"$event")
+severity=$(jq -r '(.severity // "notice") | tostring | gsub("[\\r\\n]"; " ") | .[0:32]' <<<"$event")
+  case $severity in debug|info|notice|warning|error|critical) ;; *) severity=notice ;; esac
 description=$(jq -r '(.description // "") | tostring | gsub("[\\r\\n]"; " ") | .[0:160]' <<<"$event")
 source=$(jq -r '(.fields.src // .fields.source // .threshold.group // "") | tostring | gsub("[\\r\\n]"; " ") | .[0:128]' <<<"$event")
 key=$(printf '%s' "$rule" | sha256sum | cut -c1-16); file=$state/agg-"$bucket"-"$key".json
@@ -107,8 +108,9 @@ save_cursor "$cursor"
 }
 process_entry() { local entry=$1 cursor event; cursor=$(jq -er '.__CURSOR | strings | select(length > 0)' <<<"$entry") || return 0; event=$(jq -r '.MESSAGE | strings' <<<"$entry"); if [[ $event == "{"* ]] && jq -e '.v == 1 and (.rule | type == "string") and (.ts | type == "string")' >/dev/null 2>&1 <<<"$event"; then record_event "$event" "$cursor"; else save_cursor "$cursor"; fi; }
 if [[ -s $cursor_file ]]; then from="--after-cursor=$(cat "$cursor_file")"; else from=--lines=0; fi
+shutdown() { if flush_all; then exit 0; else exit 1; fi; }
+trap shutdown TERM INT
 journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" | {
-trap 'if flush_all; then exit 0; else exit 1; fi' TERM INT
 while true; do entry=; IFS= read -r -t 1 entry; rc=$?; if (( rc == 0 )); then process_entry "$entry" || { log "could not persist event; stopping before cursor advance"; break; }; flush_progress || true; elif (( rc > 128 )); then flush_due || true; continue; else break; fi; done
 flush_all || true
 log "journalctl exited; systemd will restart the notifier"
