@@ -747,45 +747,7 @@ logwizz's own output.** The namespace has its own retention settings in
 
 ### Notifications
 
-[`packaging/logwizz-notify`](../packaging/logwizz-notify) and its unit
-[`logwizz-notify.service`](../packaging/logwizz-notify.service) follow the
-logwizz journal namespace and POST every event at or above a minimum severity
-to a URL. logwizz itself stays without network access: only this small unit
-has it. It needs `curl` and `jq`, and logwizz with `format = "json"` and
-`syslog_prefix = true` (as in the example configuration).
-
-```bash
-apt install curl jq
-install -m 0755 packaging/logwizz-notify /usr/bin/logwizz-notify
-install -m 0600 packaging/notify.env.example /etc/logwizz/notify.env   # then edit it
-install -m 0644 packaging/logwizz-notify.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now logwizz-notify
-```
-
-| Setting (`/etc/logwizz/notify.env`) | Default | Meaning |
-|---|---|---|
-| `NOTIFY_URL` | required | Where events are POSTed. |
-| `NOTIFY_KIND` | `webhook` | `webhook`: the event JSON as the body. `ntfy`: the rule description and line as the message, with `Title: logwizz <host>: <rule>`, a `Priority` from the severity (critical 5, error and warning 4, notice 3, info 2, debug 1) and the severity as a tag. |
-| `NOTIFY_MIN_PRIORITY` | `warning` | Lowest severity forwarded (`debug` … `critical`). |
-| `NOTIFY_AUTH` | unset | Value of an `Authorization` header, for example `Bearer tk_...`. Passed to curl through a file, never on its command line. |
-
-Behaviour:
-
-- **Start and restart:** the first start forwards only new events. After
-  that, the journal cursor of the last handled event is saved in
-  `/var/lib/logwizz-notify`, so a restart resumes exactly there; after a crash,
-  at most the event being sent is sent again.
-- **Failures:** each event is retried 5 times (10 s timeout each). If it
-  still fails, an error is logged to the main journal and the event is
-  skipped: a broken endpoint never stalls later notifications. The event
-  itself remains in the logwizz journal.
-- **Floods:** throttle with logwizz's [`[limits]`](#limits): for example
-  `rate_limit_events = 10` per minute per rule, and `dedup_window_secs`.
-- Only JSON events are forwarded, never logwizz's own diagnostics.
-
-`systemd-analyze security` rates the unit **1.3 OK**: it is locked down like
-logwizz, except that it may open network connections.
+The notifier aggregates detection events by rule and event-time window, then sends summaries through Telegram, ntfy or a webhook. It does not forward raw log lines. Setup, configuration, flush behavior and delivery guarantees are covered in the [notification operations guide](NOTIFICATIONS.md).
 
 ## Security
 
