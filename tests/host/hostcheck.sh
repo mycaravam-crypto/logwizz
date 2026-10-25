@@ -90,10 +90,15 @@ fi
 command -v jq >/dev/null || { apt-get update -q && apt-get install -qy jq; } >/dev/null 2>&1
 install -m 0755 "$P/logwizz-notify" /usr/bin/logwizz-notify
 install -m 0644 "$P/logwizz-notify.service" /etc/systemd/system/
-printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=webhook\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
+# The notifier only accepts HTTPS endpoints: serve the sink with a throwaway
+# certificate that the guest trusts system-wide.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 \
+  -keyout /root/sink.key -out /usr/local/share/ca-certificates/lwz-sink.crt >/dev/null 2>&1
+update-ca-certificates >/dev/null 2>&1
+printf 'NOTIFY_URL=https://127.0.0.1:8099/\nNOTIFY_KIND=webhook\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
 chmod 0600 /etc/logwizz/notify.env
 python3 - /root/sink.txt <<'PY' &
-import http.server, json, sys
+import http.server, json, ssl, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(s):
         body = s.rfile.read(int(s.headers["Content-Length"])).decode()
@@ -101,7 +106,11 @@ class H(http.server.BaseHTTPRequestHandler):
         with open(sys.argv[1], "a") as f: f.write(json.dumps(rec) + "\n")
         s.send_response(200); s.end_headers()
     def log_message(*a): pass
-http.server.HTTPServer(("127.0.0.1", 8099), H).serve_forever()
+srv = http.server.HTTPServer(("127.0.0.1", 8099), H)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain("/usr/local/share/ca-certificates/lwz-sink.crt", "/root/sink.key")
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
 PY
 SINK=$!
 systemd-analyze verify /etc/systemd/system/logwizz-notify.service || res notify_verify FAIL
@@ -127,7 +136,7 @@ else
 fi
 # ntfy format with an auth header, and log content that tries shell injection.
 : > /root/sink.txt
-printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
+printf 'NOTIFY_URL=https://127.0.0.1:8099/\nNOTIFY_KIND=ntfy\nNOTIFY_AUTH=Bearer tk_LWZ\nNOTIFY_WINDOW_SECS=10\n' > /etc/logwizz/notify.env
 systemctl restart logwizz-notify; sleep 2
 logger -p auth.notice "Failed password for LWZ-NOTIFY3 '\$(touch \$STATE_DIRECTORY/pwned)' \`touch \$STATE_DIRECTORY/pwned\` from 192.0.2.1"
 t=0; until [[ -s /root/sink.txt ]] || (( t >= 300 )); do sleep 0.1; t=$((t+1)); done
@@ -140,6 +149,7 @@ else
 fi
 res notify_security PASS "$(systemd-analyze security logwizz-notify --no-pager | tail -1)"
 systemctl stop logwizz-notify; kill "$SINK"
+rm -f /usr/local/share/ca-certificates/lwz-sink.crt /root/sink.key; update-ca-certificates --fresh >/dev/null 2>&1
 
 # 4. Test file: append, rename+create rotation with a late write to the old file.
 echo "LWZ-T1 append" >> /var/log/lwtest.log
