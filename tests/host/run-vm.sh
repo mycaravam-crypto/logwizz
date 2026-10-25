@@ -15,6 +15,15 @@ image=${IMAGE:-noble-server-cloudimg-amd64.img}
 checksum_file=${CHECKSUM_FILE:-SHA256SUMS}
 checksum_tool=${CHECKSUM_TOOL:-sha256sum}
 
+# These values are workflow parameters, but validate them because this script is
+# also documented for local use and must not write outside WORK or execute an
+# arbitrary checksum command.
+[[ "$image" =~ ^[A-Za-z0-9._-]+$ && "$image" != "." && "$image" != ".." ]] || { echo "invalid IMAGE filename" >&2; exit 2; }
+[[ "$checksum_file" =~ ^[A-Za-z0-9._-]+$ && "$checksum_file" != "." && "$checksum_file" != ".." ]] || { echo "invalid CHECKSUM_FILE filename" >&2; exit 2; }
+case "$checksum_tool" in sha256sum|sha512sum) ;; *) echo "CHECKSUM_TOOL must be sha256sum or sha512sum" >&2; exit 2 ;; esac
+command -v "$checksum_tool" >/dev/null || { echo "checksum tool not found: $checksum_tool" >&2; exit 2; }
+[[ "$image_url" == https://* ]] || { echo "IMAGE_URL must use HTTPS" >&2; exit 2; }
+
 cd "$work"
 if [[ ! -f $image ]]; then
   curl -fsSL -o "$image" "$image_url/$image"
