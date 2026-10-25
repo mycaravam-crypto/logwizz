@@ -58,7 +58,7 @@ fi
 
 journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" |
   while IFS= read -r entry; do
-    c=$(printf '%s' "$entry" | jq -r .__CURSOR) || continue
+    c=$(printf '%s' "$entry" | jq -er .__CURSOR) || continue # -e: no cursor, no save
     ev=$(printf '%s' "$entry" | jq -r '.MESSAGE | strings')
     case $ev in
       '{'*) send "$ev" || echo "logwizz-notify: delivery failed, event skipped: $(printf '%s' "$ev" | jq -r .rule)" >&2 ;;
