@@ -747,7 +747,7 @@ logwizz's own output.** The namespace has its own retention settings in
 
 ### Notifications
 
-The notifier aggregates detection events by rule and event-time window, then sends summaries through Telegram, ntfy or a webhook. It does not forward raw log lines. Setup, configuration, flush behavior and delivery guarantees are covered in the [notification operations guide](NOTIFICATIONS.md).
+The notifier aggregates detection events by rule and event-time window, then sends summaries through Telegram, ntfy, a webhook or SMTP email. It does not forward raw log lines. Setup, configuration, flush behavior and delivery guarantees are covered in the [notification operations guide](NOTIFICATIONS.md).
 
 ## Security
 

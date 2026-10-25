@@ -1,4 +1,4 @@
-# systemd unit for logwizz-notify: aggregates detections and sends summaries to Telegram, ntfy or a webhook.
+# systemd unit for logwizz-notify: aggregates detections and sends summaries to Telegram, ntfy, a webhook or SMTP email.
 #
 # Needs logwizz.service with format = "json" and syslog_prefix = true, and
 # curl and jq installed. Install the script as /usr/bin/logwizz-notify and the
@@ -56,7 +56,8 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 RemoveIPC=yes
 
-# Network: outbound HTTPS to Telegram or the configured notification endpoint.
+# Network: outbound HTTPS to Telegram or the configured notification endpoint,
+# or SMTP with TLS for email.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 SystemCallArchitectures=native

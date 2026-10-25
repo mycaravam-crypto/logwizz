@@ -11,6 +11,7 @@ cursor_file=$state/cursor
 auth_file=
 endpoint_config=
 telegram_config=
+smtp_config=
 latest_bucket=0
 die() { echo "logwizz-notify: $*" >&2; exit 2; }
 log() { echo "logwizz-notify: $*" >&2; }
@@ -22,14 +23,36 @@ if (( max_pending < 1 || max_pending > 65536 )); then die "NOTIFY_MAX_PENDING mu
 case $kind in
 telegram) [[ -n ${TELEGRAM_BOT_TOKEN:-} ]] || die "TELEGRAM_BOT_TOKEN is not set"; [[ ${TELEGRAM_BOT_TOKEN} =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "TELEGRAM_BOT_TOKEN has invalid format"; [[ -n ${TELEGRAM_CHAT_ID:-} ]] || die "TELEGRAM_CHAT_ID is not set" ;;
 webhook|ntfy) [[ -n ${NOTIFY_URL:-} ]] || die "NOTIFY_URL is not set" ;;
-*) die "NOTIFY_KIND must be telegram, ntfy or webhook" ;;
+email)
+  # Values end up in an SMTP URL and in mail headers: restrict them to avoid
+  # configuration or header injection.
+  smtp_port=${SMTP_PORT:-587}; smtp_tls=${SMTP_TLS:-starttls}
+  [[ ${SMTP_HOST:-} =~ ^[A-Za-z0-9.-]+$ ]] || die "SMTP_HOST must be a hostname or IP address"
+  if [[ ! $smtp_port =~ ^[1-9][0-9]{0,4}$ ]] || (( smtp_port > 65535 )); then die "SMTP_PORT must be 1..65535"; fi
+  [[ $smtp_tls == starttls || $smtp_tls == implicit ]] || die "SMTP_TLS must be starttls or implicit"
+  for addr in "${SMTP_FROM:-}" "${SMTP_TO:-}"; do
+    [[ $addr =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]] || die "SMTP_FROM and SMTP_TO must be email addresses"
+  done
+  if [[ -n ${SMTP_USER:-} && -z ${SMTP_PASSWORD:-} ]] || [[ -z ${SMTP_USER:-} && -n ${SMTP_PASSWORD:-} ]]; then die "SMTP_USER and SMTP_PASSWORD must be set together"; fi
+  ;;
+*) die "NOTIFY_KIND must be telegram, ntfy, webhook or email" ;;
 esac
-for cmd in journalctl curl jq date sha256sum find wc tr; do command -v "$cmd" >/dev/null || die "$cmd not found"; done
+for cmd in journalctl curl jq date sha256sum find wc tr sed; do command -v "$cmd" >/dev/null || die "$cmd not found"; done
 mkdir -p "$state" "$runtime" || die "cannot create state/runtime directory"
 chmod 0700 "$state" "$runtime" 2>/dev/null || true
 if [[ $kind == webhook || $kind == ntfy ]]; then endpoint_config=$runtime/endpoint-curl.conf; printf 'url = "%s"\n' "${NOTIFY_URL}" > "$endpoint_config" || die "cannot write endpoint curl config"; chmod 0600 "$endpoint_config"; fi
-if [[ -n ${NOTIFY_AUTH:-} ]]; then auth_file=$runtime/auth-header; printf 'Authorization: %s\n' "${NOTIFY_AUTH}" > "$auth_file" || die "cannot write auth header"; chmod 0600 "$auth_file"; fi
+if [[ -n ${NOTIFY_AUTH:-} && $kind != email ]]; then auth_file=$runtime/auth-header; printf 'Authorization: %s\n' "${NOTIFY_AUTH}" > "$auth_file" || die "cannot write auth header"; chmod 0600 "$auth_file"; fi
 if [[ $kind == telegram ]]; then telegram_config=$runtime/telegram-curl.conf; printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "${TELEGRAM_BOT_TOKEN}" > "$telegram_config" || die "cannot write Telegram curl config"; chmod 0600 "$telegram_config"; fi
+if [[ $kind == email ]]; then
+  # SMTP credentials go to curl through this private file, never its arguments.
+  # TLS is required in both modes; certificate verification stays enabled.
+  smtp_config=$runtime/smtp-curl.conf
+  if [[ $smtp_tls == implicit ]]; then smtp_url="smtps://$SMTP_HOST:$smtp_port"; else smtp_url="smtp://$SMTP_HOST:$smtp_port"; fi
+  jq -rn --arg url "$smtp_url" --arg from "$SMTP_FROM" --arg to "$SMTP_TO" --arg user "${SMTP_USER:-}" --arg pass "${SMTP_PASSWORD:-}" \
+    '"url = \($url | tojson)", "mail-from = \($from | tojson)", "mail-rcpt = \($to | tojson)", "ssl-reqd", (if $user != "" then "user = \("\($user):\($pass)" | tojson)" else empty end)' \
+    > "$smtp_config" || die "cannot write SMTP curl config"
+  chmod 0600 "$smtp_config"
+fi
 curl_opts=(--silent --show-error --fail --max-time 10 --retry 3 --retry-all-errors --retry-delay 1)
 [[ -n $auth_file ]] && curl_opts+=(--header "@$auth_file")
 save_cursor() { local value=$1 tmp="$cursor_file.tmp.$$"; printf '%s\n' "$value" > "$tmp" && mv -f "$tmp" "$cursor_file"; }
@@ -42,6 +65,7 @@ message=$(jq -r --argjson partial "$partial" 'def clean: tostring | gsub("[\\r\\
 case $kind in
 webhook) curl "${curl_opts[@]}" --config "$endpoint_config" -H 'Content-Type: application/json' --data-binary "$summary" >/dev/null ;;
 ntfy) case $severity in critical) priority=5 ;; error|warning) priority=4 ;; notice) priority=3 ;; info) priority=2 ;; *) priority=1 ;; esac; curl "${curl_opts[@]}" --config "$endpoint_config" -H "Title: logwizz $host: $rule" -H "Priority: $priority" -H "Tags: $severity" --data-binary "$message" >/dev/null ;;
+email) { jq -r --arg from "$SMTP_FROM" --arg to "$SMTP_TO" 'def clean: tostring | gsub("[\\r\\n]"; " "); "From: \($from)\nTo: \($to)\nSubject: logwizz \(.host | clean): \(.rule | clean) [\(.severity | clean)] x\(.count)\nMIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: 8bit\n"' "$file" && printf '%s\n' "$message"; } | sed 's/$/\r/' | curl "${curl_opts[@]}" --config "$smtp_config" --upload-file - >/dev/null ;;
 telegram) response=$(curl "${curl_opts[@]}" --config "$telegram_config" --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=$message" --data-urlencode "disable_web_page_preview=true") || return 1; printf '%s' "$response" | jq -e '.ok == true' >/dev/null || return 1 ;;
 esac
 }
