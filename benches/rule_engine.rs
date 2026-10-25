@@ -6,21 +6,26 @@
 //!   evaluating rules: everything except event formatting and output.
 //! * `limiter/*` measures deduplication with a full table whose entries
 //!   have not expired, fed a stream of unique lines (the worst case).
+//! * `threshold/*` measures one firewall-log match through capture
+//!   extraction and a `group_by` + `distinct` threshold: a single scanner
+//!   (one group), and a flood from new sources into a full group table.
 //!
 //! Run with `cargo bench --bench rule_engine`.
 
 use std::hint::black_box;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use logwizz::config::{self, Limits, StartupMode};
+use logwizz::config::{self, GroupBy, Limits, StartupMode, Threshold};
 use logwizz::dispatcher::Limiter;
 use logwizz::engine::Engine;
 use logwizz::metrics::Metrics;
 use logwizz::reader::{READ_BUF_BYTES, ReaderOptions, TailedFile};
+use logwizz::threshold::Thresholds;
 
 const LINES: &[&str] = &[
     "Oct 24 08:15:30 host sshd[1234]: Accepted publickey for deploy from 10.0.0.5 port 52144 ssh2",
@@ -127,6 +132,7 @@ fn bench_limiter(c: &mut Criterion) {
             rate_limit_window_secs: 60,
             dedup_window_secs: 3600,
             dedup_max_entries: entries,
+            ..Limits::default()
         };
         let mut l = Limiter::new(&limits, 1);
         let start = Instant::now();
@@ -146,5 +152,62 @@ fn bench_limiter(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_match, bench_pipeline, bench_limiter);
+fn bench_threshold(c: &mut Criterion) {
+    let mut g = c.benchmark_group("threshold");
+    g.throughput(Throughput::Elements(1));
+    let cfg = config::parse(
+        "[[files]]\npath = \"/x\"\n[[rules]]\nid = \"scan\"\nmatch_type = \"regex\"\n\
+         pattern = 'logwizz-drop: .*SRC=(?P<src>\\S+) .*DPT=(?P<dpt>\\d+)'\nseverity = \"critical\"\n",
+        Path::new("bench"),
+    )
+    .unwrap();
+    let matcher = &cfg.rules[0].matcher;
+    let t = Threshold {
+        group_by: GroupBy::Capture(1),
+        distinct: Some(2),
+        count: 20,
+        window: Duration::from_secs(10),
+        cooldown: Duration::from_secs(300),
+    };
+    let line = |src: u32, dpt: u32| {
+        format!(
+            "Oct 25 10:00:00 web1 kernel: logwizz-drop: IN=eth0 OUT= SRC=10.{}.{}.{} \
+             DST=198.51.100.1 LEN=44 PROTO=TCP SPT=40000 DPT={dpt} SYN",
+            src >> 16 & 255,
+            src >> 8 & 255,
+            src & 255
+        )
+    };
+    let now = Instant::now();
+    let mut th = Thresholds::new(1, 4096, Arc::new(Metrics::default()));
+    let lines: Vec<String> = (0..1000).map(|p| line(1, p)).collect();
+    let mut i = 0;
+    g.bench_function("one_scanner", |b| {
+        b.iter(|| {
+            i = (i + 1) % lines.len();
+            let l = lines[i].as_bytes();
+            let fields = matcher.fields(black_box(l));
+            th.observe(0, "scan", &t, Path::new("kern.log"), &fields, now)
+        })
+    });
+    let mut th = Thresholds::new(1, 4096, Arc::new(Metrics::default()));
+    let mut src = 0u32;
+    g.bench_function("new_sources_full_table", |b| {
+        b.iter(|| {
+            src = src.wrapping_add(1);
+            let l = line(src, 22);
+            let fields = matcher.fields(black_box(l.as_bytes()));
+            th.observe(0, "scan", &t, Path::new("kern.log"), &fields, now)
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_match,
+    bench_pipeline,
+    bench_limiter,
+    bench_threshold
+);
 criterion_main!(benches);
