@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Forward selected Logwizz journal events to a Fail2ban-friendly log.
+
+This optional adapter is deliberately outside the Logwizz Rust daemon.
+It reads the dedicated systemd journal namespace and writes only validated,
+explicitly eligible source-IP events.
+"""
+import ipaddress
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+OUTPUT = Path("/var/log/logwizz/fail2ban.log")
+ELIGIBLE_RULES = {
+    "port_scan",
+    "fast_scan",
+    "tcp_flag_scan",
+    "ssh_bruteforce",
+    "ssh_probe",
+    "scanner_user_agent",
+}
+
+
+def main() -> int:
+    OUTPUT.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    try:
+        with OUTPUT.open("a", encoding="utf-8") as out:
+            out.chmod(0o640)
+            cmd = [
+                "journalctl", "--namespace=logwizz", "--unit=logwizz.service",
+                "--output=cat", "--follow", "--since=now",
+            ]
+            with subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=sys.stderr,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+            ) as proc:
+                assert proc.stdout is not None
+                for raw in proc.stdout:
+                    try:
+                        event = json.loads(raw)
+                        rule = event.get("rule")
+                        if rule not in ELIGIBLE_RULES:
+                            continue
+                        src = (event.get("fields") or {}).get("src")
+                        if not isinstance(src, str):
+                            continue
+                        address = ipaddress.ip_address(src)
+                    except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+                        continue
+
+                    out.write(f"logwizz rule={rule} src={address.compressed}\n")
+                    out.flush()
+                return proc.wait()
+    except OSError as exc:
+        print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
