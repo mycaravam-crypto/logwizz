@@ -41,6 +41,8 @@ sudo install -D -m 0644 packaging/fail2ban/filter.d/logwizz.conf \
   /etc/fail2ban/filter.d/logwizz.conf
 sudo install -D -m 0644 packaging/fail2ban/jail.d/logwizz.local \
   /etc/fail2ban/jail.d/logwizz.local
+sudo install -D -m 0644 packaging/fail2ban/logrotate.conf \
+  /etc/logrotate.d/logwizz-fail2ban
 ```
 
 The bridge runs as a dynamic unprivileged user with read access to the system
@@ -72,6 +74,7 @@ events when a qualifying Logwizz event occurs:
 sudo journalctl -u logwizz-fail2ban-bridge.service -f
 sudo tail -F /var/log/logwizz/fail2ban.log
 sudo fail2ban-regex /var/log/logwizz/fail2ban.log /etc/fail2ban/filter.d/logwizz.conf
+python3 packaging/fail2ban/test_bridge.py
 ```
 
 The normalized format is intentionally simple:
@@ -94,12 +97,15 @@ replacement for reviewing your detection thresholds.
   validated source address are not eligible.
 - **Avoid self-lockout.** Configure `ignoreip` for loopback, management
   networks and trusted scanners before enabling the jail.
-- **Keep the bridge log bounded.** Configure log rotation for
-  `/var/log/logwizz/fail2ban.log` and arrange for the bridge to reopen the
-  file after rotation (for example, by restarting the bridge service).
+- **Keep the bridge log bounded.** The optional logrotate example uses
+  `copytruncate` so the bridge can keep its open file descriptor. As with
+  any copy-and-truncate rotation, a very small race window can lose a line.
 - **No guarantee of zero false positives.** NAT, proxies, shared clients and
   noisy detection rules can make a source appear malicious. Validate the
   underlying logging and rule thresholds first.
+- **Bridge downtime:** events emitted while the bridge is stopped are not
+  replayed when it starts again; it follows from the current time to avoid
+  replaying stale detections and causing stale bans.
 - **Optional means optional.** To disable it, stop and disable
   `logwizz-fail2ban-bridge.service` and disable/remove the Fail2ban jail.
   Logwizz itself continues to run normally.
