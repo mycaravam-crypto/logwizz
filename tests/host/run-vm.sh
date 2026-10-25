@@ -22,7 +22,8 @@ fi
 rm -rf payload && mkdir payload
 (cd "$root" && cargo build --release --locked --target x86_64-unknown-linux-musl)
 install -m 0755 "$root/target/x86_64-unknown-linux-musl/release/logwizz" payload/logwizz
-cp "$root/packaging/logwizz.service" "$here/hostcheck.sh" "$root/docs/DETECTION.md" payload/
+cp "$root/packaging/logwizz.service" "$root/packaging/logwizz-notify" "$root/packaging/logwizz-notify.service" \
+  "$here/hostcheck.sh" "$root/docs/DETECTION.md" payload/
 # The host config plus every rule of the shipped detection config, so the check exercises those exact rules.
 { cat "$here/logwizz.toml"; echo; sed -n '/^\[\[rules\]\]/,$p' "$root/config/detection.toml"; } > payload/logwizz.toml
 
