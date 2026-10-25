@@ -26,7 +26,7 @@ def main() -> int:
     OUTPUT.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
     try:
         with OUTPUT.open("a", encoding="utf-8") as out:
-            out.chmod(0o640)
+            OUTPUT.chmod(0o640)
             cmd = [
                 "journalctl", "--namespace=logwizz", "--unit=logwizz.service",
                 "--output=cat", "--follow", "--since=now",
@@ -39,10 +39,13 @@ def main() -> int:
                 for raw in proc.stdout:
                     try:
                         event = json.loads(raw)
+                        if not isinstance(event, dict):
+                            continue
                         rule = event.get("rule")
                         if rule not in ELIGIBLE_RULES:
                             continue
-                        src = (event.get("fields") or {}).get("src")
+                        fields = event.get("fields")
+                        src = fields.get("src") if isinstance(fields, dict) else None
                         if not isinstance(src, str):
                             continue
                         address = ipaddress.ip_address(src)
