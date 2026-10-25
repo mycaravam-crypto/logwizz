@@ -6,7 +6,7 @@ use memchr::memmem;
 use regex::bytes::Regex;
 use serde::Deserialize;
 
-use crate::config::Rule;
+use crate::config::{Action, Rule};
 use crate::event::excerpt;
 
 /// Maximum named capture groups per rule.
@@ -95,7 +95,8 @@ impl Matcher {
 /// Evaluates every enabled rule against a line.
 ///
 /// Rules are evaluated in configuration order and every matching rule
-/// produces its own event. Matching allocates nothing.
+/// produces its own event, until an `ignore` rule matches: that ends
+/// evaluation for the line. Matching allocates nothing.
 #[derive(Debug, Clone)]
 pub struct Engine {
     rules: Vec<Rule>,
@@ -110,14 +111,19 @@ impl Engine {
         &self.rules
     }
 
-    /// Calls `f` with the index of each rule matching `line`.
+    /// Calls `f` with the index of each emitting rule matching `line`, up
+    /// to the first matching `ignore` rule. Returns `true` if one matched.
     #[inline]
-    pub fn for_each_match(&self, line: &[u8], mut f: impl FnMut(usize)) {
+    pub fn for_each_match(&self, line: &[u8], mut f: impl FnMut(usize)) -> bool {
         for (i, rule) in self.rules.iter().enumerate() {
             if rule.matcher.is_match(line) {
+                if rule.action == Action::Ignore {
+                    return true;
+                }
                 f(i);
             }
         }
+        false
     }
 }
 
@@ -231,6 +237,29 @@ mod tests {
             MAX_FIELD_BYTES - 1,
             "cut before the two-byte character"
         );
+    }
+
+    #[test]
+    fn ignore_rule_stops_later_rules() {
+        let ignore = |id: &str, pattern: &str| {
+            format!(
+                "[[rules]]\nid = \"{id}\"\nmatch_type = \"literal\"\npattern = '{pattern}'\naction = \"ignore\"\n"
+            )
+        };
+        let e = engine(&format!(
+            "{}{}{}{}",
+            rule("early", "literal", "CRON"),
+            ignore("cron", "CRON"),
+            ignore("ntp", "ntpd"),
+            rule("unknown", "regex", "^"),
+        ));
+        // An earlier emitting rule still fires; nothing after the ignore does.
+        let mut ids = Vec::new();
+        assert!(e.for_each_match(b"CRON job", |i| ids.push(e.rules()[i].id.as_str())));
+        assert_eq!(ids, ["early"]);
+        assert!(e.for_each_match(b"ntpd sync", |_| panic!("ignored")));
+        // The catch-all reports what no ignore rule knows.
+        assert_eq!(matches(&e, b"sshd: something new"), ["unknown"]);
     }
 
     #[test]
