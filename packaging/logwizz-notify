@@ -70,7 +70,7 @@ process_entry() { local entry=$1 cursor event; cursor=$(jq -er '.__CURSOR | stri
 if [[ -s $cursor_file ]]; then from="--after-cursor=$(cat "$cursor_file")"; else from=--lines=0; fi
 journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" | {
 trap 'if flush_all; then exit 0; else exit 1; fi' TERM INT
-while true; do entry=; IFS= read -r -t 1 entry; rc=$?; if (( rc == 0 )); then process_entry "$entry" || { log "could not persist event; stopping before cursor advance"; break; }; flush_progress || true; elif (( rc > 128 )); then flush_due || true; continue; else break; fi; flush_due || true; done
+while true; do entry=; IFS= read -r -t 1 entry; rc=$?; if (( rc == 0 )); then process_entry "$entry" || { log "could not persist event; stopping before cursor advance"; break; }; flush_progress || true; elif (( rc > 128 )); then flush_due || true; continue; else break; fi; done
 flush_all || true
 log "journalctl exited; systemd will restart the notifier"
 exit 1
