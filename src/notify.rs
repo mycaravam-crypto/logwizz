@@ -845,7 +845,7 @@ mod tests {
 
         // A restart with delivery working sends the closed window and keeps
         // counting into the open one.
-        let st = load_state(dir.path(), 60);
+        let st = load_state(dir.path(), 60).unwrap();
         let mut n = notifier(dir.path(), 10, false);
         n.agg = Aggregator::new(60, 10, st.summaries);
         n.cursor = st.cursor;
