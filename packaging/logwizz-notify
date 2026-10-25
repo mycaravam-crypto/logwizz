@@ -21,7 +21,7 @@ if [[ ! $max_pending =~ ^[0-9]+$ ]]; then die "NOTIFY_MAX_PENDING must be an int
 if (( max_pending < 1 || max_pending > 65536 )); then die "NOTIFY_MAX_PENDING must be 1..65536"; fi
 case $kind in
 telegram) [[ -n ${TELEGRAM_BOT_TOKEN:-} ]] || die "TELEGRAM_BOT_TOKEN is not set"; [[ ${TELEGRAM_BOT_TOKEN} =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "TELEGRAM_BOT_TOKEN has invalid format"; [[ -n ${TELEGRAM_CHAT_ID:-} ]] || die "TELEGRAM_CHAT_ID is not set" ;;
-webhook|ntfy) [[ -n ${NOTIFY_URL:-} ]] || die "NOTIFY_URL is not set" ;;
+webhook|ntfy) [[ -n ${NOTIFY_URL:-} ]] || die "NOTIFY_URL is not set"; [[ $NOTIFY_URL == https://* ]] || die "NOTIFY_URL must use HTTPS" ;;
 *) die "NOTIFY_KIND must be telegram, ntfy or webhook" ;;
 esac
 for cmd in journalctl curl jq date sha256sum find wc tr; do command -v "$cmd" >/dev/null || die "$cmd not found"; done
