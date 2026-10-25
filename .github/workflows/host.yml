@@ -19,9 +19,29 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 jobs:
-  ubuntu-24-04:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu-24.04
+            image_url: https://cloud-images.ubuntu.com/noble/current
+            image: noble-server-cloudimg-amd64.img
+            checksum_file: SHA256SUMS
+            checksum_tool: sha256sum
+          - distro: debian-12
+            image_url: https://cloud.debian.org/images/cloud/bookworm/latest
+            image: debian-12-generic-amd64.qcow2
+            checksum_file: SHA512SUMS
+            checksum_tool: sha512sum
+          - distro: debian-13
+            image_url: https://cloud.debian.org/images/cloud/trixie/latest
+            image: debian-13-generic-amd64.qcow2
+            checksum_file: SHA512SUMS
+            checksum_tool: sha512sum
+    name: host (${{ matrix.distro }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -42,6 +62,10 @@ jobs:
       - name: Run the host check
         env:
           WORK: ${{ runner.temp }}/hostcheck
+          IMAGE_URL: ${{ matrix.image_url }}
+          IMAGE: ${{ matrix.image }}
+          CHECKSUM_FILE: ${{ matrix.checksum_file }}
+          CHECKSUM_TOOL: ${{ matrix.checksum_tool }}
         run: mkdir -p "$WORK" && bash tests/host/run-vm.sh
       - name: Show the check's output and the end of the guest console
         if: failure()
