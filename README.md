@@ -2,7 +2,7 @@
 
 A small, high-performance Linux log monitoring tool written in Rust. It follows local log files and the systemd journal, matches new entries against configurable rules, and detects suspicious events and activity spikes without becoming a full SIEM or log shipper.
 
-The core daemon stays local and network-free. A separate notifier groups detections by rule and event-time window, then sends compact summaries through Telegram, ntfy or a webhook. Notifications contain counts and minimal metadata, never raw log lines.
+The core daemon stays local and network-free. A separate notifier groups detections by rule and event-time window, then sends compact summaries through Telegram, ntfy, a webhook or email. Notifications contain counts and minimal metadata, never raw log lines.
 
 ## Install
 

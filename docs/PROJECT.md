@@ -28,7 +28,7 @@ Window: 12:40–12:41 UTC
 Source: 203.0.113.8
 ```
 
-The notifier now emits this aggregate-first shape for Telegram, ntfy and webhook delivery. See [Notification operations](NOTIFICATIONS.md) for setup and delivery semantics.
+The notifier now emits this aggregate-first shape for Telegram, ntfy, webhook and email delivery. See [Notification operations](NOTIFICATIONS.md) for setup and delivery semantics.
 
 Design requirements:
 

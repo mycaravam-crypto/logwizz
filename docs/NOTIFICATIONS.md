@@ -56,12 +56,26 @@ The same aggregate summary is supported by:
 
 For these transports, `NOTIFY_AUTH` can contain an Authorization header value, such as `Bearer token`. It is written to a private file rather than included in curl arguments. Endpoint URLs are also kept in a private curl config file rather than the process argument list. Use HTTPS endpoints.
 
+### Email (SMTP)
+
+`NOTIFY_KIND=email` sends each summary as a plain-text email with the subject `logwizz <host>: <rule> [<severity>] x<count>` and the same body as the text transports.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SMTP_HOST` | required | SMTP server hostname or IP address. |
+| `SMTP_PORT` | `587` | 1–65535. |
+| `SMTP_TLS` | `starttls` | `starttls` (usually port 587) or `implicit` (usually port 465). TLS is required in both modes and certificate verification stays enabled. |
+| `SMTP_FROM` / `SMTP_TO` | required | Sender and recipient address. One recipient is supported. |
+| `SMTP_USER` / `SMTP_PASSWORD` | unset | Set both for authenticated submission; leave both unset for a relay without authentication. |
+
+The SMTP URL, addresses and credentials are written to a mode-`0600` curl config file in the service's private runtime directory, never passed as curl arguments. Host and addresses are validated at startup so they cannot inject SMTP or mail headers; `NOTIFY_AUTH` is ignored for email.
+
 ## Delivery and failure semantics
 
 - The journal cursor is saved only after an event has been persisted into its aggregate. Aggregate state is stored under the service's `StateDirectory`, separate from the core daemon.
 - Delivery uses bounded curl timeouts, retries and an on-disk exponential backoff (2 seconds up to 300 seconds). A failed send leaves the summary on disk for a later attempt; it does not block log detection in the core daemon.
 - Delivery is **at least once**, not exactly once. A process crash after a remote endpoint accepts a summary but before the local aggregate is removed can produce a duplicate. Consumers should tolerate duplicate summaries.
-- On normal window rollover, one summary is sent per rule/window. Shutdown or delayed delivery can produce a partial summary, marked with `partial: true` in webhook JSON and labelled in text transports.
+- On normal window rollover, one summary is sent per rule/window. Shutdown or delayed delivery can produce a partial summary, marked with `partial: true` in webhook JSON and labelled in text and email transports.
 - The notifier logs delivery errors but does not log raw event content or credentials.
 
 Webhook JSON uses schema `logwizz.notification/v1`, for example:
