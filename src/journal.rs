@@ -200,7 +200,9 @@ fn follow(
     let mut buf = Vec::new();
     loop {
         let mut cmd = Command::new("journalctl");
-        cmd.args(["--follow", "--output=json", "--no-pager", "--quiet"])
+        // No --quiet: journalctl's hint about missing read access goes to
+        // our stderr, i.e. the diagnostics.
+        cmd.args(["--follow", "--output=json", "--no-pager"])
             .arg(start.arg())
             .args(matches)
             .stdin(Stdio::null())
@@ -227,6 +229,7 @@ fn follow(
                                 start = Start::After(entry.cursor.to_string());
                                 if tx.send(entry).is_err() {
                                     let _ = child.kill();
+                                    let _ = child.wait();
                                     return; // the monitor is gone
                                 }
                                 waker.wake();

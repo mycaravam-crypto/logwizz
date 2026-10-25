@@ -149,7 +149,7 @@ fn journal_entries_are_matched_and_the_cursor_is_saved() {
     let args = fs::read_to_string(dir.path().join("args")).unwrap();
     assert_eq!(
         args.lines().next().unwrap(),
-        "--follow --output=json --no-pager --quiet --lines=0 SYSLOG_IDENTIFIER=sshd"
+        "--follow --output=json --no-pager --lines=0 SYSLOG_IDENTIFIER=sshd"
     );
     let saved: serde_json::Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
     assert_eq!(saved["journal_cursor"], "c3");

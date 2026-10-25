@@ -267,7 +267,8 @@ printf '[Service]\nSupplementaryGroups=systemd-journal\nProcSubset=all\n' > /etc
 printf '\n[journal]\nmatches = ["SYSLOG_IDENTIFIER=lwz-journal"]\n' >> /etc/logwizz/logwizz.toml
 systemctl daemon-reload; systemctl start logwizz; sleep 2
 logger -t lwz-journal "Failed password for LWZ-JOURNAL from 192.0.2.3 port 22 ssh2"
-if wait_for LWZ-JOURNAL 10 && events | grep -F LWZ-JOURNAL | grep '"file":"journal"' | grep -q '"rule":"ssh_failed_login"'; then
+# The same message also reaches /var/log/syslog through rsyslog; wait for the journal's own event.
+if wait_for '"file":"journal","rule":"ssh_failed_login"' 10 && events | grep -F LWZ-JOURNAL | grep -q '"file":"journal"'; then
   systemctl kill -s USR1 logwizz; sleep 1
   jr=$(stat_of journal_restarts); js=$(stat_of journal_entries_skipped)
   if [[ $jr == 0 && $js == 0 ]]; then res journal_input PASS "event from the journal, journal_restarts=0"
