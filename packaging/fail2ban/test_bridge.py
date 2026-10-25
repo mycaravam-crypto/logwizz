@@ -1,14 +1,16 @@
 """Unit tests for the optional Logwizz-to-Fail2ban bridge."""
 import importlib.util
+from importlib.machinery import SourceFileLoader
 import json
 from pathlib import Path
 import unittest
 
 SCRIPT = Path(__file__).with_name("logwizz-fail2ban-bridge")
-SPEC = importlib.util.spec_from_file_location("logwizz_fail2ban_bridge", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
+LOADER = SourceFileLoader("logwizz_fail2ban_bridge", str(SCRIPT))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+assert SPEC is not None
 BRIDGE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(BRIDGE)
+LOADER.exec_module(BRIDGE)
 
 
 def event(rule: str, src: str) -> str:
