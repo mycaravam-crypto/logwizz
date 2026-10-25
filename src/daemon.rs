@@ -276,6 +276,7 @@ fn keep_restart_only(running: &Config, mut new: Config) -> Config {
         output.format,
         output.destination,
         output.queue_capacity,
+        output.syslog_prefix,
     );
     if !kept.is_empty() {
         warn!(

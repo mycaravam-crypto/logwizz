@@ -145,6 +145,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | `queue_capacity` | `4096` | Maximum events buffered between the reader and the output writer (1 – 1048576). |
 | `max_queue_bytes` | `8388608` | Maximum memory held by buffered events, in bytes (64 KiB – 1 GiB): each event counts its line plus a small fixed overhead. The queue is full when either limit is reached. An event larger than this is still accepted into an empty queue. |
 | `on_full` | `"block"` | Full queue: `block` pauses reading, `drop` discards the event and counts it. See [Backpressure](#backpressure). |
+| `syslog_prefix` | `false` | Start each event line with `<N>`, the syslog priority of its severity (`<2>` critical … `<7>` debug). journald strips the prefix and records it as the entry's priority, so `journalctl -p warning` shows only events of severity `warning` and above. Leave it off when the output does not go to journald. |
 | `max_excerpt_bytes` | unset | If set (16 – 16 MiB), events include at most this many bytes of the line, cut on a UTF-8 boundary, with `truncated: true`. |
 
 ### `[limits]`
@@ -381,8 +382,8 @@ applied one, and logs `configuration reloaded`:
   `stats_interval_secs`, `max_excerpt_bytes`, `max_queue_bytes` and
   `on_full`.
 - **Need a restart:** `startup_mode`, `max_line_bytes`, `diagnostics`,
-  `state_file`, `state_flush_ms`, `format`, `destination` and
-  `queue_capacity`. A change to any of them is logged as a warning naming
+  `state_file`, `state_flush_ms`, `format`, `destination`,
+  `queue_capacity` and `syslog_prefix`. A change to any of them is logged as a warning naming
   the settings, and their running values are kept.
 
 Events queued before the reload are written with the file and rule names
@@ -463,6 +464,10 @@ systemctl daemon-reload
 systemctl enable --now logwizz
 journalctl --namespace=logwizz -u logwizz -o cat -f
 ```
+
+The example configuration sets `syslog_prefix = true`, so each event's journal
+priority is its severity: `journalctl --namespace=logwizz -p warning -o cat -f`
+shows only warnings and worse.
 
 The service user only exists while the service runs, so it reads the
 configuration through its supplementary group: keep the file group-owned by

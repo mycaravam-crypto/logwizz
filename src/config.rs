@@ -150,6 +150,9 @@ pub struct Output {
     /// Maximum number of bytes of the matching line included in an event.
     /// Unset means the whole (already length-limited) line.
     pub max_excerpt_bytes: Option<usize>,
+    /// Start each event line with the sd-daemon `<N>` prefix for its
+    /// severity, so that journald records it as the entry's priority.
+    pub syslog_prefix: bool,
 }
 
 impl Default for Output {
@@ -161,6 +164,7 @@ impl Default for Output {
             max_queue_bytes: 8 * 1024 * 1024,
             on_full: OnFull::Block,
             max_excerpt_bytes: None,
+            syslog_prefix: false,
         }
     }
 }

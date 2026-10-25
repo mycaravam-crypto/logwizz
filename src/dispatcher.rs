@@ -129,9 +129,12 @@ struct JsonEvent<'a> {
 ///
 /// Line content that is not valid UTF-8 is converted lossily (invalid
 /// sequences become U+FFFD). In the human format, control characters are
-/// escaped so log content cannot inject terminal escape sequences.
+/// escaped so log content cannot inject terminal escape sequences. With
+/// `syslog_prefix`, the line starts with `<N>`, N being the severity's
+/// syslog priority.
 pub fn format_event(
     format: OutputFormat,
+    syslog_prefix: bool,
     t: &Tables,
     ev: &Event,
     ts: &mut String,
@@ -142,6 +145,9 @@ pub fn format_event(
     format_rfc3339(ev.time, ts);
     let line = String::from_utf8_lossy(&ev.line);
     let file = t.files[ev.file].to_string_lossy();
+    if syslog_prefix {
+        write!(out, "<{}>", rule.severity.syslog_priority())?;
+    }
     match format {
         OutputFormat::Json => {
             let je = JsonEvent {
@@ -260,6 +266,7 @@ impl Dispatcher {
         let (tx, rx) = sync_channel(cfg.output.queue_capacity);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let format = cfg.output.format;
+        let prefix = cfg.output.syslog_prefix;
         let m = Arc::clone(&metrics);
         let flag = Arc::clone(&shutdown);
         let in_flight = Arc::clone(&queued_bytes);
@@ -268,7 +275,7 @@ impl Dispatcher {
         let handle = thread::Builder::new()
             .name("output".into())
             .spawn(move || {
-                let result = write_loop(rx, &in_flight, format, tables, writer, &flushed);
+                let result = write_loop(rx, &in_flight, format, prefix, tables, writer, &flushed);
                 if let Err(e) = &result {
                     metrics::inc(&m.output_errors);
                     error!(error = %e, "writing events failed; shutting down");
@@ -427,6 +434,7 @@ fn write_loop(
     rx: Receiver<Msg>,
     queued_bytes: &AtomicUsize,
     format: OutputFormat,
+    syslog_prefix: bool,
     mut tables: Arc<Tables>,
     writer: Box<dyn Write + Send>,
     progress: &Progress,
@@ -449,7 +457,7 @@ fn write_loop(
                 Msg::Tables(t) => tables = t,
                 Msg::Event(ev) => {
                     line.clear();
-                    format_event(format, &tables, &ev, &mut ts, &mut line)?;
+                    format_event(format, syslog_prefix, &tables, &ev, &mut ts, &mut line)?;
                     w.write_all(&line)?;
                     queued_bytes.fetch_sub(event_cost(&ev), Ordering::Relaxed);
                     written += 1;
@@ -684,9 +692,26 @@ mod tests {
     }
 
     fn render(format: OutputFormat, ev: &Event) -> String {
+        render_with(format, false, ev)
+    }
+
+    fn render_with(format: OutputFormat, prefix: bool, ev: &Event) -> String {
         let mut out = Vec::new();
-        format_event(format, &tables(), ev, &mut String::new(), &mut out).unwrap();
+        format_event(format, prefix, &tables(), ev, &mut String::new(), &mut out).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn syslog_prefix_carries_severity() {
+        let ev = event(b"Failed", false);
+        let json = render_with(OutputFormat::Json, true, &ev);
+        assert!(json.starts_with("<4>{\"v\":1,"), "{json}");
+        let human = render_with(OutputFormat::Human, true, &ev);
+        assert!(
+            human.starts_with("<4>2023-11-14T22:13:20.123000Z WARNING "),
+            "{human}"
+        );
+        assert!(!render(OutputFormat::Json, &ev).starts_with('<'));
     }
 
     #[test]

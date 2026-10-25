@@ -75,6 +75,15 @@ expect_event auth_log LWZ-AUTH ssh_failed_login /var/log/auth.log
 logger -p user.err "kernel panic LWZ-SYSLOG (test)"
 expect_event syslog LWZ-SYSLOG kernel_error /var/log/syslog
 
+# 3b. syslog_prefix: the journal priority is the event's severity, and the
+# prefix itself is stripped (kernel_error is critical = 2, the auth event warning = 4).
+prio() { journalctl --namespace=logwizz -u logwizz -o json --no-pager | grep -F -- "$1" | tail -1 | grep -o '"PRIORITY":"[0-9]"' | cut -d'"' -f4; }
+if [[ $(prio LWZ-SYSLOG) == 2 && $(prio LWZ-AUTH) == 4 ]] && ! events | grep -F LWZ-SYSLOG | grep -q '^<'; then
+  res journal_priority PASS
+else
+  res journal_priority FAIL "LWZ-SYSLOG=$(prio LWZ-SYSLOG) LWZ-AUTH=$(prio LWZ-AUTH)"
+fi
+
 # 4. Test file: append, rename+create rotation with a late write to the old file.
 echo "LWZ-T1 append" >> /var/log/lwtest.log
 expect_event append LWZ-T1 lwtest /var/log/lwtest.log

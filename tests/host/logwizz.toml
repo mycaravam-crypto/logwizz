@@ -12,6 +12,7 @@ format = "json"
 destination = "stdout"
 queue_capacity = 4096
 on_full = "block"
+syslog_prefix = true
 
 [[files]]
 path = "/var/log/auth.log"
