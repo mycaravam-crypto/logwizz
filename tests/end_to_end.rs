@@ -459,3 +459,30 @@ fn diagnostics_do_not_contain_log_content() {
     let err: Vec<String> = d.stderr.try_iter().collect();
     assert!(!err.iter().any(|l| l.contains("SECRET-TOKEN")), "{err:?}");
 }
+
+#[test]
+fn ignore_rules_and_catch_all_report_unknown_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("app.log");
+    write_new(&log, "");
+    let rules = "[[rules]]\nid = \"noise\"\nmatch_type = \"literal\"\npattern = \"heartbeat\"\n\
+                 action = \"ignore\"\n\n[[rules]]\nid = \"unknown\"\nmatch_type = \"regex\"\n\
+                 pattern = \"^\"\nseverity = \"notice\"\n";
+    let mut d = Daemon::start(dir.path(), &config("", &[&log], rules));
+    thread::sleep(Duration::from_millis(300));
+    append(
+        &log,
+        "heartbeat ok\nsomething new\nheartbeat Failed password\n",
+    );
+    let ev = d.event();
+    assert_eq!(
+        (ev["rule"].as_str(), ev["line"].as_str()),
+        (Some("unknown"), Some("something new"))
+    );
+    // "heartbeat Failed password" is ignored before ssh_failed_login sees it.
+    assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
+    d.signal(libc::SIGUSR1);
+    let stats = d.wait_stderr("statistics");
+    assert!(stats.contains("lines_ignored=2 rule_matches=1"), "{stats}");
+    assert!(d.stop().success());
+}

@@ -56,6 +56,8 @@ counters! {
     /// Incomplete trailing lines emitted because their file was truncated,
     /// rotated or deleted before a newline arrived.
     partial_lines_flushed,
+    /// Lines that matched an `ignore` rule.
+    lines_ignored,
     rule_matches,
     events_emitted,
     /// Events dropped because the output queue was full (`on_full = "drop"`).

@@ -210,7 +210,20 @@ struct RawRule {
     enabled: bool,
     match_type: MatchType,
     pattern: String,
-    severity: Severity,
+    severity: Option<Severity>,
+    #[serde(default)]
+    action: Action,
+}
+
+/// What a matching rule does with the line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    /// Emit an event.
+    #[default]
+    Emit,
+    /// Emit nothing and skip all later rules for this line.
+    Ignore,
 }
 
 fn default_true() -> bool {
@@ -239,7 +252,9 @@ pub struct Rule {
     pub description: String,
     pub match_type: MatchType,
     pub pattern: String,
+    /// Unused for `Action::Ignore` rules, which emit nothing.
     pub severity: Severity,
+    pub action: Action,
     pub matcher: Matcher,
 }
 
@@ -251,6 +266,7 @@ impl Rule {
             && self.match_type == other.match_type
             && self.pattern == other.pattern
             && self.severity == other.severity
+            && self.action == other.action
     }
 }
 
@@ -460,6 +476,20 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         } else if !seen_ids.insert(r.id.clone()) {
             problems.push(format!("{label}: duplicate rule id"));
         }
+        let severity = match (r.action, r.severity) {
+            (Action::Emit, Some(s)) => s,
+            (Action::Emit, None) => {
+                problems.push(format!("{label}: missing field `severity`"));
+                Severity::Debug
+            }
+            (Action::Ignore, Some(_)) => {
+                problems.push(format!(
+                    "{label}: an ignore rule emits nothing, so it takes no severity"
+                ));
+                Severity::Debug
+            }
+            (Action::Ignore, None) => Severity::Debug,
+        };
         // Disabled rules are still compiled so that mistakes surface now,
         // not when someone later flips `enabled = true`.
         match compile(r.match_type, &r.pattern) {
@@ -468,15 +498,16 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 description: r.description,
                 match_type: r.match_type,
                 pattern: r.pattern,
-                severity: r.severity,
+                severity,
+                action: r.action,
                 matcher,
             }),
             Ok(_) => disabled_rules += 1,
             Err(msg) => problems.push(format!("{label}: {msg}")),
         }
     }
-    if rules.is_empty() && problems.is_empty() {
-        problems.push("no enabled [[rules]] entries".to_string());
+    if problems.is_empty() && !rules.iter().any(|r| r.action == Action::Emit) {
+        problems.push("no enabled [[rules]] entries that emit events".to_string());
     }
 
     if problems.is_empty() {
@@ -729,6 +760,23 @@ mod tests {
             .replace("\"literal\"", "\"regex\"")
             .replace("Out of memory", r"\\w{1000}\\w{1000}");
         assert!(problems(&text)[0].contains("invalid regex"));
+    }
+
+    #[test]
+    fn ignore_rules_take_no_severity_and_cannot_stand_alone() {
+        let ignore = MINIMAL.replace("severity = \"critical\"", "action = \"ignore\"");
+        let p = problems(&ignore);
+        assert_eq!(p, ["no enabled [[rules]] entries that emit events"]);
+        let both = MINIMAL.replace("severity", "action = \"ignore\"\nseverity");
+        assert!(problems(&both)[0].contains("takes no severity"));
+        let none = MINIMAL.replace("severity = \"critical\"", "");
+        assert!(problems(&none)[0].contains("missing field `severity`"));
+        let ok = format!(
+            "{ignore}\n[[rules]]\nid = \"all\"\nmatch_type = \"regex\"\npattern = \"^\"\nseverity = \"notice\"\n"
+        );
+        let cfg = parse_str(&ok).unwrap();
+        assert_eq!(cfg.rules[0].action, Action::Ignore);
+        assert_eq!(cfg.rules[1].action, Action::Emit);
     }
 
     #[test]

@@ -179,12 +179,37 @@ Globs are not supported in 0.1.0. List each file explicitly.
 | `enabled` | `true` | Disabled rules are still compiled, so mistakes surface immediately. |
 | `match_type` | required | `literal`: case-sensitive substring. `regex`: [Rust regex syntax](https://docs.rs/regex/latest/regex/#syntax). Use `(?i)` for case-insensitive matching. |
 | `pattern` | required | Non-empty, at most 4096 bytes. Regexes are limited to 2 MiB compiled size. Named capture groups (`(?P<src>\S+)`), at most 16 per rule, become the event's `fields`. |
-| `severity` | required | `debug`, `info`, `notice`, `warning`, `error`, `critical`. |
+| `severity` | required for `emit` | `debug`, `info`, `notice`, `warning`, `error`, `critical`. Not allowed for `ignore` rules. |
+| `action` | `"emit"` | `emit`: a match produces an event. `ignore`: a match produces nothing, and no later rule sees the line (counted in `lines_ignored`). |
 
 Rules are compiled once at startup. Every enabled rule is evaluated against
 every line in configuration order, and each matching rule produces its own
-event. Matching works on raw bytes, so lines that are not valid UTF-8 are
-still matched.
+event, until an `ignore` rule matches: evaluation of that line stops there.
+At least one enabled rule must emit events. Matching works on raw bytes, so
+lines that are not valid UTF-8 are still matched.
+
+#### Reporting unknown lines
+
+`ignore` rules and a catch-all at the end report every line that is not
+known to be normal (the logcheck approach):
+
+```toml
+[[rules]]
+id = "cron"
+match_type = "regex"
+pattern = 'CRON\[\d+\]: \(\w+\) CMD'
+action = "ignore"
+
+[[rules]]
+id = "unknown"
+description = "Line not covered by an ignore rule"
+match_type = "regex"
+pattern = "^"          # matches every line
+severity = "notice"
+```
+
+Rule order matters: put the rules that must see every line (for example
+`ssh_failed_login`) before the `ignore` rules, and the catch-all last.
 
 Limits: the configuration file may be at most 1 MiB and must not be
 world-writable.
@@ -397,7 +422,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -412,7 +437,8 @@ retry.
 | `lines_truncated` | Lines cut at `max_line_bytes`. |
 | `bytes_skipped` | Content bytes beyond `max_line_bytes` that were not matched. |
 | `partial_lines_flushed` | Unterminated lines emitted because their file was truncated, rotated or deleted. |
-| `rule_matches` | (line, rule) matches, before rate limiting and deduplication. |
+| `lines_ignored` | Lines that matched an `ignore` rule. |
+| `rule_matches` | (line, rule) matches of emitting rules, before rate limiting and deduplication. |
 | `events_emitted` | Events accepted into the output queue. An event is written unless the output fails or the process is killed first. |
 | `events_dropped` | Events discarded because the queue was full (`on_full = "drop"`), the output had failed, or shutdown interrupted a blocked send. |
 | `events_rate_limited`, `events_deduplicated` | Matches suppressed by `[limits]`. |

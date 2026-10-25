@@ -182,7 +182,7 @@ impl Pipeline {
             max_excerpt,
             ..
         } = self;
-        engine.for_each_match(line.bytes, |rule| {
+        let ignored = engine.for_each_match(line.bytes, |rule| {
             metrics::inc(&metrics.rule_matches);
             let id = &engine.rules()[rule].id;
             match limiter.admit(rule, id, line.bytes, Instant::now()) {
@@ -206,6 +206,9 @@ impl Pipeline {
                 fields: engine.rules()[rule].matcher.fields(line.bytes),
             });
         });
+        if ignored {
+            metrics::inc(&metrics.lines_ignored);
+        }
     }
 }
 
