@@ -1,6 +1,6 @@
 # Unified SemVer policy: Git tags are authoritative; merged PR labels select bump (release:patch|minor|major|none,
-# patch by default). Each release attaches the static Linux x64 binary (musl, runs on any distribution), the systemd
-# unit, the example configuration and their SHA-256 to the GitHub release.
+# patch by default). Each release attaches the static Linux x64 binaries (musl, run on any distribution) of logwizz and
+# logwizz-notify, the systemd units, the example configuration and their SHA-256 to the GitHub release.
 name: release
 on:
   pull_request:
@@ -77,8 +77,11 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/logwizz "dist/logwizz-v$VERSION-linux-x64"
           strip "dist/logwizz-v$VERSION-linux-x64"
           "dist/logwizz-v$VERSION-linux-x64" --version | grep -Fx "logwizz $VERSION"
+          cp target/x86_64-unknown-linux-musl/release/logwizz-notify "dist/logwizz-notify-v$VERSION-linux-x64"
+          strip "dist/logwizz-notify-v$VERSION-linux-x64"
+          "dist/logwizz-notify-v$VERSION-linux-x64" --version | grep -Fx "logwizz-notify $VERSION"
           cp packaging/logwizz.service dist/logwizz.service
-          cp packaging/logwizz-notify packaging/logwizz-notify.service packaging/notify.env.example dist/
+          cp packaging/logwizz-notify.service packaging/notify.env.example dist/
           cp config/logwizz.example.toml dist/logwizz.example.toml
           cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -18,7 +18,7 @@ sudo install -m 0755 "logwizz-v$v-linux-x64" /usr/local/bin/logwizz
 logwizz --version
 ```
 
-For service deployment, use the [systemd guide](docs/REFERENCE.md#deployment-with-systemd). From source, use Rust 1.85 or newer:
+The notifier, `logwizz-notify-v$v-linux-x64`, is in the same release; see [the notification guide](docs/NOTIFICATIONS.md). For service deployment, use the [systemd guide](docs/REFERENCE.md#deployment-with-systemd). From source, use Rust 1.85 or newer (this builds both binaries):
 
 ```bash
 cargo build --release --locked
@@ -60,6 +60,7 @@ logwizz emits a structured event for the matching rule. Use `config/logwizz.exam
 - Monitors configured files and the systemd journal.
 - Matches literal strings or Rust regular expressions.
 - Supports threshold rules for bursts such as SSH brute force, port scans and log floods.
+- Excludes trusted sources (addresses, networks or exact values) per rule.
 - Handles common log rotation, truncation, deletion and recreation cases.
 - Bounds line sizes, queues and detection state to keep resource use predictable.
 - Emits JSON Lines or human-readable events to stdout or stderr.

@@ -36,14 +36,10 @@ jobs:
           systemd-analyze verify /etc/systemd/system/logwizz.service
           systemd-analyze security --offline=yes --threshold=10 /etc/systemd/system/logwizz.service
           test "$(systemctl show --property=SupplementaryGroups --value logwizz.service)" = "logwizz"
-          sudo install -m 0755 packaging/logwizz-notify /usr/bin/logwizz-notify
+          sudo install -m 0755 target/release/logwizz-notify /usr/bin/logwizz-notify
           systemd-analyze verify packaging/logwizz-notify.service
           # The notifier needs network access, so it scores higher (13 = "1.3 OK").
           systemd-analyze security --offline=yes --threshold=20 packaging/logwizz-notify.service
-      - name: Check shell scripts
-        run: shellcheck packaging/logwizz-notify tests/notify/aggregate-smoke.sh
-      - name: Test aggregate notification behavior
-        run: bash tests/notify/aggregate-smoke.sh
       - name: Check versioning policy
         run: bash .github/scripts/semver-next.test.sh
   msrv:

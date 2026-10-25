@@ -1,7 +1,7 @@
 # systemd unit for logwizz-notify: aggregates detections and sends summaries to Telegram, ntfy or a webhook.
 #
 # Needs logwizz.service with format = "json" and syslog_prefix = true, and
-# curl and jq installed. Install the script as /usr/bin/logwizz-notify and the
+# curl installed. Install the binary as /usr/bin/logwizz-notify and the
 # settings as /etc/logwizz/notify.env (mode 0600, see notify.env.example), then:
 #   systemctl daemon-reload && systemctl enable --now logwizz-notify
 #
@@ -19,7 +19,9 @@ EnvironmentFile=/etc/logwizz/notify.env
 ExecStart=/usr/bin/logwizz-notify
 Restart=on-failure
 RestartSec=10s
-TimeoutStopSec=50s
+# On stop, pending summaries are sent for up to 30 s, plus one delivery in
+# progress (curl retries for up to about 45 s); the rest stay on disk.
+TimeoutStopSec=90s
 
 # Identity: reads the journal through systemd-journal, nothing else.
 DynamicUser=yes
@@ -29,12 +31,11 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077
 
-# Filesystem: read-only except the cursor (StateDirectory) and the auth
-# header file (RuntimeDirectory).
+# Filesystem: read-only except the state file with the journal cursor and
+# pending summaries (StateDirectory). Secrets are passed to curl on its
+# standard input and never written to disk.
 StateDirectory=logwizz-notify
 StateDirectoryMode=0700
-RuntimeDirectory=logwizz-notify
-RuntimeDirectoryMode=0700
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

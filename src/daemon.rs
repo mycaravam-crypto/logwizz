@@ -40,7 +40,7 @@ use crate::watcher::Waker;
 /// Runs the daemon until a termination signal or an output failure.
 /// `config_path` is read again on SIGHUP.
 pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
-    let signals = block_signals().map_err(RuntimeError::Startup)?;
+    let signals = block_signals(&HANDLED).map_err(RuntimeError::Startup)?;
 
     let metrics = Arc::new(Metrics::default());
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -334,17 +334,31 @@ const HANDLED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGUSR1, l
 
 /// An initialised signal set. `sigset_t` is plain data, so this is `Send`
 /// without any `unsafe impl`.
-struct SigSet(libc::sigset_t);
+pub(crate) struct SigSet(libc::sigset_t);
 
-/// Blocks the handled signals in the calling thread (and so in every thread
-/// spawned afterwards). Must be called before any other thread exists.
-fn block_signals() -> io::Result<SigSet> {
+impl SigSet {
+    /// Waits for one of the signals in the set.
+    pub(crate) fn wait(&self) -> io::Result<libc::c_int> {
+        let mut sig: libc::c_int = 0;
+        // SAFETY: `self.0` is an initialised sigset_t and `sig` is a valid
+        // out-pointer.
+        let rc = unsafe { libc::sigwait(&self.0, &mut sig) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        Ok(sig)
+    }
+}
+
+/// Blocks `signals` in the calling thread (and so in every thread spawned
+/// afterwards). Must be called before any other thread exists.
+pub(crate) fn block_signals(signals: &[libc::c_int]) -> io::Result<SigSet> {
     // SAFETY: sigset_t is a plain C struct initialised by sigemptyset before
     // use; all pointers passed are valid for the duration of each call.
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
-        for sig in HANDLED {
+        for &sig in signals {
             libc::sigaddset(&mut set, sig);
         }
         let rc = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
@@ -367,15 +381,14 @@ fn spawn_signal_thread(
         .spawn(move || {
             let set = set;
             loop {
-                let mut sig: libc::c_int = 0;
-                // SAFETY: `set` is an initialised sigset_t and `sig` is a valid
-                // out-pointer.
-                let rc = unsafe { libc::sigwait(&set.0, &mut sig) };
-                if rc != 0 {
-                    warn!(error = %io::Error::from_raw_os_error(rc), "sigwait failed");
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
+                let sig = match set.wait() {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        warn!(error = %e, "sigwait failed");
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                };
                 match sig {
                     libc::SIGTERM | libc::SIGINT => {
                         info!(signal = sig, "termination requested");

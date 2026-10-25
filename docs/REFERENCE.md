@@ -11,8 +11,8 @@ explicit memory and queue limits.
 It is deliberately small. It is not a SIEM or a log shipper, and the daemon
 itself has no network access: pipe its output into whatever does that job for
 you (journald, a collector, a script). For alerts, the separate
-[`logwizz-notify`](#notifications) unit forwards events from the journal to a
-webhook or [ntfy](https://ntfy.sh).
+[`logwizz-notify`](#notifications) service summarises events from the journal
+and sends them to Telegram, a webhook or [ntfy](https://ntfy.sh).
 
 To detect port scans (nmap, masscan), SSH brute force, scanner probes and log
 floods, see [docs/DETECTION.md](./DETECTION.md): the firewall logging that
@@ -43,9 +43,9 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 ## Install
 
 Each [GitHub release](https://github.com/mycaravam-crypto/logwizz/releases)
-has a static Linux x64 binary (musl, no runtime dependencies, any
-distribution), the systemd unit, the example configuration, the
-[notifier](#notifications) and `SHA256SUMS.txt`:
+has static Linux x64 binaries (musl, no runtime dependencies, any
+distribution) of logwizz and the [notifier](#notifications), the systemd
+units, the example configuration and `SHA256SUMS.txt`:
 
 ```bash
 v=X.Y.Z   # the release to install
@@ -785,7 +785,7 @@ logwizz's own output.** The namespace has its own retention settings in
 
 ### Notifications
 
-The notifier aggregates detection events by rule and event-time window, then sends summaries through Telegram, ntfy or a webhook. It does not forward raw log lines. Setup, configuration, flush behavior and delivery guarantees are covered in the [notification operations guide](NOTIFICATIONS.md).
+The `logwizz-notify` binary aggregates detection events by rule and event-time window, then sends summaries through Telegram, ntfy or a webhook, naming the most frequent sources. It does not forward raw log lines. Setup, configuration, flush behavior and delivery guarantees are covered in the [notification operations guide](NOTIFICATIONS.md).
 
 ## Security
 
@@ -866,8 +866,10 @@ Layout:
 | `src/event.rs` | Event and severity types, timestamps, excerpts |
 | `src/dispatcher.rs` | Output thread, bounded queue, formats, rate limiting, dedup |
 | `src/daemon.rs` | Signals, statistics, wiring |
+| `src/notify.rs`, `src/notify/` | `logwizz-notify`: journal input, state file, aggregation, curl delivery |
+| `src/bin/logwizz-notify.rs` | The notifier's entry point |
 | `src/metrics.rs` | Atomic counters |
-| `tests/` | Config, reader, rotation, monitoring loop, end-to-end and load tests |
+| `tests/` | Config, reader, rotation, monitoring loop, end-to-end, notifier and load tests |
 | `benches/` | Criterion benchmarks |
 
 ## CI and releases
