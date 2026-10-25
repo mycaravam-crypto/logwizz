@@ -29,7 +29,7 @@ jobs:
           # Fails if the exposure score (0-100 scale; 4 = "0.4 SAFE") exceeds 10.
           systemd-analyze security --offline=yes --threshold=10 packaging/logwizz.service
           # Verify the effective RHEL-family drop-in, including clearing adm.
-          sudo groupadd --system logwizz
+          getent group logwizz >/dev/null || sudo groupadd --system logwizz
           sudo install -D -m 0644 packaging/logwizz.service /etc/systemd/system/logwizz.service
           sudo install -D -m 0644 packaging/rhel/logwizz.conf /etc/systemd/system/logwizz.service.d/rhel.conf
           sudo systemctl daemon-reload
