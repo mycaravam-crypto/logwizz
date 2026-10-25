@@ -9,6 +9,7 @@ state=${STATE_DIRECTORY:-/var/lib/logwizz-notify}
 runtime=${RUNTIME_DIRECTORY:-/run/logwizz-notify}
 cursor_file=$state/cursor
 auth_file=
+endpoint_config=
 telegram_config=
 latest_bucket=0
 die() { echo "logwizz-notify: $*" >&2; exit 2; }
@@ -26,6 +27,7 @@ esac
 for cmd in journalctl curl jq date sha256sum find wc tr; do command -v "$cmd" >/dev/null || die "$cmd not found"; done
 mkdir -p "$state" "$runtime" || die "cannot create state/runtime directory"
 chmod 0700 "$state" "$runtime" 2>/dev/null || true
+if [[ $kind == webhook || $kind == ntfy ]]; then endpoint_config=$runtime/endpoint-curl.conf; printf 'url = "%s"\n' "${NOTIFY_URL}" > "$endpoint_config" || die "cannot write endpoint curl config"; chmod 0600 "$endpoint_config"; fi
 if [[ -n ${NOTIFY_AUTH:-} ]]; then auth_file=$runtime/auth-header; printf 'Authorization: %s\n' "${NOTIFY_AUTH}" > "$auth_file" || die "cannot write auth header"; chmod 0600 "$auth_file"; fi
 if [[ $kind == telegram ]]; then telegram_config=$runtime/telegram-curl.conf; printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "${TELEGRAM_BOT_TOKEN}" > "$telegram_config" || die "cannot write Telegram curl config"; chmod 0600 "$telegram_config"; fi
 curl_opts=(--silent --show-error --fail --max-time 10 --retry 3 --retry-all-errors --retry-delay 1)
@@ -38,8 +40,8 @@ summary=$(jq -c --argjson partial "$partial" 'del(.bucket,.last_cursor,.source_s
 host=$(jq -r '.host' "$file"); rule=$(jq -r '.rule' "$file"); severity=$(jq -r '.severity' "$file")
 message=$(jq -r --argjson partial "$partial" 'def clean: tostring | gsub("[\\r\\n]"; " "); "logwizz alert - " + (.host | clean) + "\nRule: " + (.rule | clean) + (if (.description // "") != "" then "\nDescription: " + (.description | clean) else "" end) + "\nSeverity: " + (.severity | clean) + "\nMatches: " + (.count | tostring) + "\nWindow: " + .window_start + " - " + .window_end + (if (.source // "") != "" then "\nSource: " + (.source | clean) else "" end) + (if $partial then "\nPartial window (shutdown or delayed delivery)" else "" end)' "$file") || return 1
 case $kind in
-webhook) curl "${curl_opts[@]}" -H 'Content-Type: application/json' --data-binary "$summary" "$NOTIFY_URL" >/dev/null ;;
-ntfy) case $severity in critical) priority=5 ;; error|warning) priority=4 ;; notice) priority=3 ;; info) priority=2 ;; *) priority=1 ;; esac; curl "${curl_opts[@]}" -H "Title: logwizz $host: $rule" -H "Priority: $priority" -H "Tags: $severity" --data-binary "$message" "$NOTIFY_URL" >/dev/null ;;
+webhook) curl "${curl_opts[@]}" --config "$endpoint_config" -H 'Content-Type: application/json' --data-binary "$summary" >/dev/null ;;
+ntfy) case $severity in critical) priority=5 ;; error|warning) priority=4 ;; notice) priority=3 ;; info) priority=2 ;; *) priority=1 ;; esac; curl "${curl_opts[@]}" --config "$endpoint_config" -H "Title: logwizz $host: $rule" -H "Priority: $priority" -H "Tags: $severity" --data-binary "$message" >/dev/null ;;
 telegram) response=$(curl "${curl_opts[@]}" --config "$telegram_config" --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=$message" --data-urlencode "disable_web_page_preview=true") || return 1; printf '%s' "$response" | jq -e '.ok == true' >/dev/null || return 1 ;;
 esac
 }
