@@ -30,6 +30,19 @@ impl Severity {
             Severity::Critical => "critical",
         }
     }
+
+    /// syslog(3) priority with the same name, as used by the sd-daemon
+    /// `<N>` line prefix.
+    pub fn syslog_priority(self) -> u8 {
+        match self {
+            Severity::Debug => 7,
+            Severity::Info => 6,
+            Severity::Notice => 5,
+            Severity::Warning => 4,
+            Severity::Error => 3,
+            Severity::Critical => 2,
+        }
+    }
 }
 
 impl fmt::Display for Severity {
@@ -118,6 +131,19 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn syslog_priority_matches_severity_names() {
+        let all = [
+            Severity::Debug,
+            Severity::Info,
+            Severity::Notice,
+            Severity::Warning,
+            Severity::Error,
+            Severity::Critical,
+        ];
+        assert_eq!(all.map(Severity::syslog_priority), [7, 6, 5, 4, 3, 2]);
+    }
 
     fn fmt(secs: u64, micros: u32) -> String {
         let mut s = String::new();
