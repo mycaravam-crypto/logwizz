@@ -34,6 +34,7 @@ use crate::metrics::{self, Metrics};
 use crate::monitor::{Monitor, Stopped};
 use crate::reader::Line;
 use crate::state::{self, Checkpoint, StateWriter};
+use crate::threshold::Thresholds;
 use crate::watcher::Waker;
 
 /// Runs the daemon until a termination signal or an output failure.
@@ -103,6 +104,11 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     let mut pipeline = Pipeline {
         engine: Engine::new(cfg.rules.clone()),
         limiter: Limiter::new(&cfg.limits, cfg.rules.len()),
+        thresholds: Thresholds::new(
+            cfg.rules.len(),
+            cfg.limits.threshold_max_groups,
+            Arc::clone(&metrics),
+        ),
         dispatcher,
         metrics: Arc::clone(&metrics),
         meta,
@@ -166,10 +172,11 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
 }
 
 /// Everything a line passes through on the monitor thread: matching,
-/// limiting and queueing.
+/// thresholds, limiting and queueing.
 struct Pipeline {
     engine: Engine,
     limiter: Limiter,
+    thresholds: Thresholds,
     dispatcher: Dispatcher,
     metrics: Arc<Metrics>,
     meta: Meta,
@@ -181,6 +188,7 @@ impl Pipeline {
         let Pipeline {
             engine,
             limiter,
+            thresholds,
             dispatcher,
             metrics,
             max_excerpt,
@@ -188,8 +196,23 @@ impl Pipeline {
         } = self;
         let ignored = engine.for_each_match(line.bytes, |rule| {
             metrics::inc(&metrics.rule_matches);
-            let id = &engine.rules()[rule].id;
-            match limiter.admit(rule, id, line.bytes, Instant::now()) {
+            let r = &engine.rules()[rule];
+            let now = Instant::now();
+            let fields = r.matcher.fields(line.bytes);
+            let threshold = match &r.threshold {
+                None => None,
+                Some(t) => match thresholds.observe(rule, &r.id, t, file, &fields, now) {
+                    Some(fired) => {
+                        metrics::inc(&metrics.threshold_fired);
+                        Some(Box::new(fired))
+                    }
+                    None => {
+                        metrics::inc(&metrics.threshold_absorbed);
+                        return;
+                    }
+                },
+            };
+            match limiter.admit(rule, &r.id, line.bytes, now) {
                 Admit::Yes => {}
                 Admit::RateLimited => {
                     metrics::inc(&metrics.events_rate_limited);
@@ -207,7 +230,8 @@ impl Pipeline {
                 rule,
                 line: bytes.into(),
                 truncated: line.truncated || cut,
-                fields: engine.rules()[rule].matcher.fields(line.bytes),
+                fields,
+                threshold,
             });
         });
         if ignored {
@@ -243,6 +267,9 @@ fn apply_reload(
         .map(|r| running.rules.iter().position(|old| old.same_definition(r)))
         .collect();
     pipeline.limiter.reconfigure(&new.limits, &kept);
+    pipeline
+        .thresholds
+        .reconfigure(new.limits.threshold_max_groups, &kept);
     pipeline.engine = Engine::new(new.rules.clone());
     pipeline.max_excerpt = new.output.max_excerpt_bytes;
     pipeline.dispatcher.set_policy(&new.output);

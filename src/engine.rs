@@ -83,6 +83,14 @@ impl Matcher {
             .collect()
     }
 
+    /// Index of the capture group called `name`.
+    pub fn group_index(&self, name: &str) -> Option<usize> {
+        match self {
+            Matcher::Literal(_) => None,
+            Matcher::Regex(re) => re.capture_names().position(|n| n == Some(name)),
+        }
+    }
+
     /// Name of capture group `index`, if it is a named group.
     pub fn group_name(&self, index: usize) -> Option<&str> {
         match self {
