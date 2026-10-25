@@ -26,8 +26,9 @@ fn main() -> ExitCode {
 
     if cli.check_config {
         println!(
-            "configuration OK: {} file(s) ({} disabled), {} rule(s) ({} disabled)",
+            "configuration OK: {} file(s), {} glob(s) ({} disabled), {} rule(s) ({} disabled)",
             cfg.files.len(),
+            cfg.globs.len(),
             cfg.disabled_files,
             cfg.rules.len(),
             cfg.disabled_rules,

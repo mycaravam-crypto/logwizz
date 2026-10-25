@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -18,6 +19,7 @@ use serde::Deserialize;
 use crate::engine::{MAX_FIELDS, MatchType, Matcher};
 use crate::error::ConfigError;
 use crate::event::Severity;
+use crate::glob::Pattern;
 
 /// Configuration files larger than this are rejected before parsing.
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -31,6 +33,7 @@ pub const MAX_QUEUE_CAPACITY: usize = 1 << 20;
 pub const MIN_QUEUE_BYTES: usize = 64 * 1024;
 pub const MAX_QUEUE_BYTES: usize = 1 << 30;
 pub const MAX_FILES: usize = 1024;
+pub const MAX_GLOB_FILES: usize = 4096;
 pub const MAX_RULES: usize = 1024;
 pub const MAX_PATTERN_BYTES: usize = 4096;
 pub const MAX_RULE_ID_BYTES: usize = 64;
@@ -125,6 +128,8 @@ pub struct General {
     pub state_file: Option<PathBuf>,
     /// Minimum time between writes of `state_file`.
     pub state_flush_ms: u64,
+    /// Maximum number of files followed for one `[[files]] glob`.
+    pub max_glob_files: usize,
 }
 
 impl Default for General {
@@ -138,6 +143,7 @@ impl Default for General {
             rotation_drain_ms: 5000,
             state_file: None,
             state_flush_ms: 1000,
+            max_glob_files: 256,
         }
     }
 }
@@ -203,7 +209,9 @@ impl Default for Limits {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
-    path: PathBuf,
+    path: Option<PathBuf>,
+    glob: Option<String>,
+    exclude: Option<String>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -315,13 +323,43 @@ impl Rule {
     }
 }
 
+/// A validated `[[files]] glob` entry.
+#[derive(Debug, Clone)]
+pub struct Glob {
+    /// The glob as configured, for messages.
+    pub text: String,
+    /// The directory searched for matches.
+    pub dir: PathBuf,
+    /// Pattern for the names of files in `dir`.
+    pub pattern: Pattern,
+    pub exclude: Option<Pattern>,
+}
+
+impl Glob {
+    /// Whether a file named `name` in `dir` is followed.
+    pub fn matches(&self, name: &[u8]) -> bool {
+        self.pattern.matches(name) && !self.exclude.as_ref().is_some_and(|e| e.matches(name))
+    }
+
+    /// Whether `path` is (or would be) followed for this glob.
+    pub fn matches_path(&self, path: &Path) -> bool {
+        path.parent() == Some(self.dir.as_path())
+            && path
+                .file_name()
+                .is_some_and(|name| self.matches(name.as_bytes()))
+    }
+}
+
 /// A fully validated configuration. Only enabled files and rules are kept.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub general: General,
     pub output: Output,
     pub limits: Limits,
+    /// Files configured with `path`.
     pub files: Vec<PathBuf>,
+    /// Entries configured with `glob`.
+    pub globs: Vec<Glob>,
     pub rules: Vec<Rule>,
     pub disabled_files: usize,
     pub disabled_rules: usize,
@@ -422,6 +460,13 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
     );
     check_range(
         &mut problems,
+        "general.max_glob_files",
+        general.max_glob_files,
+        1,
+        MAX_GLOB_FILES,
+    );
+    check_range(
+        &mut problems,
         "output.queue_capacity",
         output.queue_capacity,
         1,
@@ -479,23 +524,48 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         ));
     }
     let mut seen_paths = HashSet::new();
+    let mut seen_globs = HashSet::new();
     let mut files = Vec::new();
+    let mut globs = Vec::new();
     let mut disabled_files = 0;
     for (i, f) in raw_files.into_iter().enumerate() {
-        let label = format!("files[{i}] ({})", f.path.display());
-        if let Err(msg) = check_path(&f.path) {
-            problems.push(format!("{label}: {msg}"));
-        }
-        if !seen_paths.insert(f.path.clone()) {
-            problems.push(format!("{label}: duplicate path"));
-        }
-        if f.enabled {
-            files.push(f.path);
-        } else {
-            disabled_files += 1;
+        match (f.path, f.glob) {
+            (Some(path), None) => {
+                let label = format!("files[{i}] ({})", path.display());
+                if let Err(msg) = check_path(&path) {
+                    problems.push(format!("{label}: {msg}"));
+                }
+                if f.exclude.is_some() {
+                    problems.push(format!("{label}: 'exclude' requires 'glob'"));
+                }
+                if !seen_paths.insert(path.clone()) {
+                    problems.push(format!("{label}: duplicate path"));
+                }
+                if f.enabled {
+                    files.push(path);
+                } else {
+                    disabled_files += 1;
+                }
+            }
+            (None, Some(text)) => {
+                let label = format!("files[{i}] ({text})");
+                if !seen_globs.insert(text.clone()) {
+                    problems.push(format!("{label}: duplicate glob"));
+                }
+                match check_glob(&text, f.exclude.as_deref()) {
+                    Ok(glob) if f.enabled => globs.push(glob),
+                    Ok(_) => disabled_files += 1,
+                    Err(msg) => problems.push(format!("{label}: {msg}")),
+                }
+            }
+            (Some(path), Some(_)) => problems.push(format!(
+                "files[{i}] ({}): set either 'path' or 'glob', not both",
+                path.display()
+            )),
+            (None, None) => problems.push(format!("files[{i}]: 'path' or 'glob' is required")),
         }
     }
-    if files.is_empty() {
+    if files.is_empty() && globs.is_empty() {
         problems.push("no enabled [[files]] entries".to_string());
     }
     if let Some(state) = &general.state_file {
@@ -503,7 +573,14 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         if let Err(msg) = check_path(state) {
             problems.push(format!("{label}: {msg}"));
         }
-        if seen_paths.contains(state) {
+        let mut tmp = state.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        if seen_paths.contains(state)
+            || globs
+                .iter()
+                .any(|g| g.matches_path(state) || g.matches_path(&tmp))
+        {
             problems.push(format!("{label}: must not be a monitored file"));
         }
     }
@@ -576,6 +653,7 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
             output,
             limits,
             files,
+            globs,
             rules,
             disabled_files,
             disabled_rules,
@@ -625,6 +703,39 @@ fn check_path(path: &Path) -> Result<(), String> {
         return Err("path must name a file".to_string());
     }
     Ok(())
+}
+
+/// A glob must be a valid path whose wildcards are all in the final
+/// component, so that one non-recursive directory listing finds every match.
+fn check_glob(text: &str, exclude: Option<&str>) -> Result<Glob, String> {
+    let path = Path::new(text);
+    check_path(path)?;
+    // check_path guarantees both parts exist.
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err("glob must name files".to_string());
+    };
+    if dir
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .any(|&b| b == b'*' || b == b'?')
+    {
+        return Err("wildcards are allowed in the final path component only".to_string());
+    }
+    // `name` came from a `&str`, so it is valid UTF-8.
+    let pattern = Pattern::new(&name.to_string_lossy())?;
+    if !pattern.has_wildcard() {
+        return Err("glob has no '*' or '?'; use 'path' for a single file".to_string());
+    }
+    let exclude = exclude
+        .map(|e| Pattern::new(e).map_err(|msg| format!("exclude: {msg}")))
+        .transpose()?;
+    Ok(Glob {
+        text: text.to_string(),
+        dir: dir.to_path_buf(),
+        pattern,
+        exclude,
+    })
 }
 
 fn check_rule_id(id: &str) -> Result<(), String> {
@@ -1035,6 +1146,76 @@ mod tests {
     fn no_files_or_rules_is_rejected() {
         let p = problems("");
         assert!(p.iter().any(|m| m.contains("no enabled [[files]]")));
+    }
+
+    #[test]
+    fn glob_entries_are_parsed() {
+        let text = MINIMAL.replace(
+            "path = \"/var/log/syslog\"",
+            "glob = \"/var/log/app/*.log*\"\nexclude = \"*.log.*\"",
+        );
+        let cfg = parse_str(&format!("[general]\nmax_glob_files = 8\n{text}")).unwrap();
+        assert!(cfg.files.is_empty());
+        assert_eq!(cfg.general.max_glob_files, 8);
+        let g = &cfg.globs[0];
+        assert_eq!(g.dir, Path::new("/var/log/app"));
+        assert!(g.matches(b"api.log"));
+        assert!(!g.matches(b"api.log.1"), "excluded");
+        assert!(g.matches_path(Path::new("/var/log/app/x.log")));
+        assert!(!g.matches_path(Path::new("/var/log/x.log")));
+        assert_eq!(parse_str(MINIMAL).unwrap().general.max_glob_files, 256);
+    }
+
+    #[test]
+    fn invalid_globs_are_rejected() {
+        for (glob, why) in [
+            ("/var/log/**", "'**'"),
+            ("/var/*/app.log", "final path component only"),
+            ("/var/log/app.log", "no '*' or '?'"),
+            ("/var/log/[ab].log", "only the '*' and '?'"),
+            ("var/log/*.log", "must be absolute"),
+            ("/var/log/../*.log", "'..'"),
+        ] {
+            let text = MINIMAL.replace("path = \"/var/log/syslog\"", &format!("glob = {glob:?}"));
+            let p = problems(&text);
+            assert!(p[0].contains(why), "{glob}: {p:?}");
+        }
+        let both = MINIMAL.replace(
+            "path = \"/var/log/syslog\"",
+            "path = \"/x\"\nglob = \"/var/*.log\"",
+        );
+        assert!(problems(&both)[0].contains("not both"));
+        let neither = MINIMAL.replace("path = \"/var/log/syslog\"", "enabled = true");
+        assert!(problems(&neither)[0].contains("'path' or 'glob' is required"));
+        let stray = MINIMAL.replace(
+            "path = \"/var/log/syslog\"",
+            "path = \"/x\"\nexclude = \"*.1\"",
+        );
+        assert!(problems(&stray)[0].contains("'exclude' requires 'glob'"));
+        let bad_exclude = MINIMAL.replace(
+            "path = \"/var/log/syslog\"",
+            "glob = \"/var/*.log\"\nexclude = \"a/b\"",
+        );
+        assert!(problems(&bad_exclude)[0].contains("exclude: pattern must not contain '/'"));
+        let dup = format!("{MINIMAL}[[files]]\nglob = \"/a/*\"\n[[files]]\nglob = \"/a/*\"\n");
+        assert!(problems(&dup).iter().any(|m| m.contains("duplicate glob")));
+        let limit = format!("[general]\nmax_glob_files = 0\n{MINIMAL}");
+        assert!(problems(&limit)[0].starts_with("general.max_glob_files"));
+    }
+
+    #[test]
+    fn state_file_must_not_match_a_glob() {
+        let text = MINIMAL.replace(
+            "path = \"/var/log/syslog\"",
+            "glob = \"/var/lib/logwizz/*\"",
+        );
+        let text = format!("[general]\nstate_file = \"/var/lib/logwizz/offsets.json\"\n{text}");
+        assert!(problems(&text)[0].contains("must not be a monitored file"));
+        // Its temporary file must not match either.
+        let tmp = text.replace("/var/lib/logwizz/*\"", "/var/lib/logwizz/*.tmp\"");
+        assert!(problems(&tmp)[0].contains("must not be a monitored file"));
+        let ok = text.replace("/var/lib/logwizz/*\"", "/var/lib/logwizz/*.log\"");
+        assert!(parse_str(&ok).is_ok());
     }
 
     #[test]

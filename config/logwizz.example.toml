@@ -28,6 +28,9 @@ stats_interval_secs = 0
 #state_file = "/var/lib/logwizz/offsets.json"
 # Minimum time between writes of the state file.
 state_flush_ms = 1000
+# Maximum number of files followed for one [[files]] glob entry. Further
+# matches are counted in glob_matches_refused and not followed.
+max_glob_files = 256
 
 [output]
 # "json" (JSON Lines) or "human".
@@ -72,6 +75,15 @@ enabled = true
 
 [[files]]
 path = "/var/log/messages"
+enabled = false
+
+# A glob follows every matching file in one directory, including files that
+# appear later (read from the beginning). Wildcards: "*" and "?", in the
+# final path component only. Rotated names such as "app.log.1" do not match
+# "*.log"; with a broader pattern, use "exclude" to keep them out.
+[[files]]
+glob = "/var/log/app/*.log"
+#exclude = "*.old.log"
 enabled = false
 
 [[rules]]

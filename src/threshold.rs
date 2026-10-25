@@ -10,6 +10,8 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -92,15 +94,14 @@ impl Thresholds {
         rule: usize,
         rule_id: &str,
         t: &Threshold,
-        file: usize,
+        file: &Path,
         fields: &[(usize, Box<[u8]>)],
         now: Instant,
     ) -> Option<Fired> {
         let field = |i: usize| fields.iter().find(|(g, _)| *g == i).map(|(_, v)| &**v);
-        let file_key = file.to_le_bytes();
         let (key, reported): (&[u8], bool) = match t.group_by {
             GroupBy::All => (b"", false),
-            GroupBy::File => (&file_key, false),
+            GroupBy::File => (file.as_os_str().as_bytes(), false),
             // A match where the group did not participate is not counted.
             GroupBy::Capture(i) => (field(i)?, true),
         };
@@ -222,7 +223,7 @@ mod tests {
         let m = Arc::new(Metrics::default());
         let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::Capture(1), None, 3);
-        let mut obs = |s, src| th.observe(0, "r", &t, 0, &f(src, "22"), secs(t0, s));
+        let mut obs = |s, src| th.observe(0, "r", &t, Path::new("a"), &f(src, "22"), secs(t0, s));
         assert_eq!(obs(0, "a"), None);
         assert_eq!(obs(1, "a"), None);
         assert_eq!(obs(1, "b"), None, "other group");
@@ -242,7 +243,7 @@ mod tests {
         let m = Arc::new(Metrics::default());
         let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::Capture(1), Some(2), 3);
-        let mut obs = |dpt| th.observe(0, "r", &t, 0, &f("a", dpt), t0);
+        let mut obs = |dpt| th.observe(0, "r", &t, Path::new("a"), &f("a", dpt), t0);
         for _ in 0..100 {
             assert_eq!(obs("22"), None, "same port again and again");
         }
@@ -255,7 +256,7 @@ mod tests {
         let m = Arc::new(Metrics::default());
         let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::All, None, 2);
-        let mut obs = |s| th.observe(0, "r", &t, 0, &[], secs(t0, s));
+        let mut obs = |s| th.observe(0, "r", &t, Path::new("a"), &[], secs(t0, s));
         assert_eq!(obs(0), None);
         assert_eq!(obs(10), None, "first match of a new window");
         assert_eq!(obs(11).map(|f| (f.group, f.count)), Some((None, 2)));
@@ -266,12 +267,19 @@ mod tests {
         let m = Arc::new(Metrics::default());
         let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::File, None, 2);
-        assert_eq!(th.observe(0, "r", &t, 0, &[], t0), None);
-        assert_eq!(th.observe(0, "r", &t, 1, &[], t0), None, "other file");
-        assert!(th.observe(0, "r", &t, 0, &[], t0).is_some());
+        assert_eq!(th.observe(0, "r", &t, Path::new("a"), &[], t0), None);
+        assert_eq!(
+            th.observe(0, "r", &t, Path::new("b"), &[], t0),
+            None,
+            "other file"
+        );
+        assert!(th.observe(0, "r", &t, Path::new("a"), &[], t0).is_some());
         // A match without the grouping capture is not counted.
         let t = threshold(GroupBy::Capture(5), None, 1);
-        assert_eq!(th.observe(0, "r", &t, 0, &f("a", "1"), t0), None);
+        assert_eq!(
+            th.observe(0, "r", &t, Path::new("a"), &f("a", "1"), t0),
+            None
+        );
     }
 
     #[test]
@@ -281,19 +289,25 @@ mod tests {
         let t = threshold(GroupBy::Capture(1), None, 2);
         let ms = |n: u64| t0 + Duration::from_millis(n);
         for i in 0..16 {
-            th.observe(0, "r", &t, 0, &f(&i.to_string(), "1"), ms(i));
+            th.observe(0, "r", &t, Path::new("a"), &f(&i.to_string(), "1"), ms(i));
         }
         // Full, nothing idle: the least recently seen eighth (2 groups) goes.
-        assert_eq!(th.observe(0, "r", &t, 0, &f("new", "1"), ms(16)), None);
+        assert_eq!(
+            th.observe(0, "r", &t, Path::new("a"), &f("new", "1"), ms(16)),
+            None
+        );
         assert_eq!(m.snapshot().threshold_evictions, 2);
         assert_eq!(th.tables[0].groups.len(), 15);
         assert!(!th.tables[0].groups.contains_key(&b"0"[..]));
         assert!(!th.tables[0].groups.contains_key(&b"1"[..]));
-        assert!(th.observe(0, "r", &t, 0, &f("new", "1"), ms(17)).is_some());
-        th.observe(0, "r", &t, 0, &f("x", "1"), ms(18));
+        assert!(
+            th.observe(0, "r", &t, Path::new("a"), &f("new", "1"), ms(17))
+                .is_some()
+        );
+        th.observe(0, "r", &t, Path::new("a"), &f("x", "1"), ms(18));
         // Once their windows are over, all idle groups are dropped at once;
         // "new" is in its cooldown and stays.
-        th.observe(0, "r", &t, 0, &f("late", "1"), secs(t0, 30));
+        th.observe(0, "r", &t, Path::new("a"), &f("late", "1"), secs(t0, 30));
         assert_eq!(m.snapshot().threshold_evictions, 2 + 15);
         assert_eq!(th.tables[0].groups.len(), 2);
     }
@@ -309,10 +323,10 @@ mod tests {
         let m = Arc::new(Metrics::default());
         let (mut th, t0) = (Thresholds::new(2, 100, Arc::clone(&m)), Instant::now());
         let t = threshold(GroupBy::All, None, 2);
-        th.observe(1, "r", &t, 0, &[], t0);
+        th.observe(1, "r", &t, Path::new("a"), &[], t0);
         // Rule 1 moves to index 0, a new rule takes index 1.
         th.reconfigure(100, &[Some(1), None]);
-        assert!(th.observe(0, "r", &t, 0, &[], t0).is_some());
-        assert_eq!(th.observe(1, "r", &t, 0, &[], t0), None);
+        assert!(th.observe(0, "r", &t, Path::new("a"), &[], t0).is_some());
+        assert_eq!(th.observe(1, "r", &t, Path::new("a"), &[], t0), None);
     }
 }
