@@ -13,6 +13,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write # one review with inline comments; never approves or requests changes
+      actions: read # restore the previous review checkpoint, so reruns only review new commits
     uses: mycaravam-crypto/smartwizz/.github/workflows/review.yml@d7399027469af149e9d382400520e24db4bbd0e0 # main 2026-10-22
     with:
       fail-on: high
