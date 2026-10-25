@@ -34,7 +34,7 @@ save_cursor() { local value=$1 tmp="$cursor_file.tmp.$$"; printf '%s\n' "$value"
 pending_count() { find "$state" -maxdepth 1 -type f -name 'agg-*.json' -print | wc -l | tr -d ' '; }
 send_summary() {
 local file=$1 partial=$2 summary message host rule severity priority response
-summary=$(jq -c --argjson partial "$partial" 'del(.bucket,.last_cursor,.source_seen) | .schema="logwizz.notification/v1" | .partial=$partial' "$file") || return 1
+summary=$(jq -c --argjson partial "$partial" 'del(.bucket,.last_cursor,.source_seen,.retry_count,.retry_after) | .schema="logwizz.notification/v1" | .partial=$partial' "$file") || return 1
 host=$(jq -r '.host' "$file"); rule=$(jq -r '.rule' "$file"); severity=$(jq -r '.severity' "$file")
 message=$(jq -r --argjson partial "$partial" 'def clean: tostring | gsub("[\\r\\n]"; " "); "logwizz alert - " + (.host | clean) + "\nRule: " + (.rule | clean) + (if (.description // "") != "" then "\nDescription: " + (.description | clean) else "" end) + "\nSeverity: " + (.severity | clean) + "\nMatches: " + (.count | tostring) + "\nWindow: " + .window_start + " - " + .window_end + (if (.source // "") != "" then "\nSource: " + (.source | clean) else "" end) + (if $partial then "\nPartial window (shutdown or delayed delivery)" else "" end)' "$file") || return 1
 case $kind in
@@ -43,8 +43,19 @@ ntfy) case $severity in critical) priority=5 ;; error|warning) priority=4 ;; not
 telegram) response=$(curl "${curl_opts[@]}" --config "$telegram_config" --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=$message" --data-urlencode "disable_web_page_preview=true") || return 1; printf '%s' "$response" | jq -e '.ok == true' >/dev/null || return 1 ;;
 esac
 }
-flush_file() { local file=$1 partial=$2; if send_summary "$file" "$partial"; then rm -f -- "$file"; return 0; fi; log "delivery failed; summary retained for retry"; return 1; }
-flush_due() { local now file bucket failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; if (( bucket + window <= now )); then flush_file "$file" false || failed=1; fi; done; return "$failed"; }
+flush_file() {
+  local file=$1 partial=$2 count delay retry_after tmp
+  if send_summary "$file" "$partial"; then rm -f -- "$file"; return 0; fi
+  count=$(jq -r '.retry_count // 0' "$file" 2>/dev/null) || count=0
+  if (( count > 7 )); then delay=300; else delay=$(( 2 ** (count + 1) )); (( delay > 300 )) && delay=300; fi
+  retry_after=$(( $(date -u +%s) + delay ))
+  tmp="$file.tmp.$"
+  if jq --argjson count "$((count + 1))" --argjson retry_after "$retry_after" '.retry_count=$count | .retry_after=$retry_after' "$file" > "$tmp"; then mv -f "$tmp" "$file"; else rm -f "$tmp"; fi
+  log "delivery failed; summary retained for retry in about ${delay}s"
+  return 1
+}
+flush_due() { local now file bucket failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; retry_after=$(jq -r '.retry_after // 0' "$file") || retry_after=0
+    if (( bucket + window <= now && retry_after <= now )); then flush_file "$file" false || failed=1; fi; done; return "$failed"; }
 flush_all() { local now file bucket partial failed=0; now=$(date -u +%s); for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { log "invalid aggregate state"; failed=1; continue; }; partial=false; (( bucket + window > now )) && partial=true; flush_file "$file" "$partial" || failed=1; done; return "$failed"; }
 flush_progress() { local file bucket failed=0; for file in "$state"/agg-*.json; do [[ -f $file ]] || continue; bucket=$(jq -er '.bucket' "$file") || { failed=1; continue; }; if (( bucket < latest_bucket )); then flush_file "$file" false || failed=1; fi; done; return "$failed"; }
 record_event() {
