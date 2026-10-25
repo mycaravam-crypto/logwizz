@@ -1,0 +1,28 @@
+[Unit]
+Description=Logwizz optional Fail2ban event bridge
+After=systemd-journald.service logwizz.service
+Wants=logwizz.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+SupplementaryGroups=systemd-journal
+LogsDirectory=logwizz
+LogsDirectoryMode=0750
+ExecStart=/usr/local/libexec/logwizz-fail2ban-bridge
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryMax=32M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

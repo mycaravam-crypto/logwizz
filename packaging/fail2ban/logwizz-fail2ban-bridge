@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Forward selected Logwizz journal events to a Fail2ban-friendly log.
+
+This optional adapter is deliberately outside the Logwizz Rust daemon.
+It reads the dedicated systemd journal namespace and writes only validated,
+explicitly eligible source-IP events.
+"""
+import ipaddress
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+OUTPUT = Path("/var/log/logwizz/fail2ban.log")
+ELIGIBLE_RULES = {
+    "port_scan",
+    "fast_scan",
+    "tcp_flag_scan",
+    "ssh_bruteforce",
+    "ssh_probe",
+    "scanner_user_agent",
+}
+
+
+def format_event(raw: str) -> str | None:
+    """Return one normalized Fail2ban line for an eligible event, else None."""
+    try:
+        event = json.loads(raw)
+        if not isinstance(event, dict):
+            return None
+        rule = event.get("rule")
+        if rule not in ELIGIBLE_RULES:
+            return None
+        fields = event.get("fields")
+        src = fields.get("src") if isinstance(fields, dict) else None
+        if not isinstance(src, str):
+            return None
+        address = ipaddress.ip_address(src)
+    except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        return None
+    return f"logwizz rule={rule} src={address.compressed}"
+
+
+def main() -> int:
+    OUTPUT.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    try:
+        with OUTPUT.open("a", encoding="utf-8") as out:
+            OUTPUT.chmod(0o640)
+            cmd = [
+                "journalctl", "--namespace=logwizz", "--unit=logwizz.service",
+                "--output=cat", "--follow", "--since=now",
+            ]
+            with subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=sys.stderr,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+            ) as proc:
+                assert proc.stdout is not None
+                for raw in proc.stdout:
+                    line = format_event(raw)
+                    if line is not None:
+                        out.write(line + "\n")
+                        out.flush()
+                return proc.wait()
+    except OSError as exc:
+        print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
