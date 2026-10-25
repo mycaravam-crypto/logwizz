@@ -22,6 +22,25 @@ ELIGIBLE_RULES = {
 }
 
 
+def format_event(raw: str) -> str | None:
+    """Return one normalized Fail2ban line for an eligible event, else None."""
+    try:
+        event = json.loads(raw)
+        if not isinstance(event, dict):
+            return None
+        rule = event.get("rule")
+        if rule not in ELIGIBLE_RULES:
+            return None
+        fields = event.get("fields")
+        src = fields.get("src") if isinstance(fields, dict) else None
+        if not isinstance(src, str):
+            return None
+        address = ipaddress.ip_address(src)
+    except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        return None
+    return f"logwizz rule={rule} src={address.compressed}"
+
+
 def main() -> int:
     OUTPUT.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
     try:
@@ -37,23 +56,10 @@ def main() -> int:
             ) as proc:
                 assert proc.stdout is not None
                 for raw in proc.stdout:
-                    try:
-                        event = json.loads(raw)
-                        if not isinstance(event, dict):
-                            continue
-                        rule = event.get("rule")
-                        if rule not in ELIGIBLE_RULES:
-                            continue
-                        fields = event.get("fields")
-                        src = fields.get("src") if isinstance(fields, dict) else None
-                        if not isinstance(src, str):
-                            continue
-                        address = ipaddress.ip_address(src)
-                    except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
-                        continue
-
-                    out.write(f"logwizz rule={rule} src={address.compressed}\n")
-                    out.flush()
+                    line = format_event(raw)
+                    if line is not None:
+                        out.write(line + "\n")
+                        out.flush()
                 return proc.wait()
     except OSError as exc:
         print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
