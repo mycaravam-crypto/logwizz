@@ -40,7 +40,7 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectProc=invisible
-ProcSubset=pid
+# No ProcSubset=pid: journalctl reads /proc/sys/kernel/random/boot_id.
 
 # Kernel and system interfaces
 ProtectKernelTunables=yes
