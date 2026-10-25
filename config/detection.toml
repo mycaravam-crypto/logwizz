@@ -123,6 +123,8 @@ pattern = "^"
 severity = "warning"
 [rules.threshold]
 group_by = "file"
-count = 5000                   # tune to a few times your normal peak per minute
+# Starting point only, tune it: a few times this host's normal peak lines
+# per minute in one file (e.g. from `wc -l` over a busy minute).
+count = 5000
 window_secs = 60
 cooldown_secs = 600

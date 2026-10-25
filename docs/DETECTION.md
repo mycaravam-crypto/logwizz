@@ -32,8 +32,9 @@ it with `nft -f /etc/nftables.d/logwizz.nft`:
 
 ```nft
 table inet logwizz {
-	# Ports that really listen here. Connections to them are normal traffic
-	# and are not logged.
+	# EXAMPLE VALUES, replace them: the ports that really listen on this
+	# host (`ss -tulnp`). Connections to them are normal traffic and are not
+	# logged; a listening port missing here makes its clients look like scans.
 	set open_tcp { type inet_service; elements = { 22, 80, 443 } }
 	set open_udp { type inet_service; elements = { 53, 123 } }
 
@@ -82,8 +83,9 @@ iptables -A INPUT -p tcp --syn -m conntrack --ctstate NEW -m multiport ! --dport
   -m limit --limit 200/s --limit-burst 400 -j LOG --log-prefix "logwizz-drop: "
 ```
 
-The last rule must come after your `ACCEPT` rules for open ports, or use the
-`! --dports` list as shown. Repeat with `ip6tables` for IPv6.
+Replace `22,80,443` with the ports that listen on this host (`ss -tulnp`),
+as for `open_tcp` above. The last rule must come after your `ACCEPT` rules
+for open ports, or use the `! --dports` list as shown. Repeat with `ip6tables` for IPv6.
 
 ### Where the lines end up
 

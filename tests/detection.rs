@@ -112,3 +112,64 @@ fn port_scan_fires_once_per_source() {
     }
     assert_eq!(fired, [("203.0.113.66".to_string(), 20)]);
 }
+
+#[test]
+fn every_detector_fires_at_its_count_and_then_cools_down() {
+    let cfg = detection();
+    let m = Arc::new(Metrics::default());
+    let mut th = Thresholds::new(cfg.rules.len(), cfg.limits.threshold_max_groups, m);
+    let file = Path::new("/var/log/test.log");
+    // A line for each rule; `{n}` makes distinct values where the rule counts them.
+    let lines = [
+        (
+            "port_scan",
+            "kernel: logwizz-drop: IN=eth0 SRC=203.0.113.1 DST=198.51.100.1 PROTO=TCP DPT={n} SYN",
+        ),
+        (
+            "fast_scan",
+            "kernel: logwizz-drop: IN=eth0 SRC=203.0.113.2 DST=198.51.100.1 PROTO=TCP DPT={n} SYN",
+        ),
+        (
+            "tcp_flag_scan",
+            "kernel: logwizz-badflags: IN=eth0 SRC=203.0.113.3 DST=198.51.100.1 PROTO=TCP DPT={n}",
+        ),
+        (
+            "ssh_bruteforce",
+            "sshd[1]: Failed password for root from 192.0.2.4 port {n} ssh2",
+        ),
+        (
+            "ssh_probe",
+            "sshd[1]: banner exchange: Connection from 192.0.2.5 port {n}: invalid format",
+        ),
+        (
+            "scanner_user_agent",
+            "192.0.2.6 - - \"GET /{n} HTTP/1.1\" 404 1 \"-\" \"sqlmap/1.8\"",
+        ),
+        ("log_flood", "anything {n}"),
+    ];
+    let t0 = Instant::now();
+    for (id, template) in lines {
+        let i = cfg.rules.iter().position(|r| r.id == id).unwrap();
+        let rule = &cfg.rules[i];
+        let t = rule.threshold.as_ref().unwrap();
+        let mut observe = |n: u32, at: Instant| {
+            let line = template.replace("{n}", &n.to_string());
+            assert!(rule.matcher.is_match(line.as_bytes()), "{id}: {line}");
+            let fields = rule.matcher.fields(line.as_bytes());
+            th.observe(i, id, t, file, &fields, at)
+        };
+        for n in 1..t.count {
+            assert!(observe(n, t0).is_none(), "{id} fired early at {n}");
+        }
+        let fired = observe(t.count, t0).unwrap_or_else(|| panic!("{id} did not fire"));
+        assert_eq!(fired.count, t.count, "{id}");
+        // Silent for the cooldown, however many more matches arrive.
+        let during = t0 + t.cooldown - std::time::Duration::from_millis(1);
+        for n in 0..t.count * 2 {
+            assert!(
+                observe(10_000 + n, during).is_none(),
+                "{id} fired in its cooldown"
+            );
+        }
+    }
+}
