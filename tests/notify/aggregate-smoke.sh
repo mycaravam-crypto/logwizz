@@ -6,7 +6,17 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/state-webhook" "$tmp/runtime-webhook" "$tmp/state-telegram" "$tmp/runtime-telegram"
 cat > "$tmp/bin/journalctl" <<'MOCK'
 #!/bin/sh
-cat "$JOURNAL_FIXTURE"
+cursor=
+for arg do case "$arg" in --after-cursor=*) cursor=${arg#--after-cursor=} ;; esac; done
+seen=0
+while IFS= read -r line; do
+  if [ -n "$cursor" ] && [ "$seen" -eq 0 ]; then
+    current=$(printf '%s' "$line" | jq -r '.__CURSOR')
+    if [ "$current" = "$cursor" ]; then seen=1; fi
+    continue
+  fi
+  printf '%s\n' "$line"
+done < "$JOURNAL_FIXTURE"
 MOCK
 cat > "$tmp/bin/curl" <<'MOCK'
 #!/bin/sh
@@ -22,6 +32,7 @@ while [ "$#" -gt 0 ]; do
 done
 if [ -n "$body" ]; then printf '%s\n' "$body" >> "$CAPTURE_FILE"; fi
 if [ -n "$text" ]; then printf '%s\n' "$text" >> "$CAPTURE_FILE"; printf '{"ok":true}\n'; fi
+if [ "${CURL_FAIL:-0}" = 1 ]; then exit 22; fi
 exit 0
 MOCK
 chmod +x "$tmp/bin/journalctl" "$tmp/bin/curl"
@@ -55,4 +66,26 @@ grep -F 'Matches: 3' "$tmp/telegram.txt" >/dev/null
 grep -F 'Rule: ssh_failed_login' "$tmp/telegram.txt" >/dev/null
 if grep -F 'RAW-SECRET-SHOULD-NOT-LEAVE-HOST' "$tmp/telegram.txt"; then echo "raw log content leaked into Telegram summary" >&2; exit 1; fi
 if grep -F '123456:ABC_def-123' "$tmp/telegram.args"; then echo "Telegram token leaked into curl arguments" >&2; exit 1; fi
+
+# Failed delivery must retain the aggregate and cursor; a restart retries the
+# stored summary instead of recounting already-consumed journal entries.
+mkdir -p "$tmp/state-failure" "$tmp/runtime-failure"
+set +e
+PATH="$tmp/bin:$PATH" JOURNAL_FIXTURE="$tmp/events.jsonl" CAPTURE_FILE="$tmp/failure.jsonl" CURL_ARGS_FILE="$tmp/failure.args" STATE_DIRECTORY="$tmp/state-failure" RUNTIME_DIRECTORY="$tmp/runtime-failure" CURL_FAIL=1 NOTIFY_KIND=webhook NOTIFY_URL=https://example.invalid/logwizz NOTIFY_WINDOW_SECS=60 bash "$root/packaging/logwizz-notify"
+status=$?
+set -e
+[[ $status -eq 1 ]] || { echo "expected failed delivery to leave notifier nonzero" >&2; exit 1; }
+[[ -s "$tmp/state-failure/cursor" ]] || { echo "journal cursor was not persisted" >&2; exit 1; }
+aggregate=$(find "$tmp/state-failure" -maxdepth 1 -name 'agg-*.json' -print -quit)
+[[ -n "$aggregate" ]] || { echo "failed summary was not retained" >&2; exit 1; }
+jq -e '.count == 3 and (.retry_after > 0)' "$aggregate" >/dev/null
+rm -f "$tmp/retry.jsonl"
+set +e
+PATH="$tmp/bin:$PATH" JOURNAL_FIXTURE="$tmp/events.jsonl" CAPTURE_FILE="$tmp/retry.jsonl" CURL_ARGS_FILE="$tmp/retry.args" STATE_DIRECTORY="$tmp/state-failure" RUNTIME_DIRECTORY="$tmp/runtime-failure" NOTIFY_KIND=webhook NOTIFY_URL=https://example.invalid/logwizz NOTIFY_WINDOW_SECS=60 bash "$root/packaging/logwizz-notify"
+status=$?
+set -e
+[[ $status -eq 1 ]] || { echo "expected notifier exit 1 after retry stream EOF, got $status" >&2; exit 1; }
+[[ $(wc -l < "$tmp/retry.jsonl") -eq 1 ]] || { echo "expected one retried aggregate" >&2; exit 1; }
+jq -e '.count == 3 and .rule == "ssh_failed_login"' "$tmp/retry.jsonl" >/dev/null
+
 echo "aggregate notification smoke tests passed"
