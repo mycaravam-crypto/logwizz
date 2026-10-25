@@ -84,6 +84,43 @@ else
   res journal_priority FAIL "LWZ-SYSLOG=$(prio LWZ-SYSLOG) LWZ-AUTH=$(prio LWZ-AUTH)"
 fi
 
+# 3c. logwizz-notify: warning events reach a local webhook once, info events do
+# not, and a restart resumes at the saved cursor.
+command -v jq >/dev/null || { apt-get update -q && apt-get install -qy jq; } >/dev/null 2>&1
+install -m 0755 "$P/logwizz-notify" /usr/bin/logwizz-notify
+install -m 0644 "$P/logwizz-notify.service" /etc/systemd/system/
+printf 'NOTIFY_URL=http://127.0.0.1:8099/\nNOTIFY_KIND=webhook\n' > /etc/logwizz/notify.env
+chmod 0600 /etc/logwizz/notify.env
+python3 - /root/sink.txt <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(s):
+        body = s.rfile.read(int(s.headers["Content-Length"]))
+        with open(sys.argv[1], "ab") as f: f.write(body + b"\n")
+        s.send_response(200); s.end_headers()
+    def log_message(*a): pass
+http.server.HTTPServer(("127.0.0.1", 8099), H).serve_forever()
+PY
+SINK=$!
+systemd-analyze verify /etc/systemd/system/logwizz-notify.service || res notify_verify FAIL
+systemctl daemon-reload; systemctl start logwizz-notify; sleep 2
+sunk() { grep -cF -- "$1" /root/sink.txt 2>/dev/null; }
+wait_sunk() { local t=0; while (( t < 100 )); do [[ $(sunk "$1") -ge 1 ]] && return 0; sleep 0.1; t=$((t+1)); done; return 1; }
+logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY1 from 192.0.2.1"
+echo "LWZ-T0 info event, below the notify threshold" >> /var/log/lwtest.log
+wait_sunk LWZ-NOTIFY1
+systemctl restart logwizz-notify; sleep 2
+logger -p auth.notice "Failed password for invalid user LWZ-NOTIFY2 from 192.0.2.1"
+wait_sunk LWZ-NOTIFY2
+if [[ $(sunk LWZ-NOTIFY1) == 1 && $(sunk LWZ-NOTIFY2) == 1 && $(sunk LWZ-T0) == 0 ]] &&
+   jq -e 'select(.rule == "ssh_failed_login")' < <(grep -F LWZ-NOTIFY2 /root/sink.txt) >/dev/null; then
+  res notify PASS "warning events posted once across a restart, info filtered"
+else
+  res notify FAIL "NOTIFY1=$(sunk LWZ-NOTIFY1) NOTIFY2=$(sunk LWZ-NOTIFY2) T0=$(sunk LWZ-T0) $(systemctl status logwizz-notify --no-pager | tail -5 | tr '\n' ';')"
+fi
+res notify_security PASS "$(systemd-analyze security logwizz-notify --no-pager | tail -1)"
+systemctl stop logwizz-notify; kill "$SINK"
+
 # 4. Test file: append, rename+create rotation with a late write to the old file.
 echo "LWZ-T1 append" >> /var/log/lwtest.log
 expect_event append LWZ-T1 lwtest /var/log/lwtest.log

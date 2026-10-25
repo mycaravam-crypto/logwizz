@@ -1,0 +1,71 @@
+# systemd unit for logwizz-notify: forwards logwizz events to a webhook or ntfy.
+#
+# Needs logwizz.service with format = "json" and syslog_prefix = true, and
+# curl and jq installed. Install the script as /usr/bin/logwizz-notify and the
+# settings as /etc/logwizz/notify.env (mode 0600, see notify.env.example), then:
+#   systemctl daemon-reload && systemctl enable --now logwizz-notify
+#
+# logwizz itself has no network access; this unit is the only part that does.
+
+[Unit]
+Description=logwizz event notifications
+Documentation=https://github.com/mycaravam-crypto/logwizz
+After=logwizz.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/logwizz/notify.env
+ExecStart=/usr/bin/logwizz-notify
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=15s
+
+# Identity: reads the journal through systemd-journal, nothing else.
+DynamicUser=yes
+SupplementaryGroups=systemd-journal
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+# Filesystem: read-only except the cursor (StateDirectory) and the auth
+# header file (RuntimeDirectory).
+StateDirectory=logwizz-notify
+StateDirectoryMode=0700
+RuntimeDirectory=logwizz-notify
+RuntimeDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# Kernel and system interfaces
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+
+# Network: outbound HTTP(S) to NOTIFY_URL.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+MemoryMax=64M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

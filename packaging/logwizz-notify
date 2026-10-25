@@ -1,0 +1,70 @@
+#!/bin/sh
+# logwizz-notify: forwards logwizz events from the journal to a webhook or ntfy.
+#
+# Reads the logwizz journal namespace from where it stopped (cursor in
+# $STATE_DIRECTORY), keeps events at or above NOTIFY_MIN_PRIORITY, and POSTs
+# each one. Needs logwizz with format = "json" and syslog_prefix = true, plus
+# curl and jq. Configuration comes from the environment, see notify.env.example.
+set -u
+
+: "${NOTIFY_URL:?NOTIFY_URL is not set}"
+kind=${NOTIFY_KIND:-webhook}
+min=${NOTIFY_MIN_PRIORITY:-warning}
+[ "$min" = critical ] && min=crit # journalctl spells it crit
+state=${STATE_DIRECTORY:-/var/lib/logwizz-notify}
+cursor=$state/cursor
+case $kind in
+  webhook | ntfy) ;;
+  *) echo "logwizz-notify: NOTIFY_KIND must be webhook or ntfy, not '$kind'" >&2; exit 2 ;;
+esac
+for cmd in journalctl curl jq; do
+  command -v "$cmd" >/dev/null || { echo "logwizz-notify: $cmd not found" >&2; exit 2; }
+done
+
+# The token goes to curl through a file, never on its command line.
+auth=
+if [ -n "${NOTIFY_AUTH:-}" ]; then
+  auth=${RUNTIME_DIRECTORY:-$state}/auth-header
+  (umask 077 && printf 'Authorization: %s\n' "$NOTIFY_AUTH" > "$auth")
+fi
+
+post() { # body [curl options...]
+  body=$1; shift
+  curl -fsS -o /dev/null --max-time 10 --retry 5 --retry-all-errors \
+    ${auth:+-H "@$auth"} "$@" --data-binary "$body" "$NOTIFY_URL"
+}
+
+send() { # event JSON
+  if [ "$kind" = webhook ]; then
+    post "$1" -H 'Content-Type: application/json'
+    return
+  fi
+  # @sh quotes every value for the shell, so eval only assigns.
+  eval "$(printf '%s' "$1" | jq -r '@sh "host=\(.host) rule=\(.rule) sev=\(.severity) desc=\(.description) line=\(.line)"')" || return
+  case $sev in
+    critical) prio=5 ;; error | warning) prio=4 ;; notice) prio=3 ;; info) prio=2 ;; *) prio=1 ;;
+  esac
+  post "${desc:+$desc
+}$line" -H "Title: logwizz $host: $rule" -H "Priority: $prio" -H "Tags: $sev"
+}
+
+if [ -s "$cursor" ]; then
+  from="--after-cursor=$(cat "$cursor")"
+else
+  from=--lines=0 # first start: only events from now on
+fi
+
+journalctl --namespace=logwizz -u logwizz -p "$min" -f -o json "$from" |
+  while IFS= read -r entry; do
+    c=$(printf '%s' "$entry" | jq -r .__CURSOR) || continue
+    ev=$(printf '%s' "$entry" | jq -r '.MESSAGE | strings')
+    case $ev in
+      '{'*) send "$ev" || echo "logwizz-notify: delivery failed, event skipped: $(printf '%s' "$ev" | jq -r .rule)" >&2 ;;
+      *) ;; # logwizz's own diagnostics, not events
+    esac
+    # Advance after each event, delivered or not: one broken endpoint must not
+    # stall the queue. A crash resends at most the event in flight.
+    printf '%s\n' "$c" > "$cursor.tmp" && mv "$cursor.tmp" "$cursor"
+  done
+echo "logwizz-notify: journalctl exited" >&2
+exit 1
