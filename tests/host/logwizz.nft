@@ -1,0 +1,25 @@
+table inet logwizz {
+	# EXAMPLE VALUES, replace them: the ports that really listen on this
+	# host (`ss -tulnp`). Connections to them are normal traffic and are not
+	# logged; a listening port missing here makes its clients look like scans.
+	set open_tcp { type inet_service; elements = { 22, 80, 443 } }
+	set open_udp { type inet_service; elements = { 53, 123 } }
+
+	chain input {
+		type filter hook input priority filter - 1; policy accept;
+
+		# NULL, FIN and Xmas scans: flag combinations no normal stack sends.
+		tcp flags & (fin|syn|rst|psh|ack|urg) == 0x0 \
+			limit rate 20/second log prefix "logwizz-badflags: " level warn
+		tcp flags & (fin|syn|rst|psh|ack|urg) == fin \
+			limit rate 20/second log prefix "logwizz-badflags: " level warn
+		tcp flags & (fin|psh|urg) == fin|psh|urg \
+			limit rate 20/second log prefix "logwizz-badflags: " level warn
+
+		# New connections to closed ports.
+		ct state new tcp flags & (syn|ack) == syn tcp dport != @open_tcp \
+			limit rate 200/second burst 400 packets log prefix "logwizz-drop: " level info
+		ct state new meta l4proto udp udp dport != @open_udp \
+			limit rate 200/second burst 400 packets log prefix "logwizz-drop: " level info
+	}
+}

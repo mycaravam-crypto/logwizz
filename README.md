@@ -14,6 +14,11 @@ you (journald, a collector, a script). For alerts, the separate
 [`logwizz-notify`](#notifications) unit forwards events from the journal to a
 webhook or [ntfy](https://ntfy.sh).
 
+To detect port scans (nmap, masscan), SSH brute force, scanner probes and log
+floods, see [docs/DETECTION.md](docs/DETECTION.md): the firewall logging that
+makes scans visible, and a ready configuration,
+[`config/detection.toml`](config/detection.toml).
+
 ```
 $ logwizz --config /etc/logwizz/logwizz.toml
 {"v":1,"ts":"2026-10-24T08:15:35.120318Z","host":"web1","pid":812,"file":"/var/log/auth.log","rule":"ssh_failed_login","description":"Failed SSH authentication","severity":"warning","match_type":"literal","line":"Oct 24 08:15:35 web1 sshd[1240]: Failed password for invalid user admin from 192.0.2.7 port 22 ssh2","truncated":false}

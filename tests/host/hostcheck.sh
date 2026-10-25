@@ -185,6 +185,33 @@ if wait_for "configuration reloaded" 10; then
   else res reload FAIL "no event for the added rule, or the PID changed"; fi
 else res reload FAIL "no 'configuration reloaded' in the journal"; fi
 
+# 17. Detection (docs/DETECTION.md): the documented nftables rules plus nmap against this host produce exactly
+# one port_scan and one tcp_flag_scan event (the rules come from config/detection.toml, see run-vm.sh).
+if command -v nmap >/dev/null && command -v nft >/dev/null ||
+   { apt-get update -q && apt-get install -qy nmap nftables; } >/dev/null 2>&1; then
+  # Load a dedicated test fixture, never executable rules extracted from Markdown.
+  # Compare the documented example for drift, but do not execute documentation content.
+  awk '/^```nft/{f=1;next} /^```/{f=0} f' "$P/DETECTION.md" > /root/logwizz-doc.nft
+  if cmp -s /root/logwizz-doc.nft "$P/logwizz.nft"; then
+    res detection_docs_sync PASS "documented nftables example matches test fixture"
+  else
+    res detection_docs_sync FAIL "docs/DETECTION.md nftables example differs from tests/host/logwizz.nft"
+  fi
+  if nft -f "$P/logwizz.nft"; then
+    nmap -sS -Pn -n -p 1-300 127.0.0.1 >/dev/null
+    nmap -sN -Pn -n -p 1-50 127.0.0.1 >/dev/null
+    wait_for '"rule":"port_scan"' 20; wait_for '"rule":"tcp_flag_scan"' 20
+    sleep 2 # a second event within the cooldown would show up here
+    ps=$(events | grep -c '"rule":"port_scan"'); fs=$(events | grep -c '"rule":"tcp_flag_scan"')
+    if [[ $ps == 1 && $fs == 1 ]] && events | grep '"rule":"port_scan"' | grep -q '"threshold":{"group":"127.0.0.1"'; then
+      res detection PASS "nmap -sS: port_scan=1, nmap -sN: tcp_flag_scan=1, kern lines=$(grep -c logwizz- /var/log/syslog)"
+    else
+      res detection FAIL "port_scan=$ps tcp_flag_scan=$fs, firewall lines in syslog=$(grep -c logwizz- /var/log/syslog)"
+    fi
+    nft delete table inet logwizz
+  else res detection FAIL "nft -f of the documented ruleset failed"; fi
+else res detection KNOWN "skipped: could not install nmap and nftables"; fi
+
 # 9. SIGUSR1 statistics and error counters.
 systemctl kill -s USR1 logwizz; sleep 1
 re=$(stat_of read_errors); oe=$(stat_of output_errors)

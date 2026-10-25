@@ -1,0 +1,130 @@
+# logwizz detection configuration: port scans (nmap, masscan), SSH brute
+# force and probes, scanner user agents, log floods.
+#
+# Scans of closed ports only show up in the logs if the firewall logs them:
+# load the nftables rules from docs/DETECTION.md first. Then:
+#   install -m 0640 -g adm config/detection.toml /etc/logwizz/logwizz.toml
+#
+# Watch each kernel message in one file only. On Debian and Ubuntu, rsyslog
+# writes kernel messages to both /var/log/kern.log and /var/log/syslog;
+# watching both would count every firewall line twice.
+
+[general]
+state_file = "/var/lib/logwizz/offsets.json"
+
+[output]
+format = "json"
+# Severity as journal priority, for logwizz-notify and journalctl -p.
+syslog_prefix = true
+
+[limits]
+# Detectors below report each source at most once per cooldown; this is a
+# backstop against anything else becoming chatty.
+rate_limit_events = 30
+rate_limit_window_secs = 60
+
+[[files]]
+path = "/var/log/auth.log"     # RHEL family: /var/log/secure
+
+[[files]]
+path = "/var/log/kern.log"     # RHEL family: /var/log/messages
+
+[[files]]
+path = "/var/log/nginx/access.log"
+enabled = false                # enable if nginx runs here (or point at Apache's log)
+
+# --- Port scans (needs the nftables rules from docs/DETECTION.md) ---
+
+[[rules]]
+id = "port_scan"
+description = "One source probed many closed ports"
+match_type = "regex"
+pattern = 'logwizz-drop: .*SRC=(?P<src>\S+) .*DPT=(?P<dpt>\d+)'
+severity = "critical"
+[rules.threshold]
+group_by = "src"
+distinct = "dpt"
+count = 20
+window_secs = 60
+cooldown_secs = 600
+
+[[rules]]
+id = "fast_scan"
+description = "Very fast scan from one source (masscan-like)"
+match_type = "regex"
+pattern = 'logwizz-drop: .*SRC=(?P<src>\S+) .*DPT=(?P<dpt>\d+)'
+severity = "critical"
+[rules.threshold]
+group_by = "src"
+distinct = "dpt"
+count = 100
+window_secs = 2
+cooldown_secs = 600
+
+[[rules]]
+id = "tcp_flag_scan"
+description = "TCP packet with flags no normal stack sends (nmap -sN/-sF/-sX)"
+match_type = "regex"
+pattern = 'logwizz-badflags: .*SRC=(?P<src>\S+)'
+severity = "critical"
+[rules.threshold]
+group_by = "src"               # count = 1: report each source once per cooldown
+count = 1
+window_secs = 1
+cooldown_secs = 600
+
+# --- SSH ---
+
+[[rules]]
+id = "ssh_bruteforce"
+description = "Many failed SSH logins from one source"
+match_type = "regex"
+pattern = 'sshd(?:-session)?\[\d+\]: (?:Failed (?:password|publickey)|Invalid user) .*?from (?P<src>[0-9A-Fa-f.:]+) port \d+'
+severity = "error"
+[rules.threshold]
+group_by = "src"
+count = 10
+window_secs = 60
+cooldown_secs = 600
+
+[[rules]]
+id = "ssh_probe"
+description = "SSH connection without a valid client banner (nmap -sV, masscan --banners, scanners)"
+match_type = "regex"
+pattern = 'sshd(?:-session)?\[\d+\]: (?:banner exchange: Connection from|Did not receive identification string from) (?P<src>[0-9A-Fa-f.:]+)'
+severity = "warning"
+[rules.threshold]
+group_by = "src"
+count = 1
+window_secs = 1
+cooldown_secs = 3600
+
+# --- Web ---
+
+[[rules]]
+id = "scanner_user_agent"
+description = "Request from a known scanning tool"
+match_type = "regex"
+pattern = '^(?P<src>\S+) .*(?i:Nmap Scripting Engine|masscan|zgrab|sqlmap|nikto|nuclei)'
+severity = "warning"
+[rules.threshold]
+group_by = "src"
+count = 1
+window_secs = 1
+cooldown_secs = 3600
+
+# --- Volume ---
+
+[[rules]]
+id = "log_flood"
+description = "Unusually many lines in one file"
+match_type = "regex"
+pattern = "^"
+severity = "warning"
+[rules.threshold]
+group_by = "file"
+# Starting point only, tune it: a few times this host's normal peak lines
+# per minute in one file (e.g. from `wc -l` over a busy minute).
+count = 5000
+window_secs = 60
+cooldown_secs = 600
