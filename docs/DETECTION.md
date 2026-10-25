@@ -13,7 +13,9 @@ makes scans visible, and the rules in
 | `ssh_probe` | A connection to sshd that never sends an SSH banner (nmap `-sV`, banner grabbers) | `auth.log` |
 | `sudo_auth_failure` | A failed sudo password or a user not in sudoers | `auth.log` |
 | `account_change` | A user, group or password created, changed or deleted | `auth.log` |
-| `scanner_user_agent` | Requests with the user agent of nmap NSE, masscan, zgrab, sqlmap, nikto or nuclei | a web access log |
+| `scanner_user_agent` | Requests with the user agent of nmap NSE, masscan, zgrab, sqlmap, nikto or nuclei | a web access log (combined format or Caddy JSON) |
+| `ssh_login` | Every successful SSH login, with its source | `auth.log` |
+| `fail2ban_ban` | fail2ban banning a source | `fail2ban.log` |
 | `log_flood` | More than 5000 lines in a minute in any watched file | – |
 
 Each detector reports a source once and then stays silent for that source
@@ -61,7 +63,11 @@ table inet logwizz {
 ```
 
 To load it at boot on Debian and Ubuntu, add `include "/etc/nftables.d/*.nft"`
-to `/etc/nftables.conf` and `systemctl enable nftables`.
+to `/etc/nftables.conf` and `systemctl enable nftables`. With ufw, do not
+enable `nftables.service`: the stock `/etc/nftables.conf` starts with
+`flush ruleset` and removes ufw's rules. Load the table from a oneshot unit
+instead, with `ExecStart=/usr/sbin/nft -f /etc/nftables.d/logwizz.nft` and
+`WantedBy=multi-user.target`.
 
 The `limit` clauses matter: masscan sends millions of packets per second,
 and without a limit every one of them would be a line in `kern.log`. With

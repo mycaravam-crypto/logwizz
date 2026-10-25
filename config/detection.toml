@@ -33,6 +33,14 @@ path = "/var/log/kern.log"     # RHEL family: /var/log/messages
 path = "/var/log/nginx/access.log"
 enabled = false                # enable if nginx runs here (or point at Apache's log)
 
+[[files]]
+path = "/var/log/caddy/access.log"
+enabled = false                # enable if Caddy logs requests here (JSON format)
+
+[[files]]
+path = "/var/log/fail2ban.log"
+enabled = false                # enable if fail2ban runs here
+
 # --- Port scans (needs the nftables rules from docs/DETECTION.md) ---
 
 [[rules]]
@@ -102,6 +110,20 @@ count = 1
 window_secs = 1
 cooldown_secs = 3600
 
+[[rules]]
+id = "ssh_login"
+description = "Successful SSH login"
+match_type = "regex"
+pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for \S+ from (?P<src>[0-9A-Fa-f.:]+) port \d+'
+severity = "warning"           # every login notifies; drop this rule if that is too chatty
+
+[[rules]]
+id = "fail2ban_ban"
+description = "fail2ban banned a source"
+match_type = "regex"
+pattern = 'fail2ban\.actions\s+\[\d+\]: NOTICE\s+\[[^\]]+\] Ban (?P<src>\S+)'
+severity = "warning"
+
 # --- Privileges and accounts ---
 
 [[rules]]
@@ -124,7 +146,8 @@ severity = "warning"
 id = "scanner_user_agent"
 description = "Request from a known scanning tool"
 match_type = "regex"
-pattern = '^(?P<src>\S+) .*(?i:Nmap Scripting Engine|masscan|zgrab|sqlmap|nikto|nuclei)'
+# Combined log format (nginx, Apache) or Caddy's JSON access log.
+pattern = '^(?:\{.*?"remote_ip":")?(?P<src>[^\s"]+)[\s"].*(?i:Nmap Scripting Engine|masscan|zgrab|sqlmap|nikto|nuclei)'
 severity = "warning"
 [rules.threshold]
 group_by = "src"

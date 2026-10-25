@@ -90,9 +90,27 @@ fn rules_match_real_log_lines() {
     }
     let nse = r#"192.0.2.9 - - [25/Oct/2026:10:00:04 +0000] "GET /nmaplowercheck1729 HTTP/1.1" 404 153 "-" "Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)""#;
     assert_eq!(hits(&cfg, nse), ["scanner_user_agent src=192.0.2.9"]);
+    let caddy = r#"{"level":"info","ts":1761398404.5,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"192.0.2.9","remote_port":"51000","client_ip":"192.0.2.9","proto":"HTTP/1.1","method":"GET","host":"example.org","uri":"/?id=1","headers":{"User-Agent":["sqlmap/1.8.4#stable (https://sqlmap.org)"]}},"status":404}"#;
+    assert_eq!(hits(&cfg, caddy), ["scanner_user_agent src=192.0.2.9"]);
+    assert_eq!(
+        hits(
+            &cfg,
+            "2026-10-25T14:20:12.5+01:00 web1 sshd-session[56533]: Accepted publickey for deploy from 10.0.0.5 port 34092 ssh2: ED25519 SHA256:x"
+        ),
+        ["ssh_login src=10.0.0.5"]
+    );
+    assert_eq!(
+        hits(
+            &cfg,
+            "2026-10-25 01:08:51,101 fail2ban.actions        [46533]: NOTICE  [sshd] Ban 192.0.2.10"
+        ),
+        ["fail2ban_ban src=192.0.2.10"]
+    );
     // Normal traffic matches nothing.
     for line in [
-        "Oct 25 10:00:05 web1 sshd[1260]: Accepted publickey for deploy from 10.0.0.5 port 52144 ssh2",
+        "2026-10-25 01:08:51,105 fail2ban.observer       [46533]: NOTICE  [sshd] Increase Ban 192.0.2.10 (2 # 2h -> 2026-10-25 02:08:50)",
+        "2026-10-25 00:49:38,450 fail2ban.actions        [46533]: NOTICE  [sshd] Unban 192.0.2.10",
+        r#"{"level":"info","logger":"http.log.access","msg":"handled request","request":{"remote_ip":"10.0.0.9","headers":{"User-Agent":["Mozilla/5.0"]}},"status":200}"#,
         // Invalid users are counted by their "Invalid user" line only.
         "Oct 25 10:00:05 web1 sshd-session[1260]: Connection closed by invalid user admin 192.0.2.7 port 52144 [preauth]",
         "Oct 25 10:00:05 web1 sshd-session[1260]: Received disconnect from 192.0.2.7 port 52144:11: Bye Bye [preauth]",
