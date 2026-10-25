@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots a throwaway Ubuntu 24.04 cloud VM, installs logwizz and the systemd unit
+# Boots a throwaway Ubuntu/Debian cloud VM, installs logwizz and the systemd unit
 # exactly as the README documents, and runs hostcheck.sh inside it. Prints the
 # RESULT lines and exits nonzero on any FAIL. See docs/HOST-VERIFICATION.md.
 #
@@ -10,13 +10,24 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 work=${WORK:-$(mktemp -d)}
-image_url=https://cloud-images.ubuntu.com/noble/current
-image=noble-server-cloudimg-amd64.img
+image_url=${IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current}
+image=${IMAGE:-noble-server-cloudimg-amd64.img}
+checksum_file=${CHECKSUM_FILE:-SHA256SUMS}
+checksum_tool=${CHECKSUM_TOOL:-sha256sum}
+
+# These values are workflow parameters, but validate them because this script is
+# also documented for local use and must not write outside WORK or execute an
+# arbitrary checksum command.
+[[ "$image" =~ ^[A-Za-z0-9._-]+$ && "$image" != "." && "$image" != ".." ]] || { echo "invalid IMAGE filename" >&2; exit 2; }
+[[ "$checksum_file" =~ ^[A-Za-z0-9._-]+$ && "$checksum_file" != "." && "$checksum_file" != ".." ]] || { echo "invalid CHECKSUM_FILE filename" >&2; exit 2; }
+case "$checksum_tool" in sha256sum|sha512sum) ;; *) echo "CHECKSUM_TOOL must be sha256sum or sha512sum" >&2; exit 2 ;; esac
+command -v "$checksum_tool" >/dev/null || { echo "checksum tool not found: $checksum_tool" >&2; exit 2; }
+[[ "$image_url" == https://* ]] || { echo "IMAGE_URL must use HTTPS" >&2; exit 2; }
 
 cd "$work"
 if [[ ! -f $image ]]; then
   curl -fsSL -o "$image" "$image_url/$image"
-  curl -fsSL "$image_url/SHA256SUMS" | grep " \*\?$image\$" | sha256sum -c -
+  curl -fsSL "$image_url/$checksum_file" | awk -v f="$image" '$NF == f || $NF == "*" f { print }' | "$checksum_tool" -c -
 fi
 
 rm -rf payload && mkdir payload
@@ -32,10 +43,15 @@ cp "$root/packaging/logwizz.service" "$root/packaging/logwizz-notify" "$root/pac
 
 cat > user-data <<'EOF'
 #cloud-config
-package_update: false
-packages: []
+package_update: true
+packages:
+  - rsyslog
+  - jq
+  - nftables
+  - nmap
+  - strace
 runcmd:
-  - [sh, -c, 'mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
+  - [sh, -c, 'systemctl enable --now rsyslog; sleep 1; logger -p auth.notice "logwizz hostcheck bootstrap"; sleep 1; mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
 EOF
 printf 'instance-id: lwz-hostcheck\nlocal-hostname: lwz-hostcheck\n' > meta-data
 cloud-localds seed.iso user-data meta-data
