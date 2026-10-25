@@ -42,7 +42,7 @@ packages:
   - nmap
   - strace
 runcmd:
-  - [sh, -c, 'systemctl enable --now rsyslog; mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
+  - [sh, -c, 'systemctl enable --now rsyslog; sleep 1; logger -p auth.notice "logwizz hostcheck bootstrap"; sleep 1; mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
 EOF
 printf 'instance-id: lwz-hostcheck\nlocal-hostname: lwz-hostcheck\n' > meta-data
 cloud-localds seed.iso user-data meta-data
