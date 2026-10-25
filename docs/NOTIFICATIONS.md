@@ -59,7 +59,7 @@ For these transports, `NOTIFY_AUTH` can contain an Authorization header value, s
 ## Delivery and failure semantics
 
 - The journal cursor is saved only after an event has been persisted into its aggregate. Aggregate state is stored under the service's `StateDirectory`, separate from the core daemon.
-- Delivery uses bounded curl timeouts and retries. A failed send leaves the summary on disk for a later attempt; it does not block log detection in the core daemon.
+- Delivery uses bounded curl timeouts, retries and an on-disk exponential backoff (2 seconds up to 300 seconds). A failed send leaves the summary on disk for a later attempt; it does not block log detection in the core daemon.
 - Delivery is **at least once**, not exactly once. A process crash after a remote endpoint accepts a summary but before the local aggregate is removed can produce a duplicate. Consumers should tolerate duplicate summaries.
 - On normal window rollover, one summary is sent per rule/window. Shutdown or delayed delivery can produce a partial summary, marked with `partial: true` in webhook JSON and labelled in text transports.
 - The notifier logs delivery errors but does not log raw event content or credentials.
