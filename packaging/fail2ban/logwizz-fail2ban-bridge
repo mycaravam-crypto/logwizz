@@ -36,6 +36,8 @@ def format_event(raw: str) -> str | None:
         if not isinstance(src, str):
             return None
         address = ipaddress.ip_address(src)
+        # ::ffff:a.b.c.d is IPv4 traffic on a dual-stack socket; ban the IPv4 address.
+        address = getattr(address, "ipv4_mapped", None) or address
     except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
         return None
     return f"logwizz rule={rule} src={address.compressed}"
