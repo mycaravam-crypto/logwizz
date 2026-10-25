@@ -27,6 +27,9 @@ After=local-fs.target
 Type=exec
 ExecStartPre=/usr/bin/logwizz --check-config --config /etc/logwizz/logwizz.toml
 ExecStart=/usr/bin/logwizz --config /etc/logwizz/logwizz.toml
+# `systemctl reload logwizz` re-reads the configuration. An invalid file is
+# logged and the running configuration is kept.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
 # logwizz stops reading, flushes queued events and exits 0 on SIGTERM.

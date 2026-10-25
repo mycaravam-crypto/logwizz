@@ -77,6 +77,26 @@ struct GlobState {
     list_error: Option<ErrorKind>,
 }
 
+impl GlobState {
+    fn new(glob: &Glob) -> Self {
+        GlobState {
+            glob: glob.clone(),
+            followed: 0,
+            refused: HashSet::new(),
+            last_warning: None,
+            list_error: None,
+        }
+    }
+}
+
+/// Why [`Monitor::run_with`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    Shutdown,
+    /// A reload was requested; apply it and call `run_with` again.
+    Reload,
+}
+
 pub struct Monitor {
     /// Indexed by watcher slot; `None` for a free slot.
     slots: Vec<Option<Slot>>,
@@ -87,6 +107,9 @@ pub struct Monitor {
     wake_rx: Receiver<()>,
     waker: Waker,
     reconcile: Duration,
+    notifications: bool,
+    /// Readers kept from before a reload, until a glob claims them.
+    carried: HashMap<PathBuf, (Arc<Path>, TailedFile)>,
     metrics: Arc<Metrics>,
     buf: Vec<u8>,
 }
@@ -123,17 +146,7 @@ impl Monitor {
             waker.clone(),
             Arc::clone(&metrics),
         );
-        let globs = cfg
-            .globs
-            .iter()
-            .map(|g| GlobState {
-                glob: g.clone(),
-                followed: 0,
-                refused: HashSet::new(),
-                last_warning: None,
-                list_error: None,
-            })
-            .collect();
+        let globs = cfg.globs.iter().map(GlobState::new).collect();
         let mut monitor = Monitor {
             slots,
             globs,
@@ -143,6 +156,8 @@ impl Monitor {
             wake_rx,
             waker,
             reconcile: Duration::from_millis(cfg.general.reconcile_interval_ms),
+            notifications,
+            carried: HashMap::new(),
             metrics,
             buf: vec![0; READ_BUF_BYTES],
         };
@@ -195,6 +210,7 @@ impl Monitor {
             metrics,
             max_glob_files,
             opts,
+            carried,
             ..
         } = self;
         let st = &mut globs[g];
@@ -261,21 +277,32 @@ impl Monitor {
                 }
                 continue;
             }
-            let file = match startup {
-                Some(mode) => TailedFile::new(path.clone(), mode, *opts),
-                None => {
+            let (shared, file) = match (carried.remove(&path), startup) {
+                (Some((shared, mut f)), _) => {
+                    // Followed before a reload.
+                    f.set_drain_grace(opts.drain_grace);
+                    (shared, f)
+                }
+                (None, Some(mode)) => (
+                    path.as_path().into(),
+                    TailedFile::new(path.clone(), mode, *opts),
+                ),
+                (None, None) => {
                     info!(glob = st.glob.text, path = %path.display(), "new file matches glob");
-                    TailedFile::appeared(path.clone(), *opts)
+                    (
+                        path.as_path().into(),
+                        TailedFile::appeared(path.clone(), *opts),
+                    )
                 }
             };
-            let i = watcher.add(path.clone());
+            let i = watcher.add(path);
             if i == slots.len() {
                 slots.push(None);
             }
             slots[i] = Some(Slot {
-                path: path.into(),
+                path: shared,
+                id: file.current_id(),
                 file,
-                id: None,
                 glob: Some(g),
             });
             st.followed += 1;
@@ -314,6 +341,70 @@ impl Monitor {
         self.waker.clone()
     }
 
+    /// Applies a reloaded configuration's files, globs and timing; call
+    /// between [`Monitor::run_with`] calls.
+    ///
+    /// A file still followed, as a configured path or as a match of a glob,
+    /// keeps its reader, including its offset, any incomplete line and a
+    /// rotated file being drained. A file no longer followed is closed after
+    /// its incomplete trailing lines are passed to `on_line`. A newly
+    /// followed file is read from the beginning, since all of its content is
+    /// new to this process. `max_line_bytes` is not changed (it needs a
+    /// restart).
+    pub fn reconfigure(&mut self, cfg: &Config, on_line: &mut OnLine<'_>) {
+        self.opts.drain_grace = Duration::from_millis(cfg.general.rotation_drain_ms);
+        self.reconcile = Duration::from_millis(cfg.general.reconcile_interval_ms);
+        self.max_glob_files = cfg.general.max_glob_files;
+        let mut old: HashMap<PathBuf, (Arc<Path>, TailedFile)> = std::mem::take(&mut self.slots)
+            .into_iter()
+            .flatten()
+            .map(|s| (s.file.path().to_path_buf(), (s.path, s.file)))
+            .collect();
+        let opts = self.opts;
+        self.slots = cfg
+            .files
+            .iter()
+            .map(|p| {
+                let (path, file) = match old.remove(p) {
+                    Some((path, mut f)) => {
+                        f.set_drain_grace(opts.drain_grace);
+                        (path, f)
+                    }
+                    None => {
+                        info!(path = %p.display(), "file added to configuration");
+                        let f = TailedFile::new(p.clone(), StartupMode::Beginning, opts);
+                        (p.as_path().into(), f)
+                    }
+                };
+                Some(Slot {
+                    path,
+                    id: file.current_id(),
+                    file,
+                    glob: None,
+                })
+            })
+            .collect();
+        // Recreated rather than patched: the next run_with call starts with
+        // a reconciliation pass that polls every file, which covers any
+        // event missed in between.
+        self.watcher = Watcher::new(
+            &cfg.files,
+            &cfg.globs,
+            self.notifications,
+            self.waker.clone(),
+            Arc::clone(&self.metrics),
+        );
+        self.globs = cfg.globs.iter().map(GlobState::new).collect();
+        self.carried = old;
+        for g in 0..self.globs.len() {
+            self.scan_glob(g, None);
+        }
+        for (_, (path, mut f)) in std::mem::take(&mut self.carried) {
+            f.close(&self.metrics, &mut |line| on_line(&path, line));
+            info!(path = %path.display(), "file no longer followed; closed");
+        }
+    }
+
     /// Runs until `shutdown` is set (and the loop is woken). Every line is
     /// passed to `on_line` together with the path of its file.
     ///
@@ -321,24 +412,31 @@ impl Monitor {
     /// Unread data stays in the files, so pausing loses nothing unless a
     /// file is rotated away and fully removed meanwhile.
     pub fn run(&mut self, shutdown: &AtomicBool, on_line: &mut OnLine<'_>) {
-        self.run_with(shutdown, on_line, None);
+        self.run_with(shutdown, None, on_line, None);
     }
 
     /// Like [`Monitor::run`], additionally passing [`Monitor::checkpoint`]
     /// to `on_checkpoint` every `interval` (between polls, so every line
-    /// before a checkpoint has been passed to `on_line`).
+    /// before a checkpoint has been passed to `on_line`), and returning
+    /// [`Stopped::Reload`] between polls once `reload` is set (the flag is
+    /// cleared).
     pub fn run_with(
         &mut self,
         shutdown: &AtomicBool,
+        reload: Option<&AtomicBool>,
         on_line: &mut OnLine<'_>,
         mut checkpoints: Option<(Duration, &mut OnCheckpoint<'_>)>,
-    ) {
+    ) -> Stopped {
+        let reload_requested = || reload.is_some_and(|r| r.swap(false, Ordering::Relaxed));
         let mut next_reconcile = Instant::now();
         let mut next_checkpoint = Instant::now();
         let mut busy = false;
         loop {
             if shutdown.load(Ordering::Relaxed) {
-                break;
+                return Stopped::Shutdown;
+            }
+            if reload_requested() {
+                return Stopped::Reload;
             }
             if let Some((interval, f)) = &mut checkpoints {
                 let now = Instant::now();
@@ -363,7 +461,10 @@ impl Monitor {
                     }
                 }
                 if shutdown.load(Ordering::Relaxed) {
-                    break;
+                    return Stopped::Shutdown;
+                }
+                if reload_requested() {
+                    return Stopped::Reload;
                 }
             }
 
@@ -390,7 +491,7 @@ impl Monitor {
                 // A pass can read up to READ_BUDGET_BYTES from every file;
                 // do not make shutdown wait for all of them.
                 if shutdown.load(Ordering::Relaxed) {
-                    return;
+                    return Stopped::Shutdown;
                 }
                 let Some(slot) = slot else { continue };
                 if !self.watcher.take_dirty(i) {

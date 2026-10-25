@@ -56,6 +56,8 @@ counters! {
     /// Incomplete trailing lines emitted because their file was truncated,
     /// rotated or deleted before a newline arrived.
     partial_lines_flushed,
+    /// Lines that matched an `ignore` rule.
+    lines_ignored,
     rule_matches,
     events_emitted,
     /// Events dropped because the output queue was full (`on_full = "drop"`).
@@ -76,6 +78,10 @@ counters! {
     /// stays refused (beyond `max_glob_files` refused files, on every
     /// directory listing).
     glob_matches_refused,
+    /// Configuration reloads applied (SIGHUP).
+    config_reloads,
+    /// Configuration reloads rejected; the running configuration was kept.
+    config_reload_failures,
 }
 
 #[inline]

@@ -486,6 +486,37 @@ mod tests {
     }
 
     #[test]
+    fn checkpoints_with_other_files_are_not_merged() {
+        let mut p = Pending::default();
+        p.push(cp(1, 1));
+        let mut reloaded = cp(2, 1);
+        reloaded.files = vec![(Path::new("/c.log").into(), st(1))];
+        p.push(reloaded.clone());
+        assert_eq!(p.queue.len(), 2, "same offsets, other files");
+        assert_eq!(p.take_flushed(2), Some(reloaded));
+    }
+
+    #[test]
+    fn saved_entries_follow_the_checkpoint_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offsets.json");
+        let mut saver = Saver {
+            path: path.clone(),
+            last: None,
+            last_warning: None,
+            metrics: Arc::new(Metrics::default()),
+        };
+        saver.save(cp(0, 5));
+        assert_eq!(load(&path)[Path::new("/a.log")], st(5));
+        let mut reloaded = cp(1, 5);
+        reloaded.files = vec![(Path::new("/a.log").into(), st(7))];
+        saver.save(reloaded);
+        let map = load(&path);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[Path::new("/a.log")], st(7));
+    }
+
+    #[test]
     fn pending_is_bounded_and_skips_unchanged() {
         let mut p = Pending::default();
         p.push(cp(1, 1));

@@ -45,6 +45,11 @@ max_queue_bytes = 8388608
 # When the queue is full: "block" pauses reading (no loss while running);
 # "drop" discards the event and counts it.
 on_full = "block"
+# Prefix each event with "<N>", the syslog priority of its severity, so that
+# journald stores it as the entry's priority (journalctl -p warning).
+# Default false; enable it only when the output goes to journald, as with the
+# packaged systemd unit.
+syslog_prefix = true
 # Uncomment to include at most this many bytes of the matching line.
 # max_excerpt_bytes = 512
 

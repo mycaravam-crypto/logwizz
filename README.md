@@ -8,9 +8,11 @@ match to stdout or stderr: either JSON Lines or human-readable text. It
 survives log rotation, truncation, deletion and recreation, and stays within
 explicit memory and queue limits.
 
-It is deliberately small. It is not a SIEM, a log shipper or an alerting
-system: pipe its output into whatever does that job for you (journald,
-a collector, a script).
+It is deliberately small. It is not a SIEM or a log shipper, and the daemon
+itself has no network access: pipe its output into whatever does that job for
+you (journald, a collector, a script). For alerts, the separate
+[`logwizz-notify`](#notifications) unit forwards events from the journal to a
+webhook or [ntfy](https://ntfy.sh).
 
 ```
 $ logwizz --config /etc/logwizz/logwizz.toml
@@ -37,8 +39,8 @@ $ logwizz --config /etc/logwizz/logwizz.toml
 
 Each [GitHub release](https://github.com/mycaravam-crypto/logwizz/releases)
 has a static Linux x64 binary (musl, no runtime dependencies, any
-distribution), the systemd unit, the example configuration and
-`SHA256SUMS.txt`:
+distribution), the systemd unit, the example configuration, the
+[notifier](#notifications) and `SHA256SUMS.txt`:
 
 ```bash
 v=X.Y.Z   # the release to install
@@ -146,6 +148,7 @@ Only `[[files]]` and `[[rules]]` are required.
 | `queue_capacity` | `4096` | Maximum events buffered between the reader and the output writer (1 – 1048576). |
 | `max_queue_bytes` | `8388608` | Maximum memory held by buffered events, in bytes (64 KiB – 1 GiB): each event counts its line plus a small fixed overhead. The queue is full when either limit is reached. An event larger than this is still accepted into an empty queue. |
 | `on_full` | `"block"` | Full queue: `block` pauses reading, `drop` discards the event and counts it. See [Backpressure](#backpressure). |
+| `syslog_prefix` | `false` | Start each event line with `<N>`, the syslog priority of its severity (`<2>` critical … `<7>` debug). journald strips the prefix and records it as the entry's priority, so `journalctl -p warning` shows only events of severity `warning` and above. Leave it off when the output does not go to journald. |
 | `max_excerpt_bytes` | unset | If set (16 – 16 MiB), events include at most this many bytes of the line, cut on a UTF-8 boundary, with `truncated: true`. |
 
 ### `[limits]`
@@ -211,13 +214,38 @@ exclude = "*.old.log"
 | `description` | `""` | Free text included in events. |
 | `enabled` | `true` | Disabled rules are still compiled, so mistakes surface immediately. |
 | `match_type` | required | `literal`: case-sensitive substring. `regex`: [Rust regex syntax](https://docs.rs/regex/latest/regex/#syntax). Use `(?i)` for case-insensitive matching. |
-| `pattern` | required | Non-empty, at most 4096 bytes. Regexes are limited to 2 MiB compiled size. |
-| `severity` | required | `debug`, `info`, `notice`, `warning`, `error`, `critical`. |
+| `pattern` | required | Non-empty, at most 4096 bytes. Regexes are limited to 2 MiB compiled size. Named capture groups (`(?P<src>\S+)`), at most 16 per rule, become the event's `fields`. |
+| `severity` | required for `emit` | `debug`, `info`, `notice`, `warning`, `error`, `critical`. Not allowed for `ignore` rules. |
+| `action` | `"emit"` | `emit`: a match produces an event. `ignore`: a match produces nothing, and no later rule sees the line (counted in `lines_ignored`). |
 
 Rules are compiled once at startup. Every enabled rule is evaluated against
 every line in configuration order, and each matching rule produces its own
-event. Matching works on raw bytes, so lines that are not valid UTF-8 are
-still matched.
+event, until an `ignore` rule matches: evaluation of that line stops there.
+At least one enabled rule must emit events. Matching works on raw bytes, so
+lines that are not valid UTF-8 are still matched.
+
+#### Reporting unknown lines
+
+`ignore` rules and a catch-all at the end report every line that is not
+known to be normal (the logcheck approach):
+
+```toml
+[[rules]]
+id = "cron"
+match_type = "regex"
+pattern = 'CRON\[\d+\]: \(\w+\) CMD'
+action = "ignore"
+
+[[rules]]
+id = "unknown"
+description = "Line not covered by an ignore rule"
+match_type = "regex"
+pattern = "^"          # matches every line
+severity = "notice"
+```
+
+Rule order matters: put the rules that must see every line (for example
+`ssh_failed_login`) before the `ignore` rules, and the catch-all last.
 
 Limits: the configuration file may be at most 1 MiB and must not be
 world-writable.
@@ -241,6 +269,7 @@ One JSON object per line. Schema version `1`:
 | `match_type` | string | `literal` or `regex`. |
 | `line` | string | The matching line without its terminator (`\n` or `\r\n`), or its excerpt. Invalid UTF-8 sequences are replaced with U+FFFD. |
 | `truncated` | boolean | `true` if `line` is incomplete (cut at `max_line_bytes` or `max_excerpt_bytes`). |
+| `fields` | object | Only for regex rules with named capture groups: each group that matched, name → value, in pattern order. Values are taken from the whole line (not the excerpt), cut to 256 bytes on a UTF-8 boundary, and converted like `line`. Example: `{"src":"192.0.2.7","dpt":"22"}`. |
 
 Consumers should ignore unknown fields; new fields may be added without a
 version bump.
@@ -253,6 +282,7 @@ version bump.
 
 Control characters in the line are escaped (`\u{1b}`), so log content cannot
 inject terminal escape sequences. A truncated line ends with ` [truncated]`.
+Captured fields follow as ` name=value`, escaped the same way.
 
 ## Behaviour and guarantees
 
@@ -392,7 +422,36 @@ In both modes:
 |---|---|
 | `SIGTERM`, `SIGINT` | Stop reading, flush queued events, log final statistics, exit 0. |
 | `SIGUSR1` | Log a statistics line at `info` level. |
-| `SIGHUP` | Logs that reload is not supported. Runtime reload is not implemented in 0.1.0: restart to apply configuration changes. |
+| `SIGHUP` | Reload the configuration (see below). `systemctl reload logwizz` sends it. |
+
+### Configuration reload
+
+On `SIGHUP`, logwizz reads and validates the configuration file again and
+compiles every rule. If anything is wrong, it logs the problems
+(`configuration reload failed`), counts `config_reload_failures` and keeps
+running with the old configuration unchanged. Otherwise it applies the new
+configuration between two reads, so no line is matched against a partly
+applied one, and logs `configuration reloaded`:
+
+- **Rules** are replaced. Rate-limit windows and dedup entries carry over
+  for rules whose id and definition are unchanged, and start fresh for new
+  or changed rules.
+- **Files** still followed, as a `path` or as a match of a `glob`, keep
+  reading where they were, including a rotated file still being drained.
+  Files no longer followed are closed after any incomplete last line is
+  emitted. Newly followed files are read from the beginning, since all of
+  their content is new to this process (as for a file that appears while
+  logwizz runs).
+- **Applied:** `[limits]`, `reconcile_interval_ms`, `rotation_drain_ms`,
+  `stats_interval_secs`, `max_glob_files`, `max_excerpt_bytes`, `max_queue_bytes` and
+  `on_full`.
+- **Need a restart:** `startup_mode`, `max_line_bytes`, `diagnostics`,
+  `state_file`, `state_flush_ms`, `format`, `destination`,
+  `queue_capacity` and `syslog_prefix`. A change to any of them is logged as a warning naming
+  the settings, and their running values are kept.
+
+Events queued before the reload are written with the file and rule names
+they were matched with.
 
 ### Statistics
 
@@ -400,7 +459,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 config_reloads=0 config_reload_failures=0 glob_matches_refused=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -415,7 +474,8 @@ retry.
 | `lines_truncated` | Lines cut at `max_line_bytes`. |
 | `bytes_skipped` | Content bytes beyond `max_line_bytes` that were not matched. |
 | `partial_lines_flushed` | Unterminated lines emitted because their file was truncated, rotated or deleted. |
-| `rule_matches` | (line, rule) matches, before rate limiting and deduplication. |
+| `lines_ignored` | Lines that matched an `ignore` rule. |
+| `rule_matches` | (line, rule) matches of emitting rules, before rate limiting and deduplication. |
 | `events_emitted` | Events accepted into the output queue. An event is written unless the output fails or the process is killed first. |
 | `events_dropped` | Events discarded because the queue was full (`on_full = "drop"`), the output had failed, or shutdown interrupted a blocked send. |
 | `events_rate_limited`, `events_deduplicated` | Matches suppressed by `[limits]`. |
@@ -424,6 +484,7 @@ retry.
 | `notify_overflows` | inotify queue overflows (each one triggers a full rescan). |
 | `rotations`, `truncations` | Detected replacements and truncations. |
 | `glob_matches_refused` | Files matching a glob that were not followed because of `max_glob_files`. Each file is counted once while it stays refused. |
+| `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
 `rule_matches` = `events_emitted` + `events_dropped` + `events_rate_limited` +
 `events_deduplicated`.
@@ -471,6 +532,10 @@ systemctl enable --now logwizz
 journalctl --namespace=logwizz -u logwizz -o cat -f
 ```
 
+The example configuration sets `syslog_prefix = true`, so each event's journal
+priority is its severity: `journalctl --namespace=logwizz -p warning -o cat -f`
+shows only warnings and worse.
+
 The service user only exists while the service runs, so it reads the
 configuration through its supplementary group: keep the file group-owned by
 `adm` (or the group from your drop-in) and not world-writable. A config that
@@ -508,6 +573,48 @@ you run logwizz outside the packaged unit: **do not watch a file that receives
 logwizz's own output.** The namespace has its own retention settings in
 `/etc/systemd/journald@logwizz.conf`.
 
+### Notifications
+
+[`packaging/logwizz-notify`](packaging/logwizz-notify) and its unit
+[`logwizz-notify.service`](packaging/logwizz-notify.service) follow the
+logwizz journal namespace and POST every event at or above a minimum severity
+to a URL. logwizz itself stays without network access: only this small unit
+has it. It needs `curl` and `jq`, and logwizz with `format = "json"` and
+`syslog_prefix = true` (as in the example configuration).
+
+```bash
+apt install curl jq
+install -m 0755 packaging/logwizz-notify /usr/bin/logwizz-notify
+install -m 0600 packaging/notify.env.example /etc/logwizz/notify.env   # then edit it
+install -m 0644 packaging/logwizz-notify.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now logwizz-notify
+```
+
+| Setting (`/etc/logwizz/notify.env`) | Default | Meaning |
+|---|---|---|
+| `NOTIFY_URL` | required | Where events are POSTed. |
+| `NOTIFY_KIND` | `webhook` | `webhook`: the event JSON as the body. `ntfy`: the rule description and line as the message, with `Title: logwizz <host>: <rule>`, a `Priority` from the severity (critical 5, error and warning 4, notice 3, info 2, debug 1) and the severity as a tag. |
+| `NOTIFY_MIN_PRIORITY` | `warning` | Lowest severity forwarded (`debug` … `critical`). |
+| `NOTIFY_AUTH` | unset | Value of an `Authorization` header, for example `Bearer tk_...`. Passed to curl through a file, never on its command line. |
+
+Behaviour:
+
+- **Start and restart:** the first start forwards only new events. After
+  that, the journal cursor of the last handled event is saved in
+  `/var/lib/logwizz-notify`, so a restart resumes exactly there; after a crash,
+  at most the event being sent is sent again.
+- **Failures:** each event is retried 5 times (10 s timeout each). If it
+  still fails, an error is logged to the main journal and the event is
+  skipped: a broken endpoint never stalls later notifications. The event
+  itself remains in the logwizz journal.
+- **Floods:** throttle with logwizz's [`[limits]`](#limits): for example
+  `rate_limit_events = 10` per minute per rule, and `dedup_window_secs`.
+- Only JSON events are forwarded, never logwizz's own diagnostics.
+
+`systemd-analyze security` rates the unit **1.3 OK**: it is locked down like
+logwizz, except that it may open network connections.
+
 ## Security
 
 - Runs unprivileged. Needs read access to the configured files and search
@@ -540,7 +647,7 @@ logwizz's own output.** The namespace has its own retention settings in
   recovered by rescanning.
 - **Network and FUSE filesystems:** changes made on other hosts generate no
   inotify events. Detection relies on reconciliation (`reconcile_interval_ms`).
-- **Not supported in 0.1.0:** runtime configuration reload, compressed or rotated-file catch-up, multi-line
+- **Not supported:** compressed or rotated-file catch-up, multi-line
   records.
 - **Truncation is detected by size:** a file is treated as truncated when it
   is smaller than the read offset. If it is truncated and rewritten past the
@@ -607,7 +714,8 @@ GitHub Actions run on every pull request and on `main`:
   tests) as inline comments; a high or critical finding fails the check. Pinned to a commit; bump the SHA in both places
   of `.github/workflows/smartwizz.yml` to upgrade.
 - **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has
-  `logwizz-vX.Y.Z-linux-x64` (static, musl), `logwizz.service`, `logwizz.example.toml` and `SHA256SUMS.txt`, with
+  `logwizz-vX.Y.Z-linux-x64` (static, musl), `logwizz.service`, `logwizz.example.toml`, the notifier
+  (`logwizz-notify`, `logwizz-notify.service`, `notify.env.example`) and `SHA256SUMS.txt`, with
   generated release notes. Git tags are the source of truth. A PR label picks the bump: `release:patch` (the default),
   `release:minor`, `release:major`, or `release:none` to skip the release. The version shows in `logwizz --version`.
 

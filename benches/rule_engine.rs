@@ -108,7 +108,7 @@ fn bench_pipeline(c: &mut Criterion) {
                 let mut tf = TailedFile::new(path.clone(), StartupMode::Beginning, opts);
                 let mut hits = 0u64;
                 tf.poll(std::time::Instant::now(), &mut buf, &m, &mut |line| {
-                    e.for_each_match(line.bytes, |_| hits += 1)
+                    e.for_each_match(line.bytes, |_| hits += 1);
                 });
                 assert_eq!(m.snapshot().lines_processed, total_lines);
                 hits

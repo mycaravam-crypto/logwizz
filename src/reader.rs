@@ -537,6 +537,23 @@ impl TailedFile {
         false
     }
 
+    /// Applies a new rotation grace period (configuration reload); a file
+    /// already draining keeps its deadline.
+    pub fn set_drain_grace(&mut self, grace: Duration) {
+        self.opts.drain_grace = grace;
+    }
+
+    /// Stops reading: emits any incomplete trailing lines of the current
+    /// and the draining file and closes both. Used when a configuration
+    /// reload removes the file.
+    pub fn close(&mut self, m: &Metrics, on_line: &mut dyn FnMut(Line<'_>)) {
+        self.finish_draining(m, on_line);
+        if let Some(mut cur) = self.current.take() {
+            cur.splitter.flush(m, on_line);
+            metrics::dec(&m.files_monitored);
+        }
+    }
+
     fn finish_draining(&mut self, m: &Metrics, on_line: &mut dyn FnMut(Line<'_>)) {
         if let Some((mut src, _)) = self.draining.take() {
             src.splitter.flush(m, on_line);

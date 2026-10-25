@@ -28,6 +28,12 @@ jobs:
           systemd-analyze verify packaging/logwizz.service
           # Fails if the exposure score (0-100 scale; 4 = "0.4 SAFE") exceeds 10.
           systemd-analyze security --offline=yes --threshold=10 packaging/logwizz.service
+          sudo install -m 0755 packaging/logwizz-notify /usr/bin/logwizz-notify
+          systemd-analyze verify packaging/logwizz-notify.service
+          # The notifier needs network access, so it scores higher (13 = "1.3 OK").
+          systemd-analyze security --offline=yes --threshold=20 packaging/logwizz-notify.service
+      - name: Check shell scripts
+        run: shellcheck packaging/logwizz-notify
       - name: Check versioning policy
         run: bash .github/scripts/semver-next.test.sh
   msrv:

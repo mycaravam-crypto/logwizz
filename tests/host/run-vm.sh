@@ -22,7 +22,7 @@ fi
 rm -rf payload && mkdir payload
 (cd "$root" && cargo build --release --locked --target x86_64-unknown-linux-musl)
 install -m 0755 "$root/target/x86_64-unknown-linux-musl/release/logwizz" payload/logwizz
-cp "$root/packaging/logwizz.service" "$here/hostcheck.sh" "$here/logwizz.toml" payload/
+cp "$root/packaging/logwizz.service" "$root/packaging/logwizz-notify" "$root/packaging/logwizz-notify.service" "$here/hostcheck.sh" "$here/logwizz.toml" payload/
 
 cat > user-data <<'EOF'
 #cloud-config
