@@ -1,0 +1,21 @@
+# AI pull request review (bugs, security, missing tests, ENGINEERING_STANDARD) via SmartWizz.
+# Inline review comments on the PR lines, plus job summary + JSON artifact; fails on high/critical findings.
+# SmartWizz is pinned to a commit: bump the SHA in both places to upgrade.
+name: smartwizz
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  review:
+    # Fork PRs get no secrets; skip them instead of failing.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write # one review with inline comments; never approves or requests changes
+    uses: mycaravam-crypto/smartwizz/.github/workflows/review.yml@d7399027469af149e9d382400520e24db4bbd0e0 # main 2026-10-22
+    with:
+      fail-on: high
+      smartwizz-ref: d7399027469af149e9d382400520e24db4bbd0e0
+    secrets:
+      SMARTWIZZ_API_KEY: ${{ secrets.SMARTWIZZ_API_KEY }}
