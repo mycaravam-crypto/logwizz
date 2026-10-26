@@ -153,7 +153,14 @@ impl Thresholds {
                 g.previous_distinct.clear();
                 g.distinct.clear();
             }
-            g.start = now;
+            // Keep bucket boundaries aligned so previous-bucket weight
+            // decays according to elapsed time, not time since this event.
+            if t.window_mode == ThresholdWindow::Sliding {
+                let offset = elapsed.as_nanos() % t.window.as_nanos();
+                g.start = now - Duration::from_nanos(offset as u64);
+            } else {
+                g.start = now;
+            }
             g.count = 0;
         }
         match distinct {
@@ -169,9 +176,10 @@ impl Thresholds {
             } else {
                 // Two-bucket approximation. Use integer math and round up to
                 // avoid losing a marginal match at a bucket boundary.
-                let remaining = t.window.saturating_sub(
-                    now.saturating_duration_since(g.start)
-                ).as_nanos();
+                let remaining = t
+                    .window
+                    .saturating_sub(now.saturating_duration_since(g.start))
+                    .as_nanos();
                 let total = t.window.as_nanos();
                 let weighted = u128::from(g.previous_count) * remaining;
                 g.count.saturating_add(weighted.div_ceil(total) as u32)
@@ -303,14 +311,45 @@ mod tests {
         let mut config = threshold(GroupBy::All, None, 10);
         // A fixed window started at zero discards the nine early matches.
         for _ in 0..9 {
-            assert!(fixed.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0)).is_none());
+            assert!(
+            fixed
+                .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0))
+                .is_none()
+        );
         }
-        assert!(fixed.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 10)).is_none());
+        assert!(
+            fixed
+                .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 10))
+                .is_none()
+        );
         config.window_mode = ThresholdWindow::Sliding;
         for _ in 0..9 {
-            assert!(sliding.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0)).is_none());
+            assert!(
+            sliding
+                .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0))
+                .is_none()
+        );
         }
-        assert!(sliding.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 10)).is_some());
+        assert!(
+            sliding
+                .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 10))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn sliding_previous_bucket_weight_decays_after_boundary() {
+        let m = Arc::new(Metrics::default());
+        let mut th = Thresholds::new(1, 100, m);
+        let t0 = Instant::now();
+        let mut config = threshold(GroupBy::All, None, 10);
+        config.window_mode = ThresholdWindow::Sliding;
+        for _ in 0..9 {
+            assert!(th.observe(0, "r", &config, Path::new("a"), &[], t0).is_none());
+        }
+        // Half a window after rollover: previous nine count as five,
+        // plus one current match, still below the ten-match threshold.
+        assert!(th.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 15)).is_none());
     }
 
     #[test]
@@ -320,10 +359,22 @@ mod tests {
         let t0 = Instant::now();
         let mut config = threshold(GroupBy::Capture(1), Some(2), 3);
         config.window_mode = ThresholdWindow::Sliding;
-        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "22"), t0).is_none());
-        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "23"), t0).is_none());
-        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "22"), secs(t0, 10)).is_none());
-        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "24"), secs(t0, 10)).is_some());
+        assert!(
+            th.observe(0, "r", &config, Path::new("a"), &f("a", "22"), t0)
+                .is_none()
+        );
+        assert!(
+            th.observe(0, "r", &config, Path::new("a"), &f("a", "23"), t0)
+                .is_none()
+        );
+        assert!(
+            th.observe(0, "r", &config, Path::new("a"), &f("a", "22"), secs(t0, 10))
+                .is_none()
+        );
+        assert!(
+            th.observe(0, "r", &config, Path::new("a"), &f("a", "24"), secs(t0, 10))
+                .is_some()
+        );
     }
 
     #[test]
