@@ -85,6 +85,7 @@ Notification setup, window semantics, retry behavior and Telegram configuration 
 - [Host verification and systemd sandboxing](docs/HOST-VERIFICATION.md)
 - [Example configuration](config/logwizz.example.toml)
 - [Release binaries](https://github.com/mycaravam-crypto/logwizz/releases)
+- [Release verification, provenance and SBOMs](docs/RELEASE-VERIFICATION.md)
 
 ## Development
 
