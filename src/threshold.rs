@@ -367,7 +367,11 @@ mod tests {
         assert_eq!(obs(60, "1"), None);
         assert_eq!(obs(60, "2"), None);
         assert_eq!(obs(60, "3"), None);
-        assert_eq!(obs(60, "4").map(|f| f.count), Some(4));
+        let fired = obs(60, "4").unwrap();
+        assert_eq!(fired.count, 4);
+        // Values from the previous window stay in the sample, each once.
+        let sample: Vec<&[u8]> = fired.sample.iter().map(|v| &**v).collect();
+        assert_eq!(sample, [&b"1"[..], b"2", b"3", b"4"]);
     }
 
     fn f(src: &str, dpt: &str) -> Vec<(usize, Box<[u8]>)> {
