@@ -47,8 +47,7 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// TimeoutStopSec must be longer.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
 
-/// Settings, from the environment (`/etc/logwizz/notify.env`).
-#[derive(Debug)]
+/// Journal input compatibility mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalMode {
     Auto,
@@ -69,7 +68,11 @@ impl JournalMode {
     fn resolve(self) -> io::Result<Self> {
         let supported = journalctl_has_namespace()?;
         match self {
-            Self::Auto => Ok(if supported { Self::Namespace } else { Self::Legacy }),
+            Self::Auto => Ok(if supported {
+                Self::Namespace
+            } else {
+                Self::Legacy
+            }),
             Self::Namespace if !supported => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "journalctl does not support --namespace (requires systemd >= 245)",
@@ -87,6 +90,8 @@ fn journalctl_has_namespace() -> io::Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).contains("--namespace"))
 }
 
+/// Settings, from the environment (`/etc/logwizz/notify.env`).
+#[derive(Debug)]
 pub struct Settings {
     pub transport: Curl,
     pub window_secs: u64,
@@ -181,7 +186,9 @@ impl Settings {
             window_secs: number("NOTIFY_WINDOW_SECS", 60, 10, 3600)?,
             max_pending: number("NOTIFY_MAX_PENDING", 4096, 1, 65536)? as usize,
             min_priority,
-            journal_mode: JournalMode::parse(var("NOTIFY_JOURNAL_MODE").as_deref().unwrap_or("auto"))?,
+            journal_mode: JournalMode::parse(
+                var("NOTIFY_JOURNAL_MODE").as_deref().unwrap_or("auto"),
+            )?,
             state_dir,
             fields,
         })
@@ -375,24 +382,23 @@ fn parse_entry(json: &[u8]) -> Option<Entry> {
 
 /// Runs journalctl and passes its entries on until it exits; then the
 /// channel closes.
-fn spawn_journal(cursor: Option<&str>, min: Severity, mode: JournalMode) -> io::Result<Receiver<Entry>> {
+fn spawn_journal(
+    cursor: Option<&str>,
+    min: Severity,
+    mode: JournalMode,
+) -> io::Result<Receiver<Entry>> {
     let mut cmd = Command::new("journalctl");
     if mode == JournalMode::Namespace {
         cmd.arg("--namespace=logwizz");
     }
-    cmd.args([
-        "--unit=logwizz",
-        "--follow",
-        "--output=json",
-        "--no-pager",
-    ])
-    .arg(format!("--priority={}", min.syslog_priority()))
-    .arg(match cursor {
-        Some(c) => format!("--after-cursor={c}"),
-        None => "--lines=0".into(),
-    })
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped());
+    cmd.args(["--unit=logwizz", "--follow", "--output=json", "--no-pager"])
+        .arg(format!("--priority={}", min.syslog_priority()))
+        .arg(match cursor {
+            Some(c) => format!("--after-cursor={c}"),
+            None => "--lines=0".into(),
+        })
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
     // SAFETY: prctl is async-signal-safe and touches no memory of the
     // parent. journalctl exits with the reader thread, i.e. with us.
     unsafe {
@@ -718,7 +724,10 @@ mod tests {
     #[test]
     fn journal_mode_parsing() {
         assert_eq!(JournalMode::parse("auto").unwrap(), JournalMode::Auto);
-        assert_eq!(JournalMode::parse("namespace").unwrap(), JournalMode::Namespace);
+        assert_eq!(
+            JournalMode::parse("namespace").unwrap(),
+            JournalMode::Namespace
+        );
         assert_eq!(JournalMode::parse("legacy").unwrap(), JournalMode::Legacy);
         assert!(JournalMode::parse("invalid").is_err());
     }
