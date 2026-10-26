@@ -243,7 +243,7 @@ fn journal_replay_sliding_threshold_triggers_followup_only_for_matching_source()
         .as_micros();
     let at = |cursor: &str, ago: u128, message: &str| {
         format!(
-            "{{\\\"__CURSOR\\\":\\\"{cursor}\\\",\\\"__REALTIME_TIMESTAMP\\\":\\\"{}\\\",\\\"MESSAGE\\\":{}}}\\n",
+            "{{\"__CURSOR\":\"{cursor}\",\"__REALTIME_TIMESTAMP\":\"{}\",\"MESSAGE\":{}}}\n",
             now_us - ago * 1_000_000,
             serde_json::to_string(message).unwrap()
         )
@@ -267,7 +267,7 @@ diagnostics = "info"
 [[rules]]
 id = "probe"
 match_type = "regex"
-pattern = 'probe (?P<src>\\S+)'
+pattern = 'probe (?P<src>\S+)'
 severity = "warning"
 [rules.threshold]
 group_by = "src"
@@ -278,7 +278,7 @@ window = "sliding"
 [[rules]]
 id = "login_after_probe"
 match_type = "regex"
-pattern = 'login (?P<src>\\S+)'
+pattern = 'login (?P<src>\S+)'
 severity = "critical"
 [rules.after]
 rules = ["probe"]
