@@ -21,12 +21,18 @@ path = "/var/log/audit/audit.log"
 # process and the rule's key. auditd hex-encodes values with spaces, quotes or
 # control characters, so a crafted program name cannot fake these fields; a
 # hex-encoded exe still matches, without an `exe` field.
+#
+# With auditd's default `log_format = ENRICHED` (Debian, Ubuntu), auditd
+# appends the resolved names after a 0x1d byte: `uid_name` (e.g. www-data) and
+# `auid_name` (the login user, `unset` when nobody logged in). A process cannot
+# write that byte into the record, so the names come from auditd. With
+# `log_format = RAW` the rules still match, without these two fields.
 
 [[rules]]
 id = "service_exec"
 description = "A service user started a program"
 match_type = "regex"
-pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* ppid=(?P<ppid>\d+) pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_service_exec"'
+pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* ppid=(?P<ppid>\d+) pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_service_exec"(?:\x1d.*? AUID="(?P<auid_name>[^"]*)" UID="(?P<uid_name>[^"]*)")?'
 severity = "critical"
 # Programs the service runs legitimately, for example PHP's mail():
 # [rules.exclude]
@@ -36,7 +42,7 @@ severity = "critical"
 id = "sensitive_write"
 description = "An identity or access file was changed"
 match_type = "regex"
-pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_sensitive_write"'
+pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_sensitive_write"(?:\x1d.*? AUID="(?P<auid_name>[^"]*)" UID="(?P<uid_name>[^"]*)")?'
 severity = "warning"
 
 # Blind spots made visible. Removing logwizz's audit rules or disabling audit
