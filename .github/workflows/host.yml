@@ -5,11 +5,11 @@
 name: host
 on:
   pull_request:
-    paths: [src/**, packaging/**, tests/host/**, config/detection.toml, docs/DETECTION.md, Cargo.toml, Cargo.lock,
+    paths: [src/**, packaging/**, tests/host/**, config/detection.toml, config/runtime.toml, docs/DETECTION.md, Cargo.toml, Cargo.lock,
       .github/workflows/host.yml]
   push:
     branches: [main]
-    paths: [src/**, packaging/**, tests/host/**, config/detection.toml, docs/DETECTION.md, Cargo.toml, Cargo.lock,
+    paths: [src/**, packaging/**, tests/host/**, config/detection.toml, config/runtime.toml, docs/DETECTION.md, Cargo.toml, Cargo.lock,
       .github/workflows/host.yml]
   schedule:
     - cron: '17 5 * * 1'
