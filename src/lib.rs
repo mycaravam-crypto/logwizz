@@ -3,7 +3,6 @@
 //! The binary in `main.rs` is a thin wrapper; all logic lives in these
 //! modules so that it can be exercised directly by integration tests.
 
-pub mod active_response;
 pub mod cli;
 pub mod config;
 pub mod daemon;

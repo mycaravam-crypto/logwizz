@@ -1,9 +1,18 @@
 # Active response via Fail2ban — design draft (#74)
 
-**Status: foundation only, not ready for enforcement.** No code in this
-branch calls Fail2ban or alters firewall rules. No runtime configuration is
-enabled. The address guard is deliberately conservative, and does not yet
-cover all registry-reserved address ranges.
+**Decision: active response goes through the existing Fail2ban bridge.**
+The bridge stays unprivileged and outside the daemon. It writes validated
+lines for a configurable rule list (`BRIDGE_RULES`), refuses non-global
+addresses (Python's `ipaddress.is_global`, which follows the IANA
+special-purpose registries) and `BRIDGE_IGNORE` networks, has a dry-run mode
+and fails closed on invalid settings. One generic Fail2ban filter matches
+every bridge line, so no rule needs a filter of its own. Fail2ban, which
+already runs privileged, does the banning, keeps ban state and unbans.
+There is no privileged broker or socket protocol. See [FAIL2BAN.md](FAIL2BAN.md).
+
+The broker design below is kept for reference. The first milestone's Rust
+address guard (`src/active_response.rs`) was removed: the bridge does that
+check itself.
 
 ## Goal
 
@@ -33,7 +42,8 @@ attack-specific filter. Fail2ban still needs an explicitly configured
 
 ## First code milestone
 
-`src/active_response.rs` provides a **pure** `candidate_ip` function
+(Removed; superseded by the bridge's address check.) `src/active_response.rs`
+provided a **pure** `candidate_ip` function
 with no I/O, side effects, or command execution. It rejects malformed
 addresses, common special-use ranges, and explicit exact-address exclusions.
 Unit tests cover invalid inputs, private/reserved IPv4/IPv6, allowlists, and
