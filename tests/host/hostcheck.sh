@@ -321,5 +321,27 @@ else
 fi
 systemctl stop logwizz
 
+# 19. Runtime detection (docs/RUNTIME-DETECTION.md): with the shipped audit rules and the runtime.toml rules, the
+# service reads audit.log through adm, a program started by www-data and a write to /etc/passwd are reported, and
+# removing the rules as documented is reported too.
+if command -v auditctl >/dev/null || { apt-get update -q && apt-get install -qy auditd; } >/dev/null 2>&1; then
+  echo "=== audit"; grep -E '^log_(group|format)' /etc/audit/auditd.conf; ls -ld /var/log/audit /var/log/audit/audit.log
+  install -m 0640 "$P/logwizz.rules" /etc/audit/rules.d/logwizz.rules
+  augenrules --load >/dev/null && auditctl -l | grep -c logwizz_
+  sed -n '/^\[\[files\]\]/,$p' "$P/runtime.toml" >> /etc/logwizz/logwizz.toml
+  systemctl start logwizz; sleep 2
+  unreadable() { events | grep -F 'path=/var/log/audit/audit.log' | grep -v '^{' | tail -1; }
+  runuser -u www-data -- /bin/true
+  if wait_for '"rule":"service_exec"' 10 &&
+     events | grep -F '"rule":"service_exec"' | grep -q '"uid":"33".*"exe":"/usr/bin/true"'; then
+    res runtime_exec PASS "uid=33 exe=/usr/bin/true"
+  else res runtime_exec FAIL "no service_exec event $(unreadable)"; fi
+  sh -c ': >> /etc/passwd'
+  expect_event runtime_write '"rule":"sensitive_write"' sensitive_write /var/log/audit/audit.log
+  rm /etc/audit/rules.d/logwizz.rules; augenrules --load >/dev/null
+  expect_event runtime_rules_removed '"rule":"audit_disabled"' audit_disabled /var/log/audit/audit.log
+  systemctl stop logwizz
+else res runtime_exec KNOWN "skipped: could not install auditd"; fi
+
 echo "=== journal (tail)"; journalctl --namespace=logwizz -u logwizz -o short-precise --no-pager | tail -40
 echo "SUMMARY pass=$pass fail=$fail known=$known"
