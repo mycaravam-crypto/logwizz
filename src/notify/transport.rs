@@ -126,7 +126,6 @@ impl Deliver for Curl {
                 "10",
                 "--retry",
                 "3",
-                "--retry-all-errors",
                 "--retry-delay",
                 "1",
                 "--proto",

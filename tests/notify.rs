@@ -35,6 +35,13 @@ exec sleep 1000
 
 /// Saves its arguments and its stdin (the config with the request) per call.
 const CURL: &str = r#"#!/bin/sh
+# Emulate curl 7.64: reject the option introduced in curl 7.71.
+for arg do
+  if [ "$arg" = "--retry-all-errors" ]; then
+    echo "curl: option --retry-all-errors: is unknown" >&2
+    exit 2
+  fi
+done
 n=$(find "$WORK/requests" -name '*.conf' | wc -l)
 printf '%s\n' "$@" > "$WORK/requests/$n.args"
 cat > "$WORK/requests/$n.conf"
