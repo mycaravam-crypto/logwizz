@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -69,6 +69,8 @@ impl Start {
 struct Entry {
     cursor: Arc<str>,
     message: Option<Vec<u8>>,
+    /// `__REALTIME_TIMESTAMP`: when the entry was logged.
+    time: Option<SystemTime>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +79,9 @@ struct RawEntry {
     cursor: String,
     #[serde(rename = "MESSAGE", default)]
     message: Option<Message>,
+    /// Microseconds since the epoch, as a decimal string.
+    #[serde(rename = "__REALTIME_TIMESTAMP", default)]
+    realtime: Option<String>,
 }
 
 /// journalctl writes `MESSAGE` as a string, or as an array of bytes when
@@ -99,9 +104,14 @@ fn parse(json: &[u8]) -> Option<Entry> {
             m.pop();
         }
     }
+    let time = raw
+        .realtime
+        .and_then(|us| us.parse().ok())
+        .and_then(|us| UNIX_EPOCH.checked_add(Duration::from_micros(us)));
     Some(Entry {
         cursor: raw.cursor.into(),
         message,
+        time,
     })
 }
 
@@ -178,6 +188,7 @@ impl Journal {
                 on_line(Line {
                     bytes: &msg[..msg.len().min(self.max_line_bytes)],
                     truncated,
+                    time: entry.time,
                 });
             }
             self.cursor = Some(entry.cursor);
@@ -274,9 +285,17 @@ mod tests {
             e,
             Some(Entry {
                 cursor: "s=1".into(),
-                message: Some(b"Failed password".to_vec())
+                message: Some(b"Failed password".to_vec()),
+                time: None,
             })
         );
+        let e = parse(br#"{"__CURSOR":"s=5","__REALTIME_TIMESTAMP":"1761400000123456"}"#);
+        assert_eq!(
+            e.unwrap().time,
+            Some(UNIX_EPOCH + Duration::from_micros(1_761_400_000_123_456))
+        );
+        let e = parse(br#"{"__CURSOR":"s=6","__REALTIME_TIMESTAMP":"soon"}"#);
+        assert_eq!(e.unwrap().time, None, "unparsable: read time is used");
         let e = parse(br#"{"__CURSOR":"s=2","MESSAGE":[255,104,105]}"#).unwrap();
         assert_eq!(e.message.as_deref(), Some(&b"\xffhi"[..]));
         let e = parse(br#"{"__CURSOR":"s=3","MESSAGE":null}"#).unwrap();

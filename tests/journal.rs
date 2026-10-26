@@ -198,3 +198,38 @@ fn journalctl_is_restarted_after_the_last_cursor() {
     );
     d.stop();
 }
+
+#[test]
+fn thresholds_count_in_journal_time_when_catching_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    let at = |cursor: &str, ago_secs: u128, src: &str| {
+        format!(
+            "{{\"__CURSOR\":\"{cursor}\",\"__REALTIME_TIMESTAMP\":\"{}\",\
+             \"MESSAGE\":\"Failed password for root from {src} port 22 ssh2\"}}\n",
+            now_us - ago_secs * 1_000_000
+        )
+    };
+    // Read all at once, but logged 30 s apart: no 3 within a minute.
+    let mut feed = String::new();
+    for (i, ago) in [90, 60, 30, 0].into_iter().enumerate() {
+        feed.push_str(&at(&format!("a{i}"), ago, "192.0.2.1"));
+    }
+    // A real burst, logged within the same second.
+    for i in 0..3 {
+        feed.push_str(&at(&format!("b{i}"), 0, "192.0.2.2"));
+    }
+    fake_journalctl(dir.path(), &feed, true);
+    let config = format!(
+        "[general]\ndiagnostics = \"info\"\n\n[journal]\n{RULES}\
+         [rules.threshold]\ngroup_by = \"src\"\ncount = 3\nwindow_secs = 60\n"
+    );
+    let d = Daemon::start(dir.path(), &config);
+    let ev = d.event();
+    assert_eq!(ev["fields"]["src"], "192.0.2.2");
+    assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
+    d.stop();
+}
