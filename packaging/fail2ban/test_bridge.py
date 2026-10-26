@@ -216,8 +216,12 @@ class FollowProcessTests(unittest.TestCase):
 
     def test_blank_explicit_allowlist_is_rejected(self):
         # An explicitly configured empty policy must never silently enable defaults.
-        for raw in ("", " ", ",", " , "):
-            with self.assertRaises(ValueError, msg=repr(raw)):
+        for raw in ("", " ", "\t", "\n"):
+            with self.assertRaisesRegex(ValueError, "explicit empty allowlist", msg=repr(raw)):
+                BRIDGE.Settings({"BRIDGE_RULES": raw})
+        # Separators alone leave no rule IDs and are rejected as invalid.
+        for raw in (",", " , ", ",,"):
+            with self.assertRaisesRegex(ValueError, "invalid rule IDs", msg=repr(raw)):
                 BRIDGE.Settings({"BRIDGE_RULES": raw})
 
     def test_unauthorized_rule_with_global_src_does_not_enforce(self):
