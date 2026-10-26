@@ -177,7 +177,8 @@ impl Thresholds {
         let left = t
             .window
             .saturating_sub(now.saturating_duration_since(g.start));
-        let share = u128::from(g.prev_count) * left.as_nanos() / t.window.as_nanos();
+        // Round up conservatively: integer truncation here can undercount a threshold at the boundary.
+        let share = (u128::from(g.prev_count) * left.as_nanos()).div_ceil(t.window.as_nanos());
         let count = g.count + share as u32;
         if count < t.count {
             return None;
@@ -279,6 +280,29 @@ mod tests {
         assert_eq!(run(&fixed), None, "each fixed window holds fewer than 10");
         // At 60 s, 9 previous matches weigh in almost fully.
         assert_eq!(run(&sliding(None, 10)), Some(9));
+    }
+
+    #[test]
+    fn sliding_window_rounds_previous_bucket_weight_up_at_threshold_boundary() {
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, m), Instant::now());
+        let mut t = sliding(None, 11);
+        t.window = Duration::from_secs(10);
+        for _ in 0..9 {
+            assert_eq!(th.observe(0, "r", &t, Path::new("a"), &[], t0), None);
+        }
+        // At 10 s, 9 previous + 1 current remain below 11.
+        assert_eq!(
+            th.observe(0, "r", &t, Path::new("a"), &[], secs(t0, 10)),
+            None
+        );
+        // At 11 s the previous bucket contributes 8.1 by the estimate.
+        // Rounding down would miss 11; conservative rounding reaches it.
+        assert_eq!(
+            th.observe(0, "r", &t, Path::new("a"), &[], secs(t0, 11))
+                .map(|f| f.count),
+            Some(11)
+        );
     }
 
     #[test]
