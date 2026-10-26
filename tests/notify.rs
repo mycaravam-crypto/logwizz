@@ -17,6 +17,10 @@ const URL: &str = "https://example.invalid/logwizz";
 /// Prints the fixture after the line holding the `--after-cursor` cursor,
 /// then follows forever (like `journalctl -f`) unless JOURNAL_EXIT is set.
 const JOURNALCTL: &str = r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  echo "  --namespace=NAME  Show logs from the specified journal namespace"
+  exit 0
+fi
 printf '%s\n' "$@" > "$WORK/journalctl.args"
 cursor=
 for arg do case "$arg" in --after-cursor=*) cursor=${arg#--after-cursor=} ;; esac; done
