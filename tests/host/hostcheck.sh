@@ -327,7 +327,13 @@ systemctl stop logwizz
 if command -v auditctl >/dev/null || { apt-get update -q && apt-get install -qy auditd; } >/dev/null 2>&1; then
   echo "=== audit"; grep -E '^log_(group|format)' /etc/audit/auditd.conf; ls -ld /var/log/audit /var/log/audit/audit.log
   install -m 0640 "$P/logwizz.rules" /etc/audit/rules.d/logwizz.rules
-  augenrules --load >/dev/null && auditctl -l | grep -c logwizz_
+  if augenrules --load >/dev/null 2>&1 &&
+     auditctl -l | grep -q 'logwizz_service_exec' &&
+     auditctl -l | grep -q 'logwizz_sensitive_write'; then
+    res runtime_rules_loaded PASS "both packaged audit rule keys active"
+  else
+    res runtime_rules_loaded FAIL "audit rules missing or failed to load"
+  fi
   sed -n '/^\[\[files\]\]/,$p' "$P/runtime.toml" >> /etc/logwizz/logwizz.toml
   systemctl start logwizz; sleep 2
   unreadable() { events | grep -F 'path=/var/log/audit/audit.log' | grep -v '^{' | tail -1; }
