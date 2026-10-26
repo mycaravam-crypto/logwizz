@@ -47,6 +47,49 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// TimeoutStopSec must be longer.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
 
+/// Journal input compatibility mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalMode {
+    Auto,
+    Namespace,
+    Legacy,
+}
+
+impl JournalMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "namespace" => Ok(Self::Namespace),
+            "legacy" => Ok(Self::Legacy),
+            _ => Err("NOTIFY_JOURNAL_MODE must be auto, namespace or legacy".into()),
+        }
+    }
+
+    fn resolve(self) -> io::Result<Self> {
+        let supported = journalctl_has_namespace()?;
+        match self {
+            Self::Auto => Ok(if supported {
+                Self::Namespace
+            } else {
+                Self::Legacy
+            }),
+            Self::Namespace if !supported => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "journalctl does not support --namespace (requires systemd >= 245)",
+            )),
+            other => Ok(other),
+        }
+    }
+}
+
+fn journalctl_has_namespace() -> io::Result<bool> {
+    let output = Command::new("journalctl").arg("--help").output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("journalctl --help failed"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).contains("--namespace"))
+}
+
 /// Settings, from the environment (`/etc/logwizz/notify.env`).
 #[derive(Debug)]
 pub struct Settings {
@@ -54,6 +97,7 @@ pub struct Settings {
     pub window_secs: u64,
     pub max_pending: usize,
     pub min_priority: Severity,
+    pub journal_mode: JournalMode,
     pub state_dir: PathBuf,
     /// Captures that may leave the host (NOTIFY_FIELDS).
     pub fields: Vec<String>,
@@ -142,6 +186,9 @@ impl Settings {
             window_secs: number("NOTIFY_WINDOW_SECS", 60, 10, 3600)?,
             max_pending: number("NOTIFY_MAX_PENDING", 4096, 1, 65536)? as usize,
             min_priority,
+            journal_mode: JournalMode::parse(
+                var("NOTIFY_JOURNAL_MODE").as_deref().unwrap_or("auto"),
+            )?,
             state_dir,
             fields,
         })
@@ -335,22 +382,23 @@ fn parse_entry(json: &[u8]) -> Option<Entry> {
 
 /// Runs journalctl and passes its entries on until it exits; then the
 /// channel closes.
-fn spawn_journal(cursor: Option<&str>, min: Severity) -> io::Result<Receiver<Entry>> {
+fn spawn_journal(
+    cursor: Option<&str>,
+    min: Severity,
+    mode: JournalMode,
+) -> io::Result<Receiver<Entry>> {
     let mut cmd = Command::new("journalctl");
-    cmd.args([
-        "--namespace=logwizz",
-        "--unit=logwizz",
-        "--follow",
-        "--output=json",
-        "--no-pager",
-    ])
-    .arg(format!("--priority={}", min.syslog_priority()))
-    .arg(match cursor {
-        Some(c) => format!("--after-cursor={c}"),
-        None => "--lines=0".into(),
-    })
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped());
+    if mode == JournalMode::Namespace {
+        cmd.arg("--namespace=logwizz");
+    }
+    cmd.args(["--unit=logwizz", "--follow", "--output=json", "--no-pager"])
+        .arg(format!("--priority={}", min.syslog_priority()))
+        .arg(match cursor {
+            Some(c) => format!("--after-cursor={c}"),
+            None => "--lines=0".into(),
+        })
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
     // SAFETY: prctl is async-signal-safe and touches no memory of the
     // parent. journalctl exits with the reader thread, i.e. with us.
     unsafe {
@@ -540,16 +588,27 @@ pub enum Exit {
 
 /// Runs until SIGTERM/SIGINT or until journalctl exits.
 pub fn run(settings: Settings) -> io::Result<Exit> {
+    let mode = settings.journal_mode.resolve()?;
     let stop = Arc::new(AtomicBool::new(false));
     spawn_signal_thread(Arc::clone(&stop))?;
-    fs::create_dir_all(&settings.state_dir)?;
+    // Keep cursors and pending deliveries from distinct journals separate.
+    let state_dir = if mode == JournalMode::Legacy {
+        settings.state_dir.join("legacy")
+    } else {
+        settings.state_dir.clone()
+    };
+    fs::create_dir_all(&state_dir)?;
 
-    let state = load_state(&settings.state_dir, settings.window_secs)?;
-    let legacy = legacy_files(&settings.state_dir);
+    let state = load_state(&state_dir, settings.window_secs)?;
+    let legacy = if mode == JournalMode::Namespace {
+        legacy_files(&state_dir)
+    } else {
+        Vec::new()
+    };
     let mut n = Notifier {
         agg: Aggregator::new(settings.window_secs, settings.max_pending, state.summaries),
         deliver: settings.transport,
-        state_dir: settings.state_dir,
+        state_dir,
         fields: settings.fields,
         cursor: state.cursor,
         dirty: !legacy.is_empty(),
@@ -561,9 +620,10 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         window_secs = settings.window_secs,
         min_priority = %settings.min_priority,
         pending = n.agg.len(),
+        journal_mode = ?mode,
         "logwizz-notify started"
     );
-    let rx = spawn_journal(n.cursor.as_deref(), settings.min_priority)?;
+    let rx = spawn_journal(n.cursor.as_deref(), settings.min_priority, mode)?;
     Ok(main_loop(&mut n, &rx, &stop))
 }
 
@@ -659,6 +719,17 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         move |k| map.get(k).cloned()
+    }
+
+    #[test]
+    fn journal_mode_parsing() {
+        assert_eq!(JournalMode::parse("auto").unwrap(), JournalMode::Auto);
+        assert_eq!(
+            JournalMode::parse("namespace").unwrap(),
+            JournalMode::Namespace
+        );
+        assert_eq!(JournalMode::parse("legacy").unwrap(), JournalMode::Legacy);
+        assert!(JournalMode::parse("invalid").is_err());
     }
 
     #[test]
