@@ -214,7 +214,6 @@ class FollowProcessTests(unittest.TestCase):
             self.assertTrue(lines[0].endswith(f"logwizz rule=ssh_bruteforce src={V4}"))
             self.assertEqual(output.stat().st_mode & 0o777, 0o640)
 
-
     def test_blank_explicit_allowlist_is_rejected(self):
         # An explicitly configured empty policy must never silently enable defaults.
         for raw in ("", " ", ",", " , "):
@@ -231,10 +230,13 @@ class FollowProcessTests(unittest.TestCase):
         settings = BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"})
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "fail2ban.log"
-            feed = "\\n".join(event("log_flood", V4) for _ in range(2000)) + "\\n"
+            # One trailing eligible event proves the whole feed was consumed.
+            rejected = [event("log_flood", V4)] * 2000
+            feed = "\n".join(rejected + [event("ssh_bruteforce", V4), ""])
             stderr = self.run_stream(settings, feed, output)
-            self.assertNotIn("would write:", stderr)
+            self.assertEqual(stderr.count("would write:"), 1)
             self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
