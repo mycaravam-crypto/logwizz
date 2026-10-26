@@ -1,0 +1,94 @@
+# Compatibility unit for Debian 10 / systemd 241.
+# No journal namespace: exclude logwizz output from any monitored syslog files.
+# systemd unit for logwizz.
+#
+# Install the binary as /usr/bin/logwizz and the configuration as
+# /etc/logwizz/logwizz.toml, mode 0640 and group adm (the service user is
+# transient and reads it through SupplementaryGroups), then:
+#   systemctl daemon-reload && systemctl enable --now logwizz
+#
+# Events go to stdout and therefore to the journal, in the separate
+# "logwizz" namespace (see LogNamespace below):
+#   journalctl --namespace=logwizz -u logwizz -o cat
+#
+# Read access: the service runs as a transient unprivileged user
+# (DynamicUser) and gains read access to logs via SupplementaryGroups.
+# On Debian/Ubuntu most of /var/log is readable by group "adm". Other
+# distributions differ (e.g. /var/log/secure is often root-only 0600 on
+# RHEL); grant access with a group or ACL rather than running as root:
+#   setfacl -m g:logwizz:r /var/log/secure
+# and add that group below. Do not add capabilities such as
+# CAP_DAC_READ_SEARCH unless no narrower option exists.
+
+[Unit]
+Description=logwizz log monitoring daemon
+Documentation=https://github.com/mycaravam-crypto/logwizz
+After=local-fs.target
+
+[Service]
+Type=exec
+ExecStartPre=/usr/bin/logwizz --check-config --config /etc/logwizz/logwizz.toml
+ExecStart=/usr/bin/logwizz --config /etc/logwizz/logwizz.toml
+# `systemctl reload logwizz` re-reads the configuration. An invalid file is
+# logged and the running configuration is kept.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+# logwizz stops reading, flushes queued events and exits 0 on SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+# Own journal namespace (systemd >= 245). Without it, events reach the main
+# journal, rsyslog copies them into /var/log/syslog, and a watched syslog file
+# would match logwizz's own events again. Retention for the namespace is set
+# in /etc/systemd/journald@logwizz.conf.
+
+# Identity and privileges
+DynamicUser=yes
+SupplementaryGroups=adm
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+# Filesystem: everything read-only, no home directories, private /tmp.
+# /var/lib/logwizz stays writable for general.state_file.
+StateDirectory=logwizz
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# Reading [journal]: journalctl needs the systemd-journal group and
+# /proc/sys/kernel/random/boot_id. Add with `systemctl edit logwizz`:
+#   [Service]
+#   SupplementaryGroups=systemd-journal
+#   ProcSubset=all
+
+# Kernel and system interfaces
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+
+# No network access is needed. stdout is a pre-connected journal stream.
+RestrictAddressFamilies=AF_UNIX
+
+# System calls (inotify is part of @system-service via @file-system).
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# Resource limits. Memory use is bounded by configuration; see README.
+MemoryMax=128M
+TasksMax=16
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
