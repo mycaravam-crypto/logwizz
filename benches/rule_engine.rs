@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use logwizz::config::{self, GroupBy, Limits, StartupMode, Threshold};
+use logwizz::config::{self, GroupBy, Limits, StartupMode, Threshold, ThresholdWindow};
 use logwizz::dispatcher::Limiter;
 use logwizz::engine::Engine;
 use logwizz::metrics::Metrics;
@@ -167,6 +167,7 @@ fn bench_threshold(c: &mut Criterion) {
         distinct: Some(2),
         count: 20,
         window: Duration::from_secs(10),
+        window_mode: ThresholdWindow::Fixed,
         cooldown: Duration::from_secs(300),
     };
     let line = |src: u32, dpt: u32| {
