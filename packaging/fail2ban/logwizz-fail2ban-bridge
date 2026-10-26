@@ -42,6 +42,8 @@ RULE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 class Settings:
     def __init__(self, env):
         rules = env.get("BRIDGE_RULES", "").strip()
+        if "BRIDGE_RULES" in env and not rules:
+            raise ValueError("BRIDGE_RULES: explicit empty allowlist is invalid")
         if rules:
             self.rules = frozenset(r.strip() for r in rules.split(",") if r.strip())
             bad = sorted(r for r in self.rules if not RULE_ID.fullmatch(r))
