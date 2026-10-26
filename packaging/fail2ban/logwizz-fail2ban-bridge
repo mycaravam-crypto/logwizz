@@ -3,17 +3,30 @@
 
 This optional adapter is deliberately outside the Logwizz Rust daemon.
 It reads the dedicated systemd journal namespace and writes only validated,
-explicitly eligible source-IP events.
+explicitly eligible source-IP events. Fail2ban, with one generic filter,
+does the banning.
+
+Settings come from the environment (/etc/logwizz/fail2ban-bridge.env):
+
+BRIDGE_RULES    comma-separated rule IDs that may lead to a ban
+                (default: DEFAULT_RULES)
+BRIDGE_IGNORE   comma-separated addresses or networks never written
+BRIDGE_DRY_RUN  1: log what would be written, write nothing
+
+Invalid settings stop the bridge before it reads anything (fail closed).
 """
+import contextlib
 import ipaddress
 import json
+import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 OUTPUT = Path("/var/log/logwizz/fail2ban.log")
-ELIGIBLE_RULES = {
+DEFAULT_RULES = frozenset({
     "port_scan",
     "fast_scan",
     "slow_scan",
@@ -21,17 +34,50 @@ ELIGIBLE_RULES = {
     "ssh_bruteforce",
     "ssh_probe",
     "scanner_user_agent",
-}
+})
+# Logwizz rule IDs: ASCII letters, digits, '_', '-', '.' and ':'.
+RULE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 
-def format_event(raw: str) -> str | None:
+class Settings:
+    def __init__(self, env):
+        rules = env.get("BRIDGE_RULES", "").strip()
+        if rules:
+            self.rules = frozenset(r.strip() for r in rules.split(",") if r.strip())
+            bad = sorted(r for r in self.rules if not RULE_ID.fullmatch(r))
+            if bad or not self.rules:
+                raise ValueError(f"BRIDGE_RULES: invalid rule IDs {bad}")
+        else:
+            self.rules = DEFAULT_RULES
+        try:
+            self.ignore = tuple(
+                ipaddress.ip_network(n.strip(), strict=False)
+                for n in env.get("BRIDGE_IGNORE", "").split(",")
+                if n.strip()
+            )
+        except ValueError as exc:
+            raise ValueError(f"BRIDGE_IGNORE: {exc}") from None
+        dry = env.get("BRIDGE_DRY_RUN", "0").strip()
+        if dry not in ("0", "1"):
+            raise ValueError("BRIDGE_DRY_RUN must be 0 or 1")
+        self.dry_run = dry == "1"
+
+
+def bannable(address) -> bool:
+    """Only globally routable unicast addresses: never loopback, private,
+    link-local, documentation, shared (CGNAT), multicast or other
+    special-purpose ranges, whatever a log line claims."""
+    return address.is_global and not address.is_multicast
+
+
+def format_event(raw: str, settings: Settings) -> str | None:
     """Return one normalized Fail2ban line for an eligible event, else None."""
     try:
         event = json.loads(raw)
         if not isinstance(event, dict):
             return None
         rule = event.get("rule")
-        if rule not in ELIGIBLE_RULES:
+        if rule not in settings.rules:
             return None
         fields = event.get("fields")
         src = fields.get("src") if isinstance(fields, dict) else None
@@ -42,33 +88,57 @@ def format_event(raw: str) -> str | None:
         address = getattr(address, "ipv4_mapped", None) or address
     except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
         return None
+    if not bannable(address) or any(address in net for net in settings.ignore):
+        return None
     return f"logwizz rule={rule} src={address.compressed}"
 
 
 def main() -> int:
-    OUTPUT.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
     try:
-        with OUTPUT.open("a", encoding="utf-8") as out:
-            OUTPUT.chmod(0o640)
-            cmd = [
-                "journalctl", "--namespace=logwizz", "--unit=logwizz.service",
-                "--output=cat", "--follow", "--since=now",
-            ]
-            with subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=sys.stderr,
-                text=True, encoding="utf-8", errors="replace", bufsize=1,
-            ) as proc:
-                assert proc.stdout is not None
-                for raw in proc.stdout:
-                    line = format_event(raw)
-                    if line is not None:
-                        # Fail2ban ignores matches without a timestamp; it reads this as local time.
-                        out.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
-                        out.flush()
-                return proc.wait()
+        settings = Settings(os.environ)
+    except ValueError as exc:
+        print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
+        return 2
+    mode = "dry run, writing nothing" if settings.dry_run else f"writing {OUTPUT}"
+    print(
+        f"logwizz-fail2ban-bridge: rules={','.join(sorted(settings.rules))} "
+        f"ignored networks={len(settings.ignore)}; {mode}",
+        file=sys.stderr,
+    )
+    try:
+        with contextlib.ExitStack() as stack:
+            return follow(settings, stack)
     except OSError as exc:
         print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
         return 1
+
+
+def follow(settings: Settings, stack: contextlib.ExitStack) -> int:
+    out = None
+    if not settings.dry_run:
+        OUTPUT.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        out = stack.enter_context(OUTPUT.open("a", encoding="utf-8"))
+        OUTPUT.chmod(0o640)
+    cmd = [
+        "journalctl", "--namespace=logwizz", "--unit=logwizz.service",
+        "--output=cat", "--follow", "--since=now",
+    ]
+    with subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=sys.stderr,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    ) as proc:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = format_event(raw, settings)
+            if line is None:
+                continue
+            if out is None:
+                print(f"logwizz-fail2ban-bridge: would write: {line}", file=sys.stderr)
+                continue
+            # Fail2ban ignores matches without a timestamp; it reads this as local time.
+            out.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+            out.flush()
+        return proc.wait()
 
 
 if __name__ == "__main__":

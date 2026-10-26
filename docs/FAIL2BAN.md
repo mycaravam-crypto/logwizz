@@ -10,7 +10,7 @@ installing the files alone.
 
 The optional bridge follows the packaged service's dedicated systemd journal
 namespace, parses JSON events, and writes a normalized line only for an
-explicit allowlist of rules with a valid source IP:
+explicit allowlist of rules with a valid source IP. By default these are:
 
 - `port_scan`
 - `fast_scan`
@@ -20,8 +20,15 @@ explicit allowlist of rules with a valid source IP:
 - `ssh_probe`
 - `scanner_user_agent`
 
-Events without a `fields.src` address, malformed JSON, unrelated rules and
-invalid IP addresses are ignored. The bridge uses Python's standard library;
+`BRIDGE_RULES` replaces the list, so any Logwizz rule with a `src` capture
+can lead to a ban without a Fail2ban filter of its own: the one generic
+`logwizz` filter matches every line the bridge writes.
+
+Events without a `fields.src` address, malformed JSON, unlisted rules and
+invalid IP addresses are ignored. So are addresses that are not globally
+routable (loopback, private, link-local, shared/CGNAT, documentation,
+multicast and other special-purpose ranges, also as IPv4-mapped IPv6), and
+addresses in `BRIDGE_IGNORE`, whatever a log line claims. The bridge uses Python's standard library;
 it adds no Rust dependency and does not modify Logwizz configuration or
 runtime behavior. It starts following from the current time, so it does not
 replay old journal events on startup.
@@ -44,7 +51,26 @@ sudo install -D -m 0644 packaging/fail2ban/jail.d/logwizz.local \
   /etc/fail2ban/jail.d/logwizz.local
 sudo install -D -m 0644 packaging/fail2ban/logrotate.conf \
   /etc/logrotate.d/logwizz-fail2ban
+sudo install -D -m 0644 packaging/fail2ban/fail2ban-bridge.env.example \
+  /etc/logwizz/fail2ban-bridge.env
 ```
+
+## Settings
+
+`/etc/logwizz/fail2ban-bridge.env` is optional; without it the bridge uses
+the defaults.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BRIDGE_RULES` | the list above | Comma-separated rule IDs whose events may lead to a ban. |
+| `BRIDGE_IGNORE` | empty | Comma-separated addresses and networks never written, e.g. `192.0.2.10,10.0.0.0/8`. |
+| `BRIDGE_DRY_RUN` | `0` | `1`: log each line it would write to the bridge's journal, and write nothing. The example file sets it. |
+
+An invalid value stops the bridge before it reads any event, with the
+reason in `journalctl -u logwizz-fail2ban-bridge`. Its startup message
+lists the active rules and mode. Leave out rules that can report your own
+traffic (`ssh_login`, `login_after_scan`) and network rules (`subnet_scan`:
+the event's `src` is only the last address of the network).
 
 The bridge runs as a dynamic unprivileged user with read access to the system
 journal and writes `/var/log/logwizz/fail2ban.log`. Fail2ban normally runs as
@@ -68,8 +94,10 @@ sudo fail2ban-client status logwizz
 
 ## Validate before enabling
 
-First leave the jail disabled and check that the bridge emits normalized
-events when a qualifying Logwizz event occurs:
+Start with `BRIDGE_DRY_RUN=1` (the example file's setting) and the jail
+disabled, and check that the bridge would write normalized lines when a
+qualifying Logwizz event occurs (`would write: ...` in its journal). Then
+set `BRIDGE_DRY_RUN=0`, restart the bridge, and check the file:
 
 ```sh
 sudo journalctl -u logwizz-fail2ban-bridge.service -f
@@ -104,8 +132,10 @@ replacement for reviewing your detection thresholds.
   still banned does nothing in Fail2ban.
 - **Use source-aware rules only.** `log_flood` and other events without a
   validated source address are not eligible.
-- **Avoid self-lockout.** Configure `ignoreip` for loopback, management
-  networks and trusted scanners before enabling the jail.
+- **Avoid self-lockout.** The bridge never writes non-global addresses, and
+  Fail2ban's `ignoreself` (on by default) skips the host's own addresses.
+  Still put management networks and trusted scanners in `BRIDGE_IGNORE`
+  or Fail2ban's `ignoreip` before enabling the jail.
 - **Keep the bridge log bounded.** The optional logrotate example uses
   `copytruncate` so the bridge can keep its open file descriptor. As with
   any copy-and-truncate rotation, a very small race window can lose a line.
