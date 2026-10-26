@@ -253,6 +253,7 @@ struct RawAfter {
 #[serde(deny_unknown_fields)]
 struct RawThreshold {
     group_by: Option<String>,
+    group_prefix: Option<GroupPrefix>,
     distinct: Option<String>,
     count: u32,
     window_secs: u64,
@@ -285,10 +286,34 @@ pub enum GroupBy {
     Capture(usize),
 }
 
+/// `group_prefix`: group an address capture by its network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupPrefix {
+    pub v4: u8,
+    pub v6: u8,
+}
+
+impl GroupPrefix {
+    /// The network of `value`, such as `192.0.2.0/24`, if it is an IP
+    /// address. IPv4-mapped IPv6 addresses count as IPv4.
+    pub fn network(&self, value: &[u8]) -> Option<String> {
+        let addr = std::str::from_utf8(value)
+            .ok()?
+            .parse::<IpAddr>()
+            .ok()?
+            .to_canonical();
+        let prefix = if addr.is_ipv4() { self.v4 } else { self.v6 };
+        Some(format!("{}/{prefix}", mask(addr, prefix)))
+    }
+}
+
 /// A validated `[rules.threshold]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Threshold {
     pub group_by: GroupBy,
+    /// Set: `group_by` addresses are grouped by network.
+    pub group_prefix: Option<GroupPrefix>,
     /// Count distinct values of this capture group instead of matches.
     pub distinct: Option<usize>,
     pub count: u32,
@@ -949,6 +974,19 @@ fn check_threshold(
         Some("file") => GroupBy::File,
         Some(name) => GroupBy::Capture(capture("group_by", name)?),
     };
+    if let Some(p) = t.group_prefix {
+        if !matches!(group_by, GroupBy::Capture(_)) {
+            return Err(
+                "threshold.group_prefix requires group_by to name a capture group".to_string(),
+            );
+        }
+        if !(1..=32).contains(&p.v4) || !(1..=128).contains(&p.v6) {
+            return Err(format!(
+                "threshold.group_prefix: v4 must be 1..=32 and v6 1..=128, got {} and {}",
+                p.v4, p.v6
+            ));
+        }
+    }
     let distinct = t
         .distinct
         .as_deref()
@@ -990,6 +1028,7 @@ fn check_threshold(
     }
     Ok(Threshold {
         group_by,
+        group_prefix: t.group_prefix,
         distinct,
         count: t.count,
         window: Duration::from_secs(t.window_secs),
@@ -1387,6 +1426,38 @@ mod tests {
                 "group_by = \"src\"\ndistinct = \"dpt\"\ncount = 10000\nwindow_secs = 10"
             )
             .contains("too large for `distinct`")
+        );
+        let t = parse_str(&rule(
+            fw,
+            sev,
+            &format!("group_by = \"src\"\ngroup_prefix = {{ v4 = 24, v6 = 48 }}\n{base}"),
+        ))
+        .unwrap();
+        assert_eq!(
+            t.rules[0].threshold.as_ref().unwrap().group_prefix,
+            Some(GroupPrefix { v4: 24, v6: 48 })
+        );
+        let prefix = |extra: &str| p(fw, sev, &format!("{extra}\n{base}"));
+        assert!(prefix("group_prefix = { v4 = 24, v6 = 64 }").contains("requires group_by"));
+        assert!(
+            prefix("group_by = \"file\"\ngroup_prefix = { v4 = 24, v6 = 64 }")
+                .contains("requires group_by")
+        );
+        assert!(
+            prefix("group_by = \"src\"\ngroup_prefix = { v4 = 33, v6 = 64 }")
+                .contains("v4 must be 1..=32")
+        );
+        assert!(
+            prefix("group_by = \"src\"\ngroup_prefix = { v4 = 24, v6 = 0 }").contains("v6 1..=128")
+        );
+        assert!(
+            parse_str(&rule(
+                fw,
+                sev,
+                &format!("group_by = \"src\"\ngroup_prefix = {{ v4 = 24 }}\n{base}")
+            ))
+            .is_err(),
+            "both lengths are required"
         );
         // A sliding window keeps two windows of distinct values.
         let distinct = |window: &str| {

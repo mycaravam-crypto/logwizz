@@ -327,6 +327,7 @@ cooldown_secs = 300    # then stay silent for that group this long
 | Key | Default | Meaning |
 |---|---|---|
 | `group_by` | unset | Count separately per value of this named capture group, or per monitored file (`"file"`). Unset: all matches form one group. |
+| `group_prefix` | unset | With `group_by` naming a capture: group IP addresses by network, e.g. `{ v4 = 24, v6 = 64 }` (both required; 1 – 32 and 1 – 128). The event's `threshold.group` is then the network, such as `194.180.49.0/24`, and `fields` keep the last address; `logwizz-notify` shows the network as the source. Values that are not addresses are grouped as they are. |
 | `distinct` | unset | Count distinct values of this named capture group instead of matches. 100 hits on port 22 count once. |
 | `count` | required | 1 – 10000. |
 | `window_secs` | required | 1 – 86400. |
@@ -378,6 +379,28 @@ cooldown_secs = 600
 ```
 
 Placed after `ignore` rules, the same catch-all counts only unknown lines.
+
+A scan spread over several addresses of one network, each below the
+per-address thresholds, is counted together with `group_prefix`:
+
+```toml
+[[rules]]
+id = "subnet_scan"
+match_type = "regex"
+pattern = 'logwizz-drop: .*SRC=(?P<src>\S+) .*DPT=(?P<dpt>\d+)'
+severity = "error"
+[rules.threshold]
+group_by = "src"
+group_prefix = { v4 = 24, v6 = 64 }
+distinct = "dpt"
+count = 50
+window_secs = 3600
+cooldown_secs = 3600
+```
+
+Tune `count` to your traffic first: shared networks (cloud providers,
+carrier-grade NAT) put unrelated clients in one /24. The Fail2ban bridge
+bans only the rules it lists, and never a network.
 
 #### Excluding trusted sources
 

@@ -108,11 +108,17 @@ impl Thresholds {
         now: Instant,
     ) -> Option<Fired> {
         let field = |i: usize| fields.iter().find(|(g, _)| *g == i).map(|(_, v)| &**v);
+        let net;
         let (key, reported): (&[u8], bool) = match t.group_by {
             GroupBy::All => (b"", false),
             GroupBy::File => (file.as_os_str().as_bytes(), false),
             // A match where the group did not participate is not counted.
-            GroupBy::Capture(i) => (field(i)?, true),
+            GroupBy::Capture(i) => {
+                let value = field(i)?;
+                // A value that is not an address is its own group.
+                net = t.group_prefix.and_then(|p| p.network(value));
+                (net.as_deref().map_or(value, str::as_bytes), true)
+            }
         };
         let distinct = match t.distinct {
             Some(i) => Some(self.hasher.hash_one(field(i)?)),
@@ -241,6 +247,7 @@ mod tests {
     fn threshold(group_by: GroupBy, distinct: Option<usize>, count: u32) -> Threshold {
         Threshold {
             group_by,
+            group_prefix: None,
             distinct,
             count,
             window: Duration::from_secs(10),
@@ -367,6 +374,37 @@ mod tests {
         assert_eq!(obs(62, "a"), None);
         assert_eq!(obs(62, "a"), None);
         assert!(obs(63, "a").is_some());
+    }
+
+    #[test]
+    fn group_prefix_counts_one_network_together() {
+        use crate::config::GroupPrefix;
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, m), Instant::now());
+        let t = Threshold {
+            group_prefix: Some(GroupPrefix { v4: 24, v6: 64 }),
+            ..threshold(GroupBy::Capture(1), Some(2), 4)
+        };
+        let mut obs = |src, dpt| th.observe(0, "r", &t, Path::new("a"), &f(src, dpt), t0);
+        // Four addresses of one /24, one port each.
+        assert_eq!(obs("194.180.49.53", "22"), None);
+        assert_eq!(obs("194.180.49.121", "23"), None);
+        assert_eq!(obs("194.180.50.1", "24"), None, "another /24");
+        assert_eq!(obs("194.180.49.123", "25"), None);
+        let fired = obs("::ffff:194.180.49.127", "26").unwrap();
+        assert_eq!(fired.group.as_deref(), Some(&b"194.180.49.0/24"[..]));
+        assert_eq!(fired.count, 4);
+        // IPv6 by /64; a value that is no address is its own group.
+        for dpt in ["1", "2", "3"] {
+            assert_eq!(obs("2001:db8:1:2::5", dpt), None);
+        }
+        let fired = obs("2001:db8:1:2:ffff::1", "4").unwrap();
+        assert_eq!(fired.group.as_deref(), Some(&b"2001:db8:1:2::/64"[..]));
+        for dpt in ["1", "2", "3"] {
+            assert_eq!(obs("scanner.example", dpt), None);
+        }
+        let fired = obs("scanner.example", "4").unwrap();
+        assert_eq!(fired.group.as_deref(), Some(&b"scanner.example"[..]));
     }
 
     #[test]

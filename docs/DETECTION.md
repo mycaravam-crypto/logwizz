@@ -180,7 +180,10 @@ Say it plainly, so nobody relies on more than this gives:
   (up to a day) for a slow-scan rule if this matters, at the cost of more
   state.
 - **Distributed scans** from many sources, each touching a few ports, stay
-  below every per-source threshold.
+  below every per-source threshold. Sources within one network can be
+  counted together with `group_prefix` (see the
+  [reference](REFERENCE.md#threshold-rules)); sources spread across the
+  internet cannot.
 - **Spoofed sources** can be used to fill a detector's group table. logwizz
   stays within its limits and counts `threshold_evictions`, but a real
   scanner's partial count can be evicted during such a flood.

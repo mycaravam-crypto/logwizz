@@ -113,9 +113,17 @@ impl Detection {
                 .flatten()
                 .filter(|v| !v.is_empty())
         };
-        let address = field("src")
+        let group = ev.threshold.as_ref().and_then(|t| t.group.as_deref());
+        // A network group (group_prefix) says more than its last address.
+        let network = group.filter(|g| {
+            g.split_once('/').is_some_and(|(a, p)| {
+                a.parse::<std::net::IpAddr>().is_ok() && p.parse::<u8>().is_ok()
+            })
+        });
+        let address = network
+            .or_else(|| field("src"))
             .or_else(|| field("source"))
-            .or(ev.threshold.as_ref().and_then(|t| t.group.as_deref()))
+            .or(group)
             .filter(|s| !s.is_empty())
             .map(|s| match listed("login") {
                 Some(login) => format!("{login}@{s}"),
@@ -576,6 +584,14 @@ mod tests {
             (d.source.as_deref(), d.severity, d.host.as_str()),
             (Some("192.0.2.7"), Severity::Notice, "unknown")
         );
+
+        // A network group is shown instead of its last address.
+        let msg = r#"{"v":1,"ts":"2026-10-25T12:40:07Z","rule":"subnet_scan",
+            "fields":{"src":"194.180.49.127"},
+            "threshold":{"group":"194.180.49.0/24","count":50,"window_secs":3600}}"#;
+        let (d, _) = Detection::parse(msg, None, &[]).unwrap();
+        assert_eq!(d.source.as_deref(), Some("194.180.49.0/24"));
+        assert!(d.addressed);
 
         // A bad timestamp falls back to the journal's time, or is refused.
         let msg = r#"{"v":1,"ts":"not-a-timestamp","rule":"r"}"#;

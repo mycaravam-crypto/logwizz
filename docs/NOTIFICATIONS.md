@@ -83,7 +83,7 @@ their counts. ntfy receives the plain-text form shown under
 
 - Events are grouped by **rule and fixed event-time window**: a window starts at a multiple of `NOTIFY_WINDOW_SECS` since the epoch, in the event's own `ts`.
 - Each summary contains the host, rule ID, description, severity, count, window start/end and the sources seen.
-- The source of an event is its `src` (or `source`) capture, or else the group of a threshold rule, extended by the fields in `NOTIFY_FIELDS` (see [Sources and fields](#sources-and-fields)). If every event in a summary has the same source, that source is shown. Otherwise the summary says `multiple` and lists the five most frequent sources with their counts, for example `Sources: 203.0.113.8 (30), 198.51.100.4 (7) and 3 more`.
+- The source of an event is a network group of a threshold rule (`group_prefix`, for example `194.180.49.0/24`), else its `src` (or `source`) capture, or else the group of a threshold rule, extended by the fields in `NOTIFY_FIELDS` (see [Sources and fields](#sources-and-fields)). If every event in a summary has the same source, that source is shown. Otherwise the summary says `multiple` and lists the five most frequent sources with their counts, for example `Sources: 203.0.113.8 (30), 198.51.100.4 (7) and 3 more`.
 - Up to 32 distinct sources are tracked per summary. Beyond that, the least frequent one is replaced, so a source responsible for a large share of the matches is still listed even among thousands of one-off sources; the counts are then approximate and the message says so.
 - Raw log lines, excerpts and captures other than the source and the fields in `NOTIFY_FIELDS` are never included in outbound summaries.
 
