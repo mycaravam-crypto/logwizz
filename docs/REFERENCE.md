@@ -329,7 +329,8 @@ cooldown_secs = 300    # then stay silent for that group this long
 | `group_by` | unset | Count separately per value of this named capture group, or per monitored file (`"file"`). Unset: all matches form one group. |
 | `distinct` | unset | Count distinct values of this named capture group instead of matches. 100 hits on port 22 count once. |
 | `count` | required | 1 – 10000. |
-| `window_secs` | required | 1 – 86400. The window is fixed and starts at a group's first match, so a burst that straddles two windows can need up to 2 × `count` matches. |
+| `window_secs` | required | 1 – 86400. |
+| `window` | `"fixed"` | `fixed`: the window starts at a group's first match and restarts when it is over, so a burst that straddles two windows can need up to 2 × `count` matches. `sliding`: the count covers the last `window_secs`, estimated from the current fixed window plus the share of the previous one that still lies within `window_secs`, as if its matches were spread evenly. |
 | `cooldown_secs` | `0` | 0 – 86400. Matches of the group in this time after a report are not counted. |
 
 - A threshold rule emits **no** event per line. When a group reaches `count`,
@@ -349,7 +350,10 @@ cooldown_secs = 300    # then stay silent for that group this long
   makes logwizz drop lines or grow beyond its limits.
 - Distinct values are kept as 8-byte keyed hashes, about 16 bytes each,
   so a `distinct` rule may hold up to `threshold_max_groups` × `count` × 16
-  bytes. A rule whose bound exceeds 64 MiB is rejected.
+  bytes, twice that with `window = "sliding"` (it keeps the previous
+  window's values). A rule whose bound exceeds 64 MiB is rejected.
+- With `window = "sliding"`, a distinct value seen in both windows counts
+  once, and a group's state lasts two windows after it starts.
 
 Volume spikes ("too many new lines") are a catch-all with `group_by = "file"`:
 
@@ -706,7 +710,7 @@ Every buffer has a configured bound. The worst case is approximately:
 - deduplication: about 100 bytes × `dedup_max_entries` (≈ 0.4 MiB by default)
 - per threshold rule: about 300 bytes × `threshold_max_groups` (≈ 1.2 MiB by
   default), plus for `distinct` up to `threshold_max_groups` × `count` × 16
-  bytes (≈ 1.3 MiB for `count = 20`)
+  bytes (≈ 1.3 MiB for `count = 20`; twice that for a sliding window)
 - per (rule, field) named by an `after`: about 100 bytes ×
   `threshold_max_groups` (≈ 0.4 MiB by default)
 - a fixed 64 KiB read buffer, plus the compiled rules (at most 2 MiB each)

@@ -115,6 +115,7 @@ severity = "error"
 group_by = "src"
 count = 10
 window_secs = 60
+window = "sliding"             # an attack paced across two fixed windows still counts
 cooldown_secs = 600
 
 [[rules]]
