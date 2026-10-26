@@ -973,7 +973,9 @@ GitHub Actions run on every pull request and on `main`:
   `logwizz-vX.Y.Z-linux-x64` (static, musl), `logwizz.service`, `logwizz.example.toml`, the notifier
   (`logwizz-notify`, `logwizz-notify.service`, `notify.env.example`) and `SHA256SUMS.txt`, with
   generated release notes. Git tags are the source of truth. A PR label picks the bump: `release:patch` (the default),
-  `release:minor`, `release:major`, or `release:none` to skip the release. The version shows in `logwizz --version`.
+  `release:minor`, `release:major`, or `release:none` to skip the release. Releases run one at a time; when merges
+  come in faster, a run covers every PR merged since the latest tag and takes the largest of their bumps, so none is
+  lost when a newer merge replaces a waiting run. The version shows in `logwizz --version`.
 
 Dependabot proposes weekly dependency and action updates (pinned by SHA) after a 7-day cooldown.
 

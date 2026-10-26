@@ -8,8 +8,11 @@ on:
     branches: [main]
 permissions:
   contents: read
+# One release at a time. A newer merge replaces a merge still waiting in the queue; that is safe because a run
+# releases every PR merged since the latest tag. A PR closed without merging gets a group of its own, so it never
+# replaces a waiting merge.
 concurrency:
-  group: release
+  group: ${{ github.event.pull_request.merged && 'release' || format('release-unmerged-{0}', github.run_id) }}
   cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
@@ -17,6 +20,9 @@ jobs:
   version:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       value: ${{ steps.version.outputs.value }}
     steps:
@@ -30,6 +36,8 @@ jobs:
       - name: Calculate next version
         id: version
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           RELEASE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
@@ -40,7 +48,20 @@ jobs:
             echo "Already covered by $latest"
             exit 0
           fi
-          version=$(bash .github/scripts/semver-next.sh "$latest" "$LABELS" "0.1.0")
+          # The release runs of earlier merges may have been replaced in the queue, so the bump comes from every PR
+          # merged since the latest tag (one label set per PR, ';'-separated), not only from this one.
+          # A failed lookup fails the run rather than releasing with a smaller bump.
+          set -o pipefail
+          sets=$LABELS
+          if [[ -n "$latest" ]]; then
+            prs=$(git rev-list "$latest..$RELEASE_SHA" | while read -r commit; do
+              gh api "repos/$REPO/commits/$commit/pulls" \
+                --jq '.[] | select(.merged_at != null and .base.ref == "main") | "\(.number) \([.labels[].name] | join(","))"' || exit 1
+            done | sort -u -k1,1n)
+            while read -r number labels; do [[ -n $number ]] && sets+=";$labels"; done <<< "$prs"
+          fi
+          echo "PR label sets: $sets"
+          version=$(bash .github/scripts/semver-next.sh "$latest" "$sets" "0.1.0")
           [[ -n "$version" ]] || exit 0
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
