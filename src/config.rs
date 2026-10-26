@@ -246,7 +246,18 @@ struct RawThreshold {
     count: u32,
     window_secs: u64,
     #[serde(default)]
+    window: ThresholdWindow,
+    #[serde(default)]
     cooldown_secs: u64,
+}
+
+/// Optional window counting algorithm; existing rules keep the fixed-window behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThresholdWindow {
+    #[default]
+    Fixed,
+    Sliding,
 }
 
 /// What a threshold rule groups its matches by.
@@ -268,6 +279,7 @@ pub struct Threshold {
     pub distinct: Option<usize>,
     pub count: u32,
     pub window: Duration,
+    pub window_mode: ThresholdWindow,
     pub cooldown: Duration,
 }
 
@@ -927,7 +939,8 @@ fn check_threshold(
     }
     // Distinct values are kept as 8-byte hashes in hash sets: about 16 bytes
     // each, for up to `count` values per group.
-    let distinct_bytes = limits.threshold_max_groups as u64 * u64::from(t.count) * 16;
+    let distinct_bytes = limits.threshold_max_groups as u64 * u64::from(t.count) * 16
+        * if t.window == ThresholdWindow::Sliding { 2 } else { 1 };
     if distinct.is_some() && distinct_bytes > MAX_DISTINCT_BYTES {
         return Err(format!(
             "threshold.count × limits.threshold_max_groups is too large for `distinct` \
@@ -941,6 +954,7 @@ fn check_threshold(
         distinct,
         count: t.count,
         window: Duration::from_secs(t.window_secs),
+        window_mode: t.window,
         cooldown: Duration::from_secs(t.cooldown_secs),
     })
 }
