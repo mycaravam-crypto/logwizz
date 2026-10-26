@@ -9,6 +9,7 @@ makes scans visible, and the rules in
 | `port_scan` | One source probing 20+ closed ports within a minute (nmap `-sS`/`-sT`/`-sU`, masscan) | the firewall rules below |
 | `fast_scan` | 100+ closed ports within 2 seconds (masscan-like rates) | the firewall rules below |
 | `slow_scan` | 50+ closed ports within an hour (background scanners below `port_scan`'s rate) | the firewall rules below |
+| `subnet_scan` | 50+ closed ports within an hour from addresses of one /24 (IPv6 /64), such as a scanner spread over several addresses | the firewall rules below |
 | `tcp_flag_scan` | TCP NULL, FIN and Xmas scans (nmap `-sN`, `-sF`, `-sX`) | the firewall rules below |
 | `ssh_bruteforce` | 10+ failed or invalid-user SSH logins from one source within a minute, including key-only hosts that log no `Failed` line | `auth.log` |
 | `ssh_probe` | A connection to sshd that never sends an SSH banner (nmap `-sV`, banner grabbers) | `auth.log` |
@@ -142,7 +143,7 @@ journalctl --namespace=logwizz -u logwizz -o cat -f
 ```
 
 ```json
-{"v":1,"ts":"...","host":"web1","pid":812,"file":"/var/log/kern.log","rule":"port_scan","description":"One source probed many closed ports","severity":"critical","match_type":"regex","line":"... logwizz-drop: ... SRC=203.0.113.66 ... DPT=443 ...","truncated":false,"fields":{"src":"203.0.113.66","dpt":"443"},"threshold":{"group":"203.0.113.66","count":20,"window_secs":60}}
+{"v":1,"ts":"...","host":"web1","pid":812,"file":"/var/log/kern.log","rule":"port_scan","description":"One source probed many closed ports","severity":"critical","match_type":"regex","line":"... logwizz-drop: ... SRC=203.0.113.66 ... DPT=443 ...","truncated":false,"fields":{"src":"203.0.113.66","dpt":"443"},"threshold":{"group":"203.0.113.66","count":20,"window_secs":60,"distinct":"dpt","values":["21","22","23","25","53","80","110","111"]}}
 ```
 
 The host check (`tests/host/run-vm.sh`, and the **host** CI workflow) does
@@ -180,7 +181,10 @@ Say it plainly, so nobody relies on more than this gives:
   (up to a day) for a slow-scan rule if this matters, at the cost of more
   state.
 - **Distributed scans** from many sources, each touching a few ports, stay
-  below every per-source threshold.
+  below every per-source threshold. Sources within one network can be
+  counted together with `group_prefix` (see the
+  [reference](REFERENCE.md#threshold-rules)); sources spread across the
+  internet cannot.
 - **Spoofed sources** can be used to fill a detector's group table. logwizz
   stays within its limits and counts `threshold_evictions`, but a real
   scanner's partial count can be evicted during such a flood.

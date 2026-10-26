@@ -23,10 +23,15 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 use crate::config::{GroupBy, Threshold, WindowType};
+use crate::event::excerpt;
 use crate::metrics::{self, Metrics};
 
 /// Minimum time between eviction warnings.
 const WARN_INTERVAL: Duration = Duration::from_secs(10);
+/// Distinct values a group keeps as a sample for its event.
+pub const SAMPLE_VALUES: usize = 8;
+/// Sampled values are cut to this many bytes.
+pub const SAMPLE_VALUE_BYTES: usize = 32;
 
 /// A threshold that was reached: what the event reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +40,9 @@ pub struct Fired {
     /// `group_by = "file"` (the event names the file) or no grouping.
     pub group: Option<Box<[u8]>>,
     pub count: u32,
+    /// `distinct` rules: the first distinct values seen, at most
+    /// [`SAMPLE_VALUES`], each cut to [`SAMPLE_VALUE_BYTES`].
+    pub sample: Vec<Box<[u8]>>,
 }
 
 #[derive(Debug)]
@@ -50,6 +58,8 @@ struct Group {
     /// in the window before `start`, and those values.
     prev_count: u32,
     prev_distinct: HashSet<u64>,
+    /// See [`Fired::sample`].
+    sample: Vec<Box<[u8]>>,
     silent_until: Option<Instant>,
 }
 
@@ -108,14 +118,23 @@ impl Thresholds {
         now: Instant,
     ) -> Option<Fired> {
         let field = |i: usize| fields.iter().find(|(g, _)| *g == i).map(|(_, v)| &**v);
+        let net;
         let (key, reported): (&[u8], bool) = match t.group_by {
             GroupBy::All => (b"", false),
             GroupBy::File => (file.as_os_str().as_bytes(), false),
             // A match where the group did not participate is not counted.
-            GroupBy::Capture(i) => (field(i)?, true),
+            GroupBy::Capture(i) => {
+                let value = field(i)?;
+                // A value that is not an address is its own group.
+                net = t.group_prefix.and_then(|p| p.network(value));
+                (net.as_deref().map_or(value, str::as_bytes), true)
+            }
         };
         let distinct = match t.distinct {
-            Some(i) => Some(self.hasher.hash_one(field(i)?)),
+            Some(i) => {
+                let value = field(i)?;
+                Some((self.hasher.hash_one(value), value))
+            }
             None => None,
         };
         let table = &mut self.tables[rule];
@@ -144,6 +163,7 @@ impl Thresholds {
             distinct: HashSet::new(),
             prev_count: 0,
             prev_distinct: HashSet::new(),
+            sample: Vec::new(),
             silent_until: None,
         });
         g.last_seen = now;
@@ -157,6 +177,7 @@ impl Thresholds {
             g.distinct.clear();
             g.prev_count = 0;
             g.prev_distinct.clear();
+            g.sample.clear();
         } else if elapsed >= t.window {
             // Sliding only: the current window becomes the previous one.
             g.start += t.window;
@@ -164,10 +185,15 @@ impl Thresholds {
             g.prev_distinct = std::mem::take(&mut g.distinct);
         }
         match distinct {
-            Some(hash) => {
-                if g.distinct.insert(hash) && g.prev_distinct.contains(&hash) {
-                    // Already counted in the previous window's share.
-                    g.prev_count -= 1;
+            Some((hash, value)) => {
+                if g.distinct.insert(hash) {
+                    if g.prev_distinct.contains(&hash) {
+                        // Already counted in the previous window's share.
+                        g.prev_count -= 1;
+                    } else if g.sample.len() < SAMPLE_VALUES {
+                        g.sample
+                            .push(excerpt(value, Some(SAMPLE_VALUE_BYTES)).0.into());
+                    }
                 }
                 g.count = g.distinct.len() as u32;
             }
@@ -187,11 +213,13 @@ impl Thresholds {
         g.distinct = HashSet::new();
         g.prev_count = 0;
         g.prev_distinct = HashSet::new();
+        let sample = std::mem::take(&mut g.sample);
         g.start = now;
         g.silent_until = Some(now + t.cooldown);
         Some(Fired {
             group: reported.then(|| key.into()),
             count,
+            sample,
         })
     }
 }
@@ -241,6 +269,7 @@ mod tests {
     fn threshold(group_by: GroupBy, distinct: Option<usize>, count: u32) -> Threshold {
         Threshold {
             group_by,
+            group_prefix: None,
             distinct,
             count,
             window: Duration::from_secs(10),
@@ -338,7 +367,11 @@ mod tests {
         assert_eq!(obs(60, "1"), None);
         assert_eq!(obs(60, "2"), None);
         assert_eq!(obs(60, "3"), None);
-        assert_eq!(obs(60, "4").map(|f| f.count), Some(4));
+        let fired = obs(60, "4").unwrap();
+        assert_eq!(fired.count, 4);
+        // Values from the previous window stay in the sample, each once.
+        let sample: Vec<&[u8]> = fired.sample.iter().map(|v| &**v).collect();
+        assert_eq!(sample, [&b"1"[..], b"2", b"3", b"4"]);
     }
 
     fn f(src: &str, dpt: &str) -> Vec<(usize, Box<[u8]>)> {
@@ -370,6 +403,37 @@ mod tests {
     }
 
     #[test]
+    fn group_prefix_counts_one_network_together() {
+        use crate::config::GroupPrefix;
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, m), Instant::now());
+        let t = Threshold {
+            group_prefix: Some(GroupPrefix { v4: 24, v6: 64 }),
+            ..threshold(GroupBy::Capture(1), Some(2), 4)
+        };
+        let mut obs = |src, dpt| th.observe(0, "r", &t, Path::new("a"), &f(src, dpt), t0);
+        // Four addresses of one /24, one port each.
+        assert_eq!(obs("194.180.49.53", "22"), None);
+        assert_eq!(obs("194.180.49.121", "23"), None);
+        assert_eq!(obs("194.180.50.1", "24"), None, "another /24");
+        assert_eq!(obs("194.180.49.123", "25"), None);
+        let fired = obs("::ffff:194.180.49.127", "26").unwrap();
+        assert_eq!(fired.group.as_deref(), Some(&b"194.180.49.0/24"[..]));
+        assert_eq!(fired.count, 4);
+        // IPv6 by /64; a value that is no address is its own group.
+        for dpt in ["1", "2", "3"] {
+            assert_eq!(obs("2001:db8:1:2::5", dpt), None);
+        }
+        let fired = obs("2001:db8:1:2:ffff::1", "4").unwrap();
+        assert_eq!(fired.group.as_deref(), Some(&b"2001:db8:1:2::/64"[..]));
+        for dpt in ["1", "2", "3"] {
+            assert_eq!(obs("scanner.example", dpt), None);
+        }
+        let fired = obs("scanner.example", "4").unwrap();
+        assert_eq!(fired.group.as_deref(), Some(&b"scanner.example"[..]));
+    }
+
+    #[test]
     fn distinct_counts_values_not_matches() {
         let m = Arc::new(Metrics::default());
         let (mut th, t0) = (Thresholds::new(1, 100, Arc::clone(&m)), Instant::now());
@@ -379,7 +443,28 @@ mod tests {
             assert_eq!(obs("22"), None, "same port again and again");
         }
         assert_eq!(obs("23"), None);
-        assert_eq!(obs("24").map(|f| f.count), Some(3));
+        let fired = obs("24").unwrap();
+        assert_eq!(fired.count, 3);
+        let sample: Vec<&[u8]> = fired.sample.iter().map(|v| &**v).collect();
+        assert_eq!(sample, [&b"22"[..], b"23", b"24"], "in order first seen");
+        // The sample is capped in values and bytes.
+        let long = "9".repeat(100);
+        let mut th2 = Thresholds::new(1, 100, Arc::new(Metrics::default()));
+        let t2 = threshold(GroupBy::Capture(1), Some(2), 20);
+        let mut fired = None;
+        for p in 0..20 {
+            fired = th2.observe(
+                0,
+                "r",
+                &t2,
+                Path::new("a"),
+                &f("a", &format!("{p}{long}")),
+                t0,
+            );
+        }
+        let sample = fired.unwrap().sample;
+        assert_eq!(sample.len(), SAMPLE_VALUES);
+        assert!(sample.iter().all(|v| v.len() == SAMPLE_VALUE_BYTES));
     }
 
     #[test]

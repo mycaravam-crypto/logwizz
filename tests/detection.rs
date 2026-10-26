@@ -45,7 +45,8 @@ fn rules_match_real_log_lines() {
         [
             "port_scan src=203.0.113.66 dpt=8080",
             "fast_scan src=203.0.113.66 dpt=8080",
-            "slow_scan src=203.0.113.66 dpt=8080"
+            "slow_scan src=203.0.113.66 dpt=8080",
+            "subnet_scan src=203.0.113.66 dpt=8080"
         ]
     );
     let fw6 = "Oct 25 10:00:00 web1 kernel: logwizz-drop: IN=eth0 OUT= SRC=2001:0db8:0000:0000:0000:0000:0000:0042 \
@@ -188,6 +189,41 @@ fn port_scan_fires_once_per_source() {
 }
 
 #[test]
+fn subnet_scan_reports_a_scanner_spread_over_one_network() {
+    let cfg = detection();
+    let m = Arc::new(Metrics::default());
+    let mut th = Thresholds::new(cfg.rules.len(), cfg.limits.threshold_max_groups, m);
+    let now = Instant::now();
+    let mut fired = Vec::new();
+    // As seen on a real host (#69): four addresses of one /24, 13 ports each.
+    for (n, host) in [53, 121, 123, 127].into_iter().enumerate() {
+        for port in 0..13 {
+            let line = format!(
+                "kernel: logwizz-drop: IN=eth0 SRC=194.180.49.{host} DST=198.51.100.1 PROTO=TCP DPT={} SYN",
+                1000 + n * 13 + port
+            );
+            for (i, rule) in cfg.rules.iter().enumerate() {
+                let Some(t) = &rule.threshold else { continue };
+                if !rule.matcher.is_match(line.as_bytes()) || rule.id == "log_flood" {
+                    continue;
+                }
+                let fields = rule.matcher.fields(line.as_bytes());
+                if let Some(f) =
+                    th.observe(i, &rule.id, t, Path::new("/var/log/kern.log"), &fields, now)
+                {
+                    let group = String::from_utf8_lossy(&f.group.unwrap()).into_owned();
+                    fired.push((rule.id.clone(), group, f.sample.len()));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        fired,
+        [("subnet_scan".to_string(), "194.180.49.0/24".to_string(), 8)]
+    );
+}
+
+#[test]
 fn every_detector_fires_at_its_count_and_then_cools_down() {
     let cfg = detection();
     let m = Arc::new(Metrics::default());
@@ -206,6 +242,10 @@ fn every_detector_fires_at_its_count_and_then_cools_down() {
         (
             "slow_scan",
             "kernel: logwizz-drop: IN=eth0 SRC=203.0.113.7 DST=198.51.100.1 PROTO=TCP DPT={n} SYN",
+        ),
+        (
+            "subnet_scan",
+            "kernel: logwizz-drop: IN=eth0 SRC=198.51.100.9 DST=198.51.100.1 PROTO=TCP DPT={n} SYN",
         ),
         (
             "tcp_flag_scan",

@@ -164,6 +164,7 @@ fn bench_threshold(c: &mut Criterion) {
     let matcher = &cfg.rules[0].matcher;
     let t = Threshold {
         group_by: GroupBy::Capture(1),
+        group_prefix: None,
         distinct: Some(2),
         count: 20,
         window: Duration::from_secs(10),

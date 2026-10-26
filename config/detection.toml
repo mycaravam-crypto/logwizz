@@ -86,6 +86,24 @@ window_secs = 3600
 cooldown_secs = 3600
 
 [[rules]]
+id = "subnet_scan"
+description = "Several addresses of one network probed many closed ports within an hour"
+# One scanner spread over a /24 (or IPv6 /64) stays below the per-address
+# rules above. Shared networks (cloud, carrier-grade NAT) put unrelated
+# clients in one /24: raise `count` if this reports normal traffic. The
+# Fail2ban bridge does not ban for this rule.
+match_type = "regex"
+pattern = 'logwizz-drop: .*SRC=(?P<src>\S+) .*DPT=(?P<dpt>\d+)'
+severity = "error"
+[rules.threshold]
+group_by = "src"
+group_prefix = { v4 = 24, v6 = 64 }
+distinct = "dpt"
+count = 50
+window_secs = 3600
+cooldown_secs = 3600
+
+[[rules]]
 id = "tcp_flag_scan"
 description = "TCP packet with flags no normal stack sends (nmap -sN/-sF/-sX)"
 match_type = "regex"
