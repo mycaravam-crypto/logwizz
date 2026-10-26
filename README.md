@@ -59,12 +59,23 @@ logwizz emits a structured event for the matching rule. Use `config/logwizz.exam
 
 - Monitors configured files and the systemd journal.
 - Matches literal strings or Rust regular expressions.
-- Supports threshold rules for bursts such as SSH brute force, port scans and log floods.
+- Supports bounded fixed and opt-in sliding threshold windows, including distinct-value counts for scans and brute force.
+- Correlates rule sequences using `[rules.after]`, for example a login following a scan from the same source.
+- Detects scans spanning multiple source addresses within one subnet and includes bounded samples of probed ports.
+- Uses journal entry timestamps for detection windows when catching up; file inputs use read time.
 - Excludes trusted sources (addresses, networks or exact values) per rule.
 - Handles common log rotation, truncation, deletion and recreation cases.
 - Bounds line sizes, queues and detection state to keep resource use predictable.
 - Emits JSON Lines or human-readable events to stdout or stderr.
-- Supports configuration validation and reloads without restarting the daemon.
+- Supports configuration validation, persisted input offsets, glob patterns, and SIGHUP reloads without restarting the daemon.
+
+## Optional response and platforms
+
+An optional [Fail2ban bridge](docs/FAIL2BAN.md) can pass detections from explicitly selected rules with validated, globally routable source IPs to a dedicated Fail2ban jail. It is disabled unless configured; dry-run testing, allowlists and a reviewed ban policy are recommended before enabling enforcement. Fail2ban owns bans and unbans; logwizz itself does not alter firewall policy.
+
+Host checks cover Debian 12/13 and Ubuntu 24.04. RHEL-family packaging and guidance exist, but live RHEL/Rocky runtime validation is still outstanding ([#53](https://github.com/mycaravam-crypto/logwizz/issues/53)); do not treat it as verified platform support.
+
+Optional [runtime detection](docs/RUNTIME-DETECTION.md) reads the Linux audit log to report programs started by a service user and changes to identity and access files. It needs auditd and the shipped audit rules, is off unless configured, and has not yet been verified on a real host ([#82](https://github.com/mycaravam-crypto/logwizz/issues/82)).
 
 ## Project boundaries
 
@@ -79,7 +90,7 @@ Notification setup, window semantics, retry behavior and Telegram configuration 
 - [Project direction and design principles](docs/PROJECT.md)
 - [Documentation index](docs/README.md)
 - [Configuration, event schema, behavior, operations, security and deployment reference](docs/REFERENCE.md)
-- [Detection guide: port scans, SSH attacks and log floods](docs/DETECTION.md)
+- [Detection guide: per-source and subnet scans, SSH attacks, sequence rules and log floods](docs/DETECTION.md)
 - [Runtime detection: service programs and identity file changes from the audit log](docs/RUNTIME-DETECTION.md)
 - [Optional Fail2ban integration](docs/FAIL2BAN.md)
 - [Benchmarks](docs/BENCHMARKS.md)
