@@ -39,7 +39,7 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use memchr::{memchr, memrchr};
 use tracing::{debug, info, warn};
@@ -73,6 +73,9 @@ pub struct Line<'a> {
     pub bytes: &'a [u8],
     /// The line was longer than `max_line_bytes` and has been cut.
     pub truncated: bool,
+    /// When the line was logged, if the source says so (journal entries).
+    /// Unset: when it was read.
+    pub time: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +257,7 @@ fn emit(line: &[u8], max: usize, m: &Metrics, on_line: &mut dyn FnMut(Line<'_>))
     on_line(Line {
         bytes,
         truncated: false,
+        time: None,
     });
 }
 
@@ -263,6 +267,7 @@ fn emit_truncated(line: &[u8], m: &Metrics, on_line: &mut dyn FnMut(Line<'_>)) {
     on_line(Line {
         bytes: line,
         truncated: true,
+        time: None,
     });
 }
 

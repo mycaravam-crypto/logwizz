@@ -202,10 +202,12 @@ impl Pipeline {
             max_excerpt,
             ..
         } = self;
+        // Windows count in log time where the source records it, so that
+        // catching up on a backlog does not look like a burst.
+        let now = line.time.map_or_else(Instant::now, instant_of);
         let ignored = engine.for_each_match(line.bytes, |rule| {
             metrics::inc(&metrics.rule_matches);
             let r = &engine.rules()[rule];
-            let now = Instant::now();
             let fields = r.matcher.fields(line.bytes);
             if r.excludes(&fields) {
                 metrics::inc(&metrics.matches_excluded);
@@ -261,6 +263,17 @@ impl Pipeline {
         if ignored {
             metrics::inc(&metrics.lines_ignored);
         }
+    }
+}
+
+/// The monotonic time at which the wall clock read `at`, assuming the
+/// clock was not changed since. Never later than now; times before boot
+/// (or the clock's start) become now.
+fn instant_of(at: SystemTime) -> Instant {
+    let now = Instant::now();
+    match SystemTime::now().duration_since(at) {
+        Ok(ago) => now.checked_sub(ago).unwrap_or(now),
+        Err(_) => now,
     }
 }
 
