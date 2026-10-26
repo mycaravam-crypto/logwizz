@@ -939,8 +939,14 @@ fn check_threshold(
     }
     // Distinct values are kept as 8-byte hashes in hash sets: about 16 bytes
     // each, for up to `count` values per group.
-    let distinct_bytes = limits.threshold_max_groups as u64 * u64::from(t.count) * 16
-        * if t.window == ThresholdWindow::Sliding { 2 } else { 1 };
+    let distinct_bytes = limits.threshold_max_groups as u64
+        * u64::from(t.count)
+        * 16
+        * if t.window == ThresholdWindow::Sliding {
+            2
+        } else {
+            1
+        };
     if distinct.is_some() && distinct_bytes > MAX_DISTINCT_BYTES {
         return Err(format!(
             "threshold.count × limits.threshold_max_groups is too large for `distinct` \
