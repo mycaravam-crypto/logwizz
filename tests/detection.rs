@@ -117,14 +117,20 @@ fn rules_match_real_log_lines() {
             &cfg,
             "2026-10-25T14:20:12.5+01:00 web1 sshd-session[56533]: Accepted publickey for deploy from 10.0.0.5 port 34092 ssh2: ED25519 SHA256:x"
         ),
-        ["ssh_login login=deploy src=10.0.0.5 key=ED25519 SHA256:x"]
+        [
+            "ssh_login login=deploy src=10.0.0.5 key=ED25519 SHA256:x",
+            "login_after_scan login=deploy src=10.0.0.5"
+        ]
     );
     assert_eq!(
         hits(
             &cfg,
             "Oct 25 10:00:05 web1 sshd[1260]: Accepted password for deploy from 10.0.0.5 port 52144 ssh2"
         ),
-        ["ssh_login login=deploy src=10.0.0.5"]
+        [
+            "ssh_login login=deploy src=10.0.0.5",
+            "login_after_scan login=deploy src=10.0.0.5"
+        ]
     );
     assert_eq!(
         hits(

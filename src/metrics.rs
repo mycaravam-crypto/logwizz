@@ -61,6 +61,11 @@ counters! {
     rule_matches,
     /// Matches discarded by a rule's `exclude` values.
     matches_excluded,
+    /// Matches of `after` rules with no recent event of a named rule for
+    /// the same value.
+    after_unmatched,
+    /// Remembered values dropped because an `after` memory was full.
+    after_evictions,
     /// Matches of threshold rules that did not reach their threshold, or
     /// fell into its cooldown.
     threshold_absorbed,

@@ -33,6 +33,7 @@ use crate::event::{Event, excerpt};
 use crate::metrics::{self, Metrics};
 use crate::monitor::{Monitor, Stopped};
 use crate::reader::Line;
+use crate::sequence::Recent;
 use crate::state::{self, Checkpoint, StateWriter};
 use crate::threshold::Thresholds;
 use crate::watcher::Waker;
@@ -109,6 +110,11 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
             cfg.limits.threshold_max_groups,
             Arc::clone(&metrics),
         ),
+        recent: Recent::new(
+            &cfg.rules,
+            cfg.limits.threshold_max_groups,
+            Arc::clone(&metrics),
+        ),
         dispatcher,
         metrics: Arc::clone(&metrics),
         meta,
@@ -172,11 +178,12 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
 }
 
 /// Everything a line passes through on the monitor thread: matching,
-/// thresholds, limiting and queueing.
+/// sequences, thresholds, limiting and queueing.
 struct Pipeline {
     engine: Engine,
     limiter: Limiter,
     thresholds: Thresholds,
+    recent: Recent,
     dispatcher: Dispatcher,
     metrics: Arc<Metrics>,
     meta: Meta,
@@ -189,6 +196,7 @@ impl Pipeline {
             engine,
             limiter,
             thresholds,
+            recent,
             dispatcher,
             metrics,
             max_excerpt,
@@ -203,6 +211,16 @@ impl Pipeline {
                 metrics::inc(&metrics.matches_excluded);
                 return;
             }
+            if let Some(after) = &r.after {
+                let follows = fields
+                    .iter()
+                    .find(|(g, _)| *g == after.group)
+                    .is_some_and(|(_, v)| recent.follows(after, v, now));
+                if !follows {
+                    metrics::inc(&metrics.after_unmatched);
+                    return;
+                }
+            }
             let threshold = match &r.threshold {
                 None => None,
                 Some(t) => match thresholds.observe(rule, &r.id, t, file, &fields, now) {
@@ -216,6 +234,8 @@ impl Pipeline {
                     }
                 },
             };
+            // Before limiting: a rate-limited event still happened.
+            recent.record(r, &fields, now);
             match limiter.admit(rule, &r.id, line.bytes, now) {
                 Admit::Yes => {}
                 Admit::RateLimited => {
@@ -274,6 +294,9 @@ fn apply_reload(
     pipeline
         .thresholds
         .reconfigure(new.limits.threshold_max_groups, &kept);
+    pipeline
+        .recent
+        .reconfigure(&new.rules, new.limits.threshold_max_groups);
     pipeline.engine = Engine::new(new.rules.clone());
     pipeline.max_excerpt = new.output.max_excerpt_bytes;
     pipeline.dispatcher.set_policy(&new.output);
