@@ -1,0 +1,58 @@
+# logwizz runtime detection: programs started by a service user and writes
+# to identity and access files, from the Linux audit log.
+#
+# Needs auditd and the rules in packaging/audit/logwizz.rules; see
+# docs/RUNTIME-DETECTION.md. To add this to an existing configuration, copy
+# the [[files]] and [[rules]] blocks below into it.
+
+[general]
+state_file = "/var/lib/logwizz/offsets.json"
+
+[output]
+format = "json"
+syslog_prefix = true
+
+[[files]]
+# Readable by group adm with Debian's and Ubuntu's `log_group = adm` in
+# /etc/audit/auditd.conf.
+path = "/var/log/audit/audit.log"
+
+# The patterns read the SYSCALL record of an audit event, which holds the
+# process and the rule's key. auditd hex-encodes values with spaces, quotes or
+# control characters, so a crafted program name cannot fake these fields; a
+# hex-encoded exe still matches, without an `exe` field.
+
+[[rules]]
+id = "service_exec"
+description = "A service user started a program"
+match_type = "regex"
+pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* ppid=(?P<ppid>\d+) pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_service_exec"'
+severity = "critical"
+# Programs the service runs legitimately, for example PHP's mail():
+# [rules.exclude]
+# exe = ["/usr/sbin/sendmail"]
+
+[[rules]]
+id = "sensitive_write"
+description = "An identity or access file was changed"
+match_type = "regex"
+pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_sensitive_write"'
+severity = "warning"
+
+# Blind spots made visible. Removing logwizz's audit rules or disabling audit
+# is itself logged.
+[[rules]]
+id = "audit_disabled"
+description = "Audit rules for logwizz were removed or audit was disabled"
+match_type = "regex"
+pattern = '^type=CONFIG_CHANGE msg=audit\([\d.]+:(?P<serial>\d+)\): (?:.* op=remove_rule key="logwizz_|.*audit_enabled=0 )'
+severity = "warning"
+
+# Matches in kern.log or the journal, wherever this configuration reads
+# kernel messages (config/detection.toml does).
+[[rules]]
+id = "audit_lost"
+description = "The kernel dropped audit records"
+match_type = "regex"
+pattern = 'audit: (?:audit_lost=\d+|audit_backlog=\d+ > audit_backlog_limit|rate limit exceeded)'
+severity = "warning"

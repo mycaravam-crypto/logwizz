@@ -1,0 +1,25 @@
+# Audit rules for config/runtime.toml (docs/RUNTIME-DETECTION.md).
+#
+#   install -m 0640 packaging/audit/logwizz.rules /etc/audit/rules.d/
+#   augenrules --load
+#
+# logwizz matches on the key, so keep exactly one -k per rule and keep the
+# keys in step with the patterns in config/runtime.toml. Other files in
+# rules.d stay as they are.
+
+# A service user starts a program: a web shell or remote code execution in
+# the web server. uid (not euid) also covers setuid programs. 33 is www-data
+# on Debian and Ubuntu; use `id -u` of your service user, one pair of rules
+# per user. Drop the b32 rule on hosts without 32-bit support.
+-a always,exit -F arch=b64 -S execve,execveat -F uid=33 -k logwizz_service_exec
+-a always,exit -F arch=b32 -S execve,execveat -F uid=33 -k logwizz_service_exec
+
+# Writes and attribute changes to identity and access files, including edits
+# that leave no auth.log line (for example `echo ... >> /etc/passwd`).
+-w /etc/passwd -p wa -k logwizz_sensitive_write
+-w /etc/shadow -p wa -k logwizz_sensitive_write
+-w /etc/group -p wa -k logwizz_sensitive_write
+-w /etc/sudoers -p wa -k logwizz_sensitive_write
+-w /etc/sudoers.d/ -p wa -k logwizz_sensitive_write
+-w /etc/ssh/sshd_config -p wa -k logwizz_sensitive_write
+-w /root/.ssh/ -p wa -k logwizz_sensitive_write
