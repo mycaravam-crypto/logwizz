@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-use crate::config::{GroupBy, Threshold};
+use crate::config::{GroupBy, Threshold, ThresholdWindow};
 use crate::metrics::{self, Metrics};
 
 /// Minimum time between eviction warnings.
@@ -37,6 +37,8 @@ struct Group {
     start: Instant,
     last_seen: Instant,
     count: u32,
+    previous_count: u32,
+    previous_distinct: HashSet<u64>,
     /// Keyed hashes of the distinct values seen in this window. A collision
     /// can only undercount; the per-process keys make one impractical to
     /// craft.
@@ -132,6 +134,8 @@ impl Thresholds {
             start: now,
             last_seen: now,
             count: 0,
+            previous_count: 0,
+            previous_distinct: HashSet::new(),
             distinct: HashSet::new(),
             silent_until: None,
         });
@@ -139,10 +143,18 @@ impl Thresholds {
         if g.silent_until.is_some_and(|until| now < until) {
             return None;
         }
-        if now.saturating_duration_since(g.start) >= t.window {
+        let elapsed = now.saturating_duration_since(g.start);
+        if elapsed >= t.window {
+            if t.window_mode == ThresholdWindow::Sliding && elapsed < t.window * 2 {
+                g.previous_count = g.count;
+                g.previous_distinct = std::mem::take(&mut g.distinct);
+            } else {
+                g.previous_count = 0;
+                g.previous_distinct.clear();
+                g.distinct.clear();
+            }
             g.start = now;
             g.count = 0;
-            g.distinct.clear();
         }
         match distinct {
             Some(hash) => {
@@ -151,12 +163,29 @@ impl Thresholds {
             }
             None => g.count += 1,
         }
-        if g.count < t.count {
+        let count = if t.window_mode == ThresholdWindow::Sliding {
+            if t.distinct.is_some() {
+                g.distinct.union(&g.previous_distinct).count() as u32
+            } else {
+                // Two-bucket approximation. Use integer math and round up to
+                // avoid losing a marginal match at a bucket boundary.
+                let remaining = t.window.saturating_sub(
+                    now.saturating_duration_since(g.start)
+                ).as_nanos();
+                let total = t.window.as_nanos();
+                let weighted = u128::from(g.previous_count) * remaining;
+                g.count.saturating_add(weighted.div_ceil(total) as u32)
+            }
+        } else {
+            g.count
+        };
+        if count < t.count {
             return None;
         }
-        let count = g.count;
         g.count = 0;
-        g.distinct = HashSet::new();
+        g.previous_count = 0;
+        g.distinct.clear();
+        g.previous_distinct.clear();
         g.start = now;
         g.silent_until = Some(now + t.cooldown);
         Some(Fired {
@@ -206,6 +235,7 @@ mod tests {
             distinct,
             count,
             window: Duration::from_secs(10),
+            window_mode: ThresholdWindow::Fixed,
             cooldown: Duration::from_secs(60),
         }
     }
@@ -260,6 +290,40 @@ mod tests {
         assert_eq!(obs(0), None);
         assert_eq!(obs(10), None, "first match of a new window");
         assert_eq!(obs(11).map(|f| (f.group, f.count)), Some((None, 2)));
+    }
+
+    #[test]
+    fn sliding_counts_across_bucket_boundary() {
+        let m = Arc::new(Metrics::default());
+        let (mut fixed, mut sliding) = (
+            Thresholds::new(1, 100, Arc::clone(&m)),
+            Thresholds::new(1, 100, m),
+        );
+        let t0 = Instant::now();
+        let mut config = threshold(GroupBy::All, None, 10);
+        // A fixed window started at zero discards the nine early matches.
+        for _ in 0..9 {
+            assert!(fixed.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0)).is_none());
+        }
+        assert!(fixed.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 10)).is_none());
+        config.window_mode = ThresholdWindow::Sliding;
+        for _ in 0..9 {
+            assert!(sliding.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0)).is_none());
+        }
+        assert!(sliding.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 10)).is_some());
+    }
+
+    #[test]
+    fn sliding_distinct_counts_union_of_adjacent_buckets() {
+        let m = Arc::new(Metrics::default());
+        let mut th = Thresholds::new(1, 100, m);
+        let t0 = Instant::now();
+        let mut config = threshold(GroupBy::Capture(1), Some(2), 3);
+        config.window_mode = ThresholdWindow::Sliding;
+        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "22"), t0).is_none());
+        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "23"), t0).is_none());
+        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "22"), secs(t0, 10)).is_none());
+        assert!(th.observe(0, "r", &config, Path::new("a"), &f("a", "24"), secs(t0, 10)).is_some());
     }
 
     #[test]
