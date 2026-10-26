@@ -220,7 +220,7 @@ class FollowProcessTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=repr(raw)):
                 BRIDGE.Settings({"BRIDGE_RULES": raw})
 
-    def test_spoofed_ip_in_rejected_event_does_not_enforce(self):
+    def test_unauthorized_rule_with_global_src_does_not_enforce(self):
         # A client-controlled address is not intrinsically authenticated.
         # This proves rule gating, NOT provenance of fields.src.
         forged = event("log_flood", V4)
