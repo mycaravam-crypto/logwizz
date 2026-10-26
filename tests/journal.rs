@@ -233,3 +233,65 @@ fn thresholds_count_in_journal_time_when_catching_up() {
     assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
     d.stop();
 }
+
+#[test]
+fn journal_replay_sliding_threshold_triggers_followup_only_for_matching_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    let at = |cursor: &str, ago: u128, message: &str| {
+        format!(
+            "{{\"__CURSOR\":\"{cursor}\",\"__REALTIME_TIMESTAMP\":\"{}\",\"MESSAGE\":{}}}\n",
+            now_us - ago * 1_000_000,
+            serde_json::to_string(message).unwrap()
+        )
+    };
+    let source = "192.0.2.10";
+    let mut feed = String::new();
+    // Four probes cross the 60-second bucket boundary. The 3 initial
+    // probes never fire a fixed count=4 threshold, but sliding does.
+    for (cursor, ago) in [("p0", 120), ("p1", 65), ("p2", 65), ("p3", 59)] {
+        feed.push_str(&at(cursor, ago, &format!("probe {source}")));
+    }
+    // The correlation uses journal time, not the moment these lines replay.
+    feed.push_str(&at("l0", 58, &format!("login {source}")));
+    feed.push_str(&at("l1", 57, "login 192.0.2.11"));
+    fake_journalctl(dir.path(), &feed, true);
+    let config = r#"
+[general]
+diagnostics = "info"
+[journal]
+
+[[rules]]
+id = "probe"
+match_type = "regex"
+pattern = 'probe (?P<src>\S+)'
+severity = "warning"
+[rules.threshold]
+group_by = "src"
+count = 4
+window_secs = 60
+window = "sliding"
+
+[[rules]]
+id = "login_after_probe"
+match_type = "regex"
+pattern = 'login (?P<src>\S+)'
+severity = "critical"
+[rules.after]
+rules = ["probe"]
+field = "src"
+within_secs = 60
+"#;
+    let d = Daemon::start(dir.path(), config);
+    let first = d.event();
+    let second = d.event();
+    assert_eq!(first["rule"], "probe");
+    assert_eq!(first["fields"]["src"], source);
+    assert_eq!(second["rule"], "login_after_probe");
+    assert_eq!(second["fields"]["src"], source);
+    assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
+    d.stop();
+}
