@@ -75,7 +75,11 @@ jobs:
                   bom = json.loads(path.read_text())
               except (OSError, json.JSONDecodeError):
                   continue
-              name = bom.get("metadata", {}).get("component", {}).get("name")
+              if not isinstance(bom, dict):
+                  continue
+              metadata = bom.get("metadata")
+              component = metadata.get("component") if isinstance(metadata, dict) else None
+              name = component.get("name") if isinstance(component, dict) else None
               if name in expected:
                   found.add(name)
           missing = expected - found
