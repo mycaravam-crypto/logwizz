@@ -344,8 +344,9 @@ cooldown_secs = 300    # then stay silent for that group this long
   [sequence](#sequence-rules) windows) count in the time a file line was
   read, and in the time a journal entry was logged
   (`__REALTIME_TIMESTAMP`). Catching up on the journal after a restart
-  therefore does not turn hours of entries into a burst. Entries logged
-  before the last boot, or in the future, count as read now.
+  therefore does not turn hours of entries into a burst, also for entries
+  from before a reboot. Entries logged in the future (clock skew) count as
+  read now.
 - `rate_limit_events` and dedup apply to threshold events as to any other.
 - Each rule tracks at most `limits.threshold_max_groups` groups. When the
   table is full, a new group first drops every group whose window and

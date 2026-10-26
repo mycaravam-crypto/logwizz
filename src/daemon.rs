@@ -267,8 +267,10 @@ impl Pipeline {
 }
 
 /// The monotonic time at which the wall clock read `at`, assuming the
-/// clock was not changed since. Never later than now; times before boot
-/// (or the clock's start) become now.
+/// clock was not changed since. Never later than now. On Linux an
+/// `Instant` holds signed seconds, so times before boot (entries replayed
+/// from a saved cursor after a reboot) keep their spacing; only a time
+/// beyond that range would become now.
 fn instant_of(at: SystemTime) -> Instant {
     let now = Instant::now();
     match SystemTime::now().duration_since(at) {
@@ -460,4 +462,23 @@ fn spawn_stats_thread(interval: Arc<AtomicU64>, metrics: Arc<Metrics>) -> io::Re
         }
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_times_before_boot_keep_their_spacing() {
+        // Far longer ago than any machine's uptime.
+        let long_ago = SystemTime::now() - Duration::from_secs(400 * 86_400);
+        let a = instant_of(long_ago);
+        let b = instant_of(long_ago + Duration::from_secs(30));
+        let spacing = b.duration_since(a).as_secs_f64();
+        assert!((spacing - 30.0).abs() < 1.0, "{spacing}");
+        assert!(Instant::now().duration_since(a) > Duration::from_secs(399 * 86_400));
+        // A time in the future (clock skew) is now.
+        let future = instant_of(SystemTime::now() + Duration::from_secs(60));
+        assert!(future <= Instant::now());
+    }
 }
