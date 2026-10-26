@@ -50,3 +50,35 @@ jobs:
           format: table
           exit-code: '1'
           skip-setup-trivy: true
+
+  sbom-validation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - run: rustup toolchain install stable --profile minimal --target x86_64-unknown-linux-musl && rustup default stable
+      - name: Install pinned SBOM generator
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Generate and validate binary SBOMs
+        run: |
+          cargo cyclonedx --format json --describe binaries --spec-version 1.5 --target x86_64-unknown-linux-musl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          expected = {"logwizz", "logwizz-notify"}
+          found = set()
+          for path in Path(".").glob("*.json"):
+              try:
+                  bom = json.loads(path.read_text())
+              except (OSError, json.JSONDecodeError):
+                  continue
+              name = bom.get("metadata", {}).get("component", {}).get("name")
+              if name in expected:
+                  found.add(name)
+          missing = expected - found
+          if missing:
+              raise SystemExit(f"missing CycloneDX SBOM(s) for: {', '.join(sorted(missing))}")
+          PY
