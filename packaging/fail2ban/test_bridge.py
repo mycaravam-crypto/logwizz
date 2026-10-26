@@ -137,7 +137,7 @@ class FilterTests(unittest.TestCase):
 class FollowProcessTests(unittest.TestCase):
     """Exercise the bridge stream and output path without running Fail2ban."""
 
-    def run_stream(self, settings, feed, output):
+    def run_stream(self, settings, feed, output, journal_exit_code=0, expected_code=0):
         class FakeJournal:
             def __init__(self):
                 self.stdout = io.StringIO(feed)
@@ -149,7 +149,7 @@ class FollowProcessTests(unittest.TestCase):
                 self.stdout.close()
 
             def wait(self):
-                return 0
+                return journal_exit_code
 
         calls = []
 
@@ -162,13 +162,22 @@ class FollowProcessTests(unittest.TestCase):
              patch.object(BRIDGE.subprocess, "Popen", side_effect=popen), \
              contextlib.redirect_stderr(stderr), contextlib.ExitStack() as stack:
             code = BRIDGE.follow(settings, stack)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, expected_code)
         self.assertEqual(
             calls,
             [["journalctl", "--namespace=logwizz", "--unit=logwizz.service",
               "--output=cat", "--follow", "--since=now"]],
         )
         return stderr.getvalue()
+
+    def test_journalctl_failure_status_is_propagated(self):
+        settings = BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"})
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "fail2ban.log"
+            self.run_stream(
+                settings, "", output, journal_exit_code=7, expected_code=7
+            )
+            self.assertFalse(output.exists())
 
     def test_dry_run_never_creates_enforcement_log(self):
         settings = BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"})
