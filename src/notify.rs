@@ -716,6 +716,14 @@ mod tests {
     }
 
     #[test]
+    fn journal_mode_parsing() {
+        assert_eq!(JournalMode::parse("auto").unwrap(), JournalMode::Auto);
+        assert_eq!(JournalMode::parse("namespace").unwrap(), JournalMode::Namespace);
+        assert_eq!(JournalMode::parse("legacy").unwrap(), JournalMode::Legacy);
+        assert!(JournalMode::parse("invalid").is_err());
+    }
+
+    #[test]
     fn settings_defaults_and_validation() {
         let s = Settings::from_env(env(&[
             ("TELEGRAM_BOT_TOKEN", "123456:ABC_def-123"),
