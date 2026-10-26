@@ -44,13 +44,19 @@ fn rules_match_audit_records() {
     );
     assert_eq!(
         hits(&cfg, &exec),
-        ["service_exec serial=4242 ppid=812 pid=4321 auid=4294967295 uid=33 exe=/usr/bin/dash"]
+        [
+            "service_exec serial=4242 ppid=812 pid=4321 auid=4294967295 uid=33 exe=/usr/bin/dash \
+             auid_name=unset uid_name=www-data"
+        ]
     );
     // A path with a space is hex-encoded: still reported, without exe.
     let hex = exec.replace("exe=\"/usr/bin/dash\"", "exe=2F746D702F6120622F7368");
     assert_eq!(
         hits(&cfg, &hex),
-        ["service_exec serial=4242 ppid=812 pid=4321 auid=4294967295 uid=33"]
+        [
+            "service_exec serial=4242 ppid=812 pid=4321 auid=4294967295 uid=33 \
+             auid_name=unset uid_name=www-data"
+        ]
     );
 
     let write = "type=SYSCALL msg=audit(1761400100.456:4300): arch=c000003e syscall=257 success=yes \
@@ -59,6 +65,25 @@ fn rules_match_audit_records() {
                  comm=\"bash\" exe=\"/usr/bin/bash\" subj=unconfined key=\"logwizz_sensitive_write\"";
     assert_eq!(
         hits(&cfg, write),
+        ["sensitive_write serial=4300 pid=2002 auid=1000 uid=0 exe=/usr/bin/bash"]
+    );
+    // The same record in the ENRICHED format: the login user stays visible after sudo.
+    let enriched =
+        format!("{write}\u{1d}ARCH=x86_64 SYSCALL=openat AUID=\"alice\" UID=\"root\" GID=\"root\"");
+    assert_eq!(
+        hits(&cfg, &enriched),
+        [
+            "sensitive_write serial=4300 pid=2002 auid=1000 uid=0 exe=/usr/bin/bash \
+             auid_name=alice uid_name=root"
+        ]
+    );
+    // Names only come from auditd's part after 0x1d, never from the raw record.
+    let raw_lookalike = write.replace(
+        "subj=unconfined",
+        "subj=unconfined AUID=\"root\" UID=\"root\"",
+    );
+    assert_eq!(
+        hits(&cfg, &raw_lookalike),
         ["sensitive_write serial=4300 pid=2002 auid=1000 uid=0 exe=/usr/bin/bash"]
     );
 

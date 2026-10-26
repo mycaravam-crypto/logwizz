@@ -339,8 +339,8 @@ if command -v auditctl >/dev/null || { apt-get update -q && apt-get install -qy 
   unreadable() { events | grep -F 'path=/var/log/audit/audit.log' | grep -v '^{' | tail -1; }
   runuser -u www-data -- /bin/true
   if wait_for '"rule":"service_exec"' 10 &&
-     events | grep -F '"rule":"service_exec"' | grep -q '"uid":"33".*"exe":"/usr/bin/true"'; then
-    res runtime_exec PASS "uid=33 exe=/usr/bin/true"
+     events | grep -F '"rule":"service_exec"' | grep -q '"uid":"33".*"exe":"/usr/bin/true".*"uid_name":"www-data"'; then
+    res runtime_exec PASS "uid=33 exe=/usr/bin/true uid_name=www-data"
   else res runtime_exec FAIL "no service_exec event $(unreadable)"; fi
   sh -c ': >> /etc/passwd'
   expect_event runtime_write '"rule":"sensitive_write"' sensitive_write /var/log/audit/audit.log

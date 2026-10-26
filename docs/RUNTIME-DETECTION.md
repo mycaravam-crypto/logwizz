@@ -25,8 +25,10 @@ no change to its core. Both parts are optional (#82).
 The audit rule's key is the only link between the two parts. Each audit event
 has a `SYSCALL` record line, and that one line holds the key, the process
 (`pid`, `ppid`, `exe`), the real and login user (`uid`, `auid`) and the event's
-serial number. One regex rule per key is enough, so logwizz does not need to
-combine records or run a separate translator.
+serial number. With auditd's default `log_format = ENRICHED`, auditd appends
+the user names to the same line (`uid_name`, `auid_name`). One regex rule per
+key is enough, so logwizz does not need to combine records or run a separate
+translator.
 
 Alternatives considered:
 
@@ -79,8 +81,17 @@ restart auditd. This has not been tested; see #53.
 
 The events reach `logwizz-notify` like any other event: they are grouped by
 rule, and raw lines are never sent. A notification shows the rule, the count
-and the time window. To also show which program ran, add `exe` to
-`NOTIFY_FIELDS`. Leave it out if program paths are sensitive.
+and the time window. To also show which program ran and as whom, add
+`exe,uid_name,auid_name` to `NOTIFY_FIELDS`:
+
+```text
+3× from /usr/bin/dash · www-data · unset
+```
+
+`unset` means nobody logged in: the service itself started the program, the
+case to look at first. A login name there (`alice`) usually means someone
+testing with `sudo -u www-data`. With `log_format = RAW` there are no names;
+use `uid,auid` instead. Leave `exe` out if program paths are sensitive.
 
 The Fail2ban bridge only acts on rules you allowlist. These rules capture no
 source address, so they never lead to a ban. Nothing kills processes or
