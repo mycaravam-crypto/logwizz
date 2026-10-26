@@ -158,8 +158,8 @@ class FollowProcessTests(unittest.TestCase):
             return FakeJournal()
 
         stderr = io.StringIO()
-        with patch.object(BRIDGE, "OUTPUT", output), \\
-             patch.object(BRIDGE.subprocess, "Popen", side_effect=popen), \\
+        with patch.object(BRIDGE, "OUTPUT", output), \
+             patch.object(BRIDGE.subprocess, "Popen", side_effect=popen), \
              contextlib.redirect_stderr(stderr), contextlib.ExitStack() as stack:
             code = BRIDGE.follow(settings, stack)
         self.assertEqual(code, 0)
