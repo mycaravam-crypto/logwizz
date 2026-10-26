@@ -333,11 +333,12 @@ else
   else
     echo 'log_group = adm' >> /etc/audit/auditd.conf
   fi
-  systemctl restart auditd 2>/dev/null || service auditd restart 2>/dev/null || true
-  install -m 0640 "$P/logwizz.rules" /etc/audit/rules.d/logwizz.rules
-  if augenrules --load >/root/lwz-augenrules.log 2>&1 &&
-      auditctl -l | grep -q 'logwizz_service_exec' &&
-      auditctl -l | grep -q 'logwizz_sensitive_write'; then
+  if systemctl restart auditd 2>/root/lwz-auditd-restart.log ||
+      service auditd restart 2>>/root/lwz-auditd-restart.log; then
+    install -m 0640 "$P/logwizz.rules" /etc/audit/rules.d/logwizz.rules
+    if augenrules --load >/root/lwz-augenrules.log 2>&1 &&
+        auditctl -l | grep -q 'logwizz_service_exec' &&
+        auditctl -l | grep -q 'logwizz_sensitive_write'; then
     # Append only the rules: runtime.toml includes general and output tables
     # which cannot appear again in the host configuration.
     sed -n '/^\[\[rules\]\]/,$p' "$P/runtime.toml" >> /etc/logwizz/logwizz.toml
@@ -360,8 +361,11 @@ else
     else
       res runtime_audit FAIL "invalid runtime configuration: $(cat /root/lwz-runtime-config.log)"
     fi
+    else
+      res runtime_audit FAIL "audit rules not loaded: $(cat /root/lwz-augenrules.log)"
+    fi
   else
-    res runtime_audit FAIL "audit rules not loaded: $(cat /root/lwz-augenrules.log)"
+    res runtime_audit FAIL "could not restart auditd: $(cat /root/lwz-auditd-restart.log)"
   fi
 fi
 
