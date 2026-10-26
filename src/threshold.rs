@@ -312,10 +312,10 @@ mod tests {
         // A fixed window started at zero discards the nine early matches.
         for _ in 0..9 {
             assert!(
-            fixed
-                .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0))
-                .is_none()
-        );
+                fixed
+                    .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0))
+                    .is_none()
+            );
         }
         assert!(
             fixed
@@ -325,10 +325,10 @@ mod tests {
         config.window_mode = ThresholdWindow::Sliding;
         for _ in 0..9 {
             assert!(
-            sliding
-                .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0))
-                .is_none()
-        );
+                sliding
+                    .observe(0, "r", &config, Path::new("a"), &[], secs(t0, 0))
+                    .is_none()
+            );
         }
         assert!(
             sliding
@@ -345,11 +345,17 @@ mod tests {
         let mut config = threshold(GroupBy::All, None, 10);
         config.window_mode = ThresholdWindow::Sliding;
         for _ in 0..9 {
-            assert!(th.observe(0, "r", &config, Path::new("a"), &[], t0).is_none());
+            assert!(
+                th.observe(0, "r", &config, Path::new("a"), &[], t0)
+                    .is_none()
+            );
         }
         // Half a window after rollover: previous nine count as five,
         // plus one current match, still below the ten-match threshold.
-        assert!(th.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 15)).is_none());
+        assert!(
+            th.observe(0, "r", &config, Path::new("a"), &[], secs(t0, 15))
+                .is_none()
+        );
     }
 
     #[test]
