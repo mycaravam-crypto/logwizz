@@ -214,5 +214,33 @@ class FollowProcessTests(unittest.TestCase):
             self.assertTrue(lines[0].endswith(f"logwizz rule=ssh_bruteforce src={V4}"))
             self.assertEqual(output.stat().st_mode & 0o777, 0o640)
 
+    def test_blank_explicit_allowlist_is_rejected(self):
+        # An explicitly configured empty policy must never silently enable defaults.
+        for raw in ("", " ", "\t", "\n"):
+            with self.assertRaisesRegex(ValueError, "explicit empty allowlist", msg=repr(raw)):
+                BRIDGE.Settings({"BRIDGE_RULES": raw})
+        # Separators alone leave no rule IDs and are rejected as invalid.
+        for raw in (",", " , ", ",,"):
+            with self.assertRaisesRegex(ValueError, "invalid rule IDs", msg=repr(raw)):
+                BRIDGE.Settings({"BRIDGE_RULES": raw})
+
+    def test_unauthorized_rule_with_global_src_does_not_enforce(self):
+        # A client-controlled address is not intrinsically authenticated.
+        # This proves rule gating, NOT provenance of fields.src.
+        forged = event("log_flood", V4)
+        self.assertIsNone(fmt(forged))
+
+    def test_high_volume_rejected_events_produce_no_enforcement_lines(self):
+        settings = BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"})
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "fail2ban.log"
+            # One trailing eligible event proves the whole feed was consumed.
+            rejected = [event("log_flood", V4)] * 2000
+            feed = "\n".join(rejected + [event("ssh_bruteforce", V4), ""])
+            stderr = self.run_stream(settings, feed, output)
+            self.assertEqual(stderr.count("would write:"), 1)
+            self.assertFalse(output.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
