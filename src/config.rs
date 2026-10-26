@@ -257,7 +257,21 @@ struct RawThreshold {
     count: u32,
     window_secs: u64,
     #[serde(default)]
+    window: WindowType,
+    #[serde(default)]
     cooldown_secs: u64,
+}
+
+/// How a threshold window moves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowType {
+    /// Starts at a group's first match and restarts when it is over.
+    #[default]
+    Fixed,
+    /// Covers the last `window_secs`, estimated from the current and the
+    /// previous fixed window.
+    Sliding,
 }
 
 /// What a threshold rule groups its matches by.
@@ -279,6 +293,7 @@ pub struct Threshold {
     pub distinct: Option<usize>,
     pub count: u32,
     pub window: Duration,
+    pub window_type: WindowType,
     pub cooldown: Duration,
 }
 
@@ -958,8 +973,13 @@ fn check_threshold(
         ));
     }
     // Distinct values are kept as 8-byte hashes in hash sets: about 16 bytes
-    // each, for up to `count` values per group.
-    let distinct_bytes = limits.threshold_max_groups as u64 * u64::from(t.count) * 16;
+    // each, for up to `count` values per group; twice that for a sliding
+    // window, which keeps the previous window's values too.
+    let windows = match t.window {
+        WindowType::Fixed => 1,
+        WindowType::Sliding => 2,
+    };
+    let distinct_bytes = limits.threshold_max_groups as u64 * u64::from(t.count) * 16 * windows;
     if distinct.is_some() && distinct_bytes > MAX_DISTINCT_BYTES {
         return Err(format!(
             "threshold.count × limits.threshold_max_groups is too large for `distinct` \
@@ -973,6 +993,7 @@ fn check_threshold(
         distinct,
         count: t.count,
         window: Duration::from_secs(t.window_secs),
+        window_type: t.window,
         cooldown: Duration::from_secs(t.cooldown_secs),
     })
 }
@@ -1366,6 +1387,32 @@ mod tests {
                 "group_by = \"src\"\ndistinct = \"dpt\"\ncount = 10000\nwindow_secs = 10"
             )
             .contains("too large for `distinct`")
+        );
+        // A sliding window keeps two windows of distinct values.
+        let distinct = |window: &str| {
+            parse_str(&rule(
+                fw,
+                sev,
+                &format!(
+                    "group_by = \"src\"\ndistinct = \"dpt\"\ncount = 600\nwindow_secs = 10\n{window}"
+                ),
+            ))
+        };
+        assert_eq!(
+            distinct("").unwrap().rules[0]
+                .threshold
+                .as_ref()
+                .unwrap()
+                .window_type,
+            WindowType::Fixed
+        );
+        assert!(distinct("window = \"fixed\"").is_ok());
+        assert!(distinct("window = \"sliding\"").is_err(), "twice the state");
+        assert!(distinct("window = \"rolling\"").is_err());
+        let t = parse_str(&rule(fw, sev, &format!("{base}\nwindow = \"sliding\""))).unwrap();
+        assert_eq!(
+            t.rules[0].threshold.as_ref().unwrap().window_type,
+            WindowType::Sliding
         );
     }
 

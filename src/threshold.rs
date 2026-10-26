@@ -6,6 +6,11 @@
 //! counts matches, or distinct values of a capture, in a fixed window that
 //! starts at its first match. Reaching the count fires one event, resets
 //! the group and silences it for the rule's cooldown.
+//!
+//! A sliding window keeps the previous fixed window's count too and adds
+//! the share of it that still lies within `window` of now, assuming its
+//! matches were spread evenly (the usual two-bucket rate estimate). A burst
+//! that straddles two fixed windows is then counted as one.
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-use crate::config::{GroupBy, Threshold};
+use crate::config::{GroupBy, Threshold, WindowType};
 use crate::metrics::{self, Metrics};
 
 /// Minimum time between eviction warnings.
@@ -41,6 +46,10 @@ struct Group {
     /// can only undercount; the per-process keys make one impractical to
     /// craft.
     distinct: HashSet<u64>,
+    /// Sliding windows: matches (or distinct values not seen again since)
+    /// in the window before `start`, and those values.
+    prev_count: u32,
+    prev_distinct: HashSet<u64>,
     silent_until: Option<Instant>,
 }
 
@@ -133,36 +142,65 @@ impl Thresholds {
             last_seen: now,
             count: 0,
             distinct: HashSet::new(),
+            prev_count: 0,
+            prev_distinct: HashSet::new(),
             silent_until: None,
         });
         g.last_seen = now;
         if g.silent_until.is_some_and(|until| now < until) {
             return None;
         }
-        if now.saturating_duration_since(g.start) >= t.window {
+        let elapsed = now.saturating_duration_since(g.start);
+        if elapsed >= span(t) {
             g.start = now;
             g.count = 0;
             g.distinct.clear();
+            g.prev_count = 0;
+            g.prev_distinct.clear();
+        } else if elapsed >= t.window {
+            // Sliding only: the current window becomes the previous one.
+            g.start += t.window;
+            g.prev_count = std::mem::take(&mut g.count);
+            g.prev_distinct = std::mem::take(&mut g.distinct);
         }
         match distinct {
             Some(hash) => {
-                g.distinct.insert(hash);
+                if g.distinct.insert(hash) && g.prev_distinct.contains(&hash) {
+                    // Already counted in the previous window's share.
+                    g.prev_count -= 1;
+                }
                 g.count = g.distinct.len() as u32;
             }
             None => g.count += 1,
         }
-        if g.count < t.count {
+        // The part of the previous window still within `window` of now.
+        let left = t
+            .window
+            .saturating_sub(now.saturating_duration_since(g.start));
+        // Round up conservatively: integer truncation here can undercount a threshold at the boundary.
+        let share = (u128::from(g.prev_count) * left.as_nanos()).div_ceil(t.window.as_nanos());
+        let count = g.count + share as u32;
+        if count < t.count {
             return None;
         }
-        let count = g.count;
         g.count = 0;
         g.distinct = HashSet::new();
+        g.prev_count = 0;
+        g.prev_distinct = HashSet::new();
         g.start = now;
         g.silent_until = Some(now + t.cooldown);
         Some(Fired {
             group: reported.then(|| key.into()),
             count,
         })
+    }
+}
+
+/// How long after its `start` a group's counts still matter.
+fn span(t: &Threshold) -> Duration {
+    match t.window_type {
+        WindowType::Fixed => t.window,
+        WindowType::Sliding => t.window * 2,
     }
 }
 
@@ -175,7 +213,7 @@ fn evict(table: &mut Table, t: &Threshold, now: Instant) -> u64 {
         return 0;
     }
     let idle = |g: &Group| {
-        now.saturating_duration_since(g.start) >= t.window
+        now.saturating_duration_since(g.start) >= span(t)
             && g.silent_until.is_none_or(|until| now >= until)
     };
     table.groups.retain(|_, g| !idle(g));
@@ -206,8 +244,101 @@ mod tests {
             distinct,
             count,
             window: Duration::from_secs(10),
+            window_type: WindowType::Fixed,
             cooldown: Duration::from_secs(60),
         }
+    }
+
+    fn sliding(distinct: Option<usize>, count: u32) -> Threshold {
+        Threshold {
+            window: Duration::from_secs(60),
+            window_type: WindowType::Sliding,
+            ..threshold(GroupBy::All, distinct, count)
+        }
+    }
+
+    #[test]
+    fn sliding_window_counts_a_burst_across_the_boundary() {
+        let m = Arc::new(Metrics::default());
+        let t0 = Instant::now();
+        // 1 match at 0 s, 8 at 55–59 s, 8 at 60–63 s: 16 in under 10 s.
+        let times: Vec<u64> = std::iter::once(0)
+            .chain(55..59)
+            .chain(55..59)
+            .chain(60..64)
+            .chain(60..64)
+            .collect();
+        let run = |t: &Threshold| {
+            let mut th = Thresholds::new(1, 100, Arc::clone(&m));
+            times.iter().position(|&s| {
+                th.observe(0, "r", t, Path::new("a"), &[], secs(t0, s))
+                    .is_some()
+            })
+        };
+        let mut fixed = sliding(None, 10);
+        fixed.window_type = WindowType::Fixed;
+        assert_eq!(run(&fixed), None, "each fixed window holds fewer than 10");
+        // At 60 s, 9 previous matches weigh in almost fully.
+        assert_eq!(run(&sliding(None, 10)), Some(9));
+    }
+
+    #[test]
+    fn sliding_window_rounds_previous_bucket_weight_up_at_threshold_boundary() {
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, m), Instant::now());
+        let mut t = sliding(None, 11);
+        t.window = Duration::from_secs(10);
+        for _ in 0..9 {
+            assert_eq!(th.observe(0, "r", &t, Path::new("a"), &[], t0), None);
+        }
+        // At 10 s, 9 previous + 1 current remain below 11.
+        assert_eq!(
+            th.observe(0, "r", &t, Path::new("a"), &[], secs(t0, 10)),
+            None
+        );
+        // At 11 s the previous bucket contributes 8.1 by the estimate.
+        // Rounding down would miss 11; conservative rounding reaches it.
+        assert_eq!(
+            th.observe(0, "r", &t, Path::new("a"), &[], secs(t0, 11))
+                .map(|f| f.count),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn sliding_window_forgets_the_previous_window_gradually() {
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, m), Instant::now());
+        let t = sliding(None, 10);
+        let mut obs = |s| th.observe(0, "r", &t, Path::new("a"), &[], secs(t0, s));
+        for _ in 0..8 {
+            assert_eq!(obs(0), None);
+        }
+        // At 90 s half of the previous window (4 of 8) still counts: 4 + 5.
+        for _ in 0..5 {
+            assert_eq!(obs(90), None);
+        }
+        assert_eq!(obs(90).map(|f| f.count), Some(10));
+        // Two windows after the last start, nothing is left.
+        for _ in 0..9 {
+            assert_eq!(obs(300), None);
+        }
+    }
+
+    #[test]
+    fn sliding_distinct_counts_a_value_once_across_windows() {
+        let m = Arc::new(Metrics::default());
+        let (mut th, t0) = (Thresholds::new(1, 100, m), Instant::now());
+        let t = sliding(Some(2), 4);
+        let mut obs = |s, dpt| th.observe(0, "r", &t, Path::new("a"), &f("a", dpt), secs(t0, s));
+        assert_eq!(obs(0, "1"), None);
+        assert_eq!(obs(0, "2"), None);
+        assert_eq!(obs(0, "3"), None);
+        // Ports seen in the previous window again: still 3 distinct.
+        assert_eq!(obs(60, "1"), None);
+        assert_eq!(obs(60, "2"), None);
+        assert_eq!(obs(60, "3"), None);
+        assert_eq!(obs(60, "4").map(|f| f.count), Some(4));
     }
 
     fn f(src: &str, dpt: &str) -> Vec<(usize, Box<[u8]>)> {

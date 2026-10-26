@@ -154,6 +154,9 @@ exactly this in a VM, with these rules.
   host that legitimately gets connections to many closed ports (for
   example a NAT gateway, or clients retrying a moved service) needs a higher
   `count` for `port_scan`, or those sources excluded in the firewall rules.
+  `window = "sliding"` (used by `ssh_bruteforce`) also catches bursts that
+  straddle two fixed windows; see the
+  [reference](REFERENCE.md#threshold-rules).
 - **`log_flood`:** set `count` to a few times your normal peak lines per
   minute. Put it after `ignore` rules for known noise (see the README,
   *Reporting unknown lines*) to count only unknown lines.
