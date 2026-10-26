@@ -215,7 +215,7 @@ fn thresholds_count_in_journal_time_when_catching_up() {
     };
     // Read all at once, but logged 30 s apart: no 3 within a minute.
     let mut feed = String::new();
-    for (i, ago) in [90, 60, 30, 0].into_iter().enumerate() {
+    for (i, ago) in [93, 62, 31, 0].into_iter().enumerate() {
         feed.push_str(&at(&format!("a{i}"), ago, "192.0.2.1"));
     }
     // A real burst, logged within the same second.
