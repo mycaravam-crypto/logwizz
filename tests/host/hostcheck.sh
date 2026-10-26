@@ -339,29 +339,29 @@ else
     if augenrules --load >/root/lwz-augenrules.log 2>&1 &&
         auditctl -l | grep -q 'logwizz_service_exec' &&
         auditctl -l | grep -q 'logwizz_sensitive_write'; then
-    # Append only the rules: runtime.toml includes general and output tables
-    # which cannot appear again in the host configuration.
-    sed -n '/^\[\[rules\]\]/,$p' "$P/runtime.toml" >> /etc/logwizz/logwizz.toml
-    printf '\n[[files]]\npath = "/var/log/audit/audit.log"\n' >> /etc/logwizz/logwizz.toml
-    if logwizz --config /etc/logwizz/logwizz.toml --check-config >/root/lwz-runtime-config.log 2>&1; then
-      # On these distros auditd should make its log root:adm 0640.
-      stat -c '%U:%G %a %n' /var/log/audit/audit.log
-      systemctl start logwizz
-      sleep 2
-      runuser -u www-data -- /bin/true
-      : >> /etc/passwd
-      if wait_for '"rule":"service_exec"' 20 && wait_for '"rule":"sensitive_write"' 20 &&
-          events | grep '"rule":"service_exec"' | grep -q '"file":"/var/log/audit/audit.log"' &&
-          events | grep '"rule":"sensitive_write"' | grep -q '"file":"/var/log/audit/audit.log"'; then
-        res runtime_audit PASS "real auditd records detected by unprivileged logwizz"
+      # Append only the rules: runtime.toml includes general and output tables
+      # which cannot appear again in the host configuration.
+      sed -n '/^\[\[rules\]\]/,$p' "$P/runtime.toml" >> /etc/logwizz/logwizz.toml
+      printf '\n[[files]]\npath = "/var/log/audit/audit.log"\n' >> /etc/logwizz/logwizz.toml
+      if logwizz --config /etc/logwizz/logwizz.toml --check-config >/root/lwz-runtime-config.log 2>&1; then
+        # On these distros auditd should make its log root:adm 0640.
+        stat -c '%U:%G %a %n' /var/log/audit/audit.log
+        systemctl start logwizz
+        sleep 2
+        runuser -u www-data -- /bin/true
+        : >> /etc/passwd
+        if wait_for '"rule":"service_exec"' 20 && wait_for '"rule":"sensitive_write"' 20 &&
+            events | grep '"rule":"service_exec"' | grep -q '"file":"/var/log/audit/audit.log"' &&
+            events | grep '"rule":"sensitive_write"' | grep -q '"file":"/var/log/audit/audit.log"'; then
+          res runtime_audit PASS "real auditd records detected by unprivileged logwizz"
+        else
+          res runtime_audit FAIL "missing audit events: $(tail -n 8 /var/log/audit/audit.log | tr '\n' ';')"
+        fi
+        systemctl stop logwizz
       else
-        res runtime_audit FAIL "missing audit events: $(tail -n 8 /var/log/audit/audit.log | tr '\n' ';')"
+        res runtime_audit FAIL "invalid runtime configuration: $(cat /root/lwz-runtime-config.log)"
       fi
-      systemctl stop logwizz
-    else
-      res runtime_audit FAIL "invalid runtime configuration: $(cat /root/lwz-runtime-config.log)"
-    fi
-    else
+      else
       res runtime_audit FAIL "audit rules not loaded: $(cat /root/lwz-augenrules.log)"
     fi
   else
