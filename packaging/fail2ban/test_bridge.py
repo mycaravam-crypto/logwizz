@@ -2,6 +2,10 @@
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import json
+import io
+import contextlib
+import tempfile
+from unittest.mock import patch
 from pathlib import Path
 import re
 import unittest
@@ -128,6 +132,87 @@ class FilterTests(unittest.TestCase):
             self.assertIsNotNone(m, line)
             self.assertEqual(m.group("host"), line.rsplit("=", 1)[1])
 
+
+
+class FollowProcessTests(unittest.TestCase):
+    """Exercise the bridge stream and output path without running Fail2ban."""
+
+    def run_stream(self, settings, feed, output, journal_exit_code=0, expected_code=0):
+        class FakeJournal:
+            def __init__(self):
+                self.stdout = io.StringIO(feed)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.stdout.close()
+
+            def wait(self):
+                return journal_exit_code
+
+        calls = []
+
+        def popen(argv, **kwargs):
+            calls.append(argv)
+            return FakeJournal()
+
+        stderr = io.StringIO()
+        with patch.object(BRIDGE, "OUTPUT", output), \
+             patch.object(BRIDGE.subprocess, "Popen", side_effect=popen), \
+             contextlib.redirect_stderr(stderr), contextlib.ExitStack() as stack:
+            code = BRIDGE.follow(settings, stack)
+        self.assertEqual(code, expected_code)
+        self.assertEqual(
+            calls,
+            [["journalctl", "--namespace=logwizz", "--unit=logwizz.service",
+              "--output=cat", "--follow", "--since=now"]],
+        )
+        return stderr.getvalue()
+
+    def test_journalctl_failure_status_is_propagated(self):
+        settings = BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"})
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "fail2ban.log"
+            self.run_stream(
+                settings, "", output, journal_exit_code=7, expected_code=7
+            )
+            self.assertFalse(output.exists())
+
+    def test_dry_run_never_creates_enforcement_log(self):
+        settings = BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"})
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "fail2ban.log"
+            feed = "\n".join([
+                event("port_scan", V4),
+                event("port_scan", "127.0.0.1"),
+                event("log_flood", V4),
+                "broken-json",
+                "",
+            ])
+            stderr = self.run_stream(settings, feed, output)
+            self.assertFalse(output.exists())
+            self.assertEqual(stderr.count("would write:"), 1)
+            self.assertIn(f"src={V4}", stderr)
+
+    def test_enabled_mode_writes_only_eligible_events(self):
+        settings = BRIDGE.Settings({"BRIDGE_IGNORE": "185.220.102.0/24"})
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "fail2ban.log"
+            feed = "\n".join([
+                event("ssh_bruteforce", V4),
+                event("port_scan", "185.220.102.7"),
+                event("log_flood", V4),
+                event("port_scan", "192.0.2.1"),
+                "not-json",
+                "",
+            ])
+            stderr = self.run_stream(settings, feed, output)
+            self.assertEqual(stderr, "")
+            lines = output.read_text().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertTrue(lines[0].endswith(f"logwizz rule=ssh_bruteforce src={V4}"))
+            self.assertEqual(output.stat().st_mode & 0o777, 0o640)
 
 if __name__ == "__main__":
     unittest.main()
