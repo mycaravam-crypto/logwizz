@@ -975,7 +975,10 @@ GitHub Actions run on every pull request and on `main`:
   generated release notes. Git tags are the source of truth. A PR label picks the bump: `release:patch` (the default),
   `release:minor`, `release:major`, or `release:none` to skip the release. Releases run one at a time; when merges
   come in faster, a run covers every PR merged since the latest tag and takes the largest of their bumps, so none is
-  lost when a newer merge replaces a waiting run. The version shows in `logwizz --version`.
+  lost when a newer merge replaces a waiting run. The version shows in `logwizz --version`. A build from source
+  reports where it comes from instead, as `git describe` sees it: `0.12.9+g62a126b` on a release tag,
+  `0.12.9+3.g1a2b3c4` three commits after it, `.dirty` with uncommitted changes, `unknown+g62a126b` without tags (a
+  shallow clone). The release build sets `LOGWIZZ_RELEASE=1` to get the plain stamped version.
 
 Dependabot proposes weekly dependency and action updates (pinned by SHA) after a 7-day cooldown.
 
