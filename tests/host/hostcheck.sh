@@ -361,7 +361,7 @@ else
       else
         res runtime_audit FAIL "invalid runtime configuration: $(cat /root/lwz-runtime-config.log)"
       fi
-      else
+    else
       res runtime_audit FAIL "audit rules not loaded: $(cat /root/lwz-augenrules.log)"
     fi
   else
