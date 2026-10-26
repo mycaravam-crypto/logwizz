@@ -174,7 +174,7 @@ class FollowProcessTests(unittest.TestCase):
         settings = BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"})
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "fail2ban.log"
-            feed = "\\n".join([
+            feed = "\n".join([
                 event("port_scan", V4),
                 event("port_scan", "127.0.0.1"),
                 event("log_flood", V4),
@@ -190,7 +190,7 @@ class FollowProcessTests(unittest.TestCase):
         settings = BRIDGE.Settings({"BRIDGE_IGNORE": "185.220.102.0/24"})
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "fail2ban.log"
-            feed = "\\n".join([
+            feed = "\n".join([
                 event("ssh_bruteforce", V4),
                 event("port_scan", "185.220.102.7"),
                 event("log_flood", V4),
