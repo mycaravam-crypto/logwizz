@@ -96,7 +96,12 @@ impl Recent {
                 let evicted = evict(m, now);
                 metrics::add(&self.metrics.after_evictions, evicted);
             }
-            m.seen.insert(value.clone(), now);
+            // Journal replay can deliver older entries after newer ones.
+            // Keep the most recent event time for each source.
+            let saved = m.seen.entry(value.clone()).or_insert(now);
+            if now > *saved {
+                *saved = now;
+            }
         }
     }
 
@@ -108,7 +113,7 @@ impl Recent {
                 .get(id)
                 .and_then(|l| l.iter().find(|m| m.field == after.field))
                 .and_then(|m| m.seen.get(value))
-                .is_some_and(|&t| now.saturating_duration_since(t) <= after.within)
+                .is_some_and(|&t| now >= t && now.duration_since(t) <= after.within)
         })
     }
 }
@@ -186,6 +191,26 @@ mod tests {
         // Events of rules nobody refers to are not remembered.
         r.record(&rules[1], &src("c"), t0);
         assert!(!r.memories.contains_key("login"));
+    }
+
+    #[test]
+    fn out_of_order_journal_events_do_not_reverse_sequence_time() {
+        let rules = rules(RULES);
+        let after = rules[1].after.as_ref().unwrap();
+        let mut recent = Recent::new(&rules, 100, Arc::new(Metrics::default()));
+        let t0 = Instant::now();
+        let future = t0 + Duration::from_secs(120);
+        recent.record(&rules[0], &src("a"), future);
+        assert!(
+            !recent.follows(after, b"a", t0),
+            "a later scan cannot precede an earlier login"
+        );
+        recent.record(&rules[0], &src("a"), t0);
+        assert!(
+            !recent.follows(after, b"a", t0 + Duration::from_secs(61)),
+            "an older replay must not replace the latest scan time"
+        );
+        assert!(recent.follows(after, b"a", future));
     }
 
     #[test]
