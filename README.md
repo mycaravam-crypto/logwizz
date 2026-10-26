@@ -75,7 +75,7 @@ An optional [Fail2ban bridge](docs/FAIL2BAN.md) can pass detections from explici
 
 Host checks cover Debian 12/13 and Ubuntu 24.04. RHEL-family packaging and guidance exist, but live RHEL/Rocky runtime validation is still outstanding ([#53](https://github.com/mycaravam-crypto/logwizz/issues/53)); do not treat it as verified platform support.
 
-Optional [runtime detection](docs/RUNTIME-DETECTION.md) reads the Linux audit log to report programs started by a service user and changes to identity and access files. It needs auditd and the shipped audit rules, is off unless configured, and has not yet been verified on a real host ([#82](https://github.com/mycaravam-crypto/logwizz/issues/82)).
+Optional [runtime detection](docs/RUNTIME-DETECTION.md) reads the Linux audit log to report programs started by a service user and changes to identity and access files. It needs auditd and the shipped audit rules, is off unless configured, and is covered by the host checks on Debian 12/13 and Ubuntu 24.04 ([#82](https://github.com/mycaravam-crypto/logwizz/issues/82)).
 
 ## Project boundaries
 

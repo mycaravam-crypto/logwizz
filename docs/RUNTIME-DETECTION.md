@@ -132,7 +132,10 @@ Say it plainly, so nobody relies on more than this gives:
 - **Files.** `audit.log` is read like any other file, with the usual
   rotation handling and at-least-once delivery (see the
   [reference](REFERENCE.md#delivery-guarantees)).
-- **Only the format above is tested.** `tests/runtime.rs` checks the rules
-  against audit lines in the documented auditd format. They have not yet
-  been checked against a real host's `audit.log`; that comes first, in the
-  host verification VM.
+- **Tested on Debian 12, Debian 13 and Ubuntu 24.04.** The host check
+  (`tests/host/run-vm.sh`) installs auditd and these rules on each, and checks
+  that the packaged service reads `audit.log` without extra permissions,
+  reports `service_exec` and `sensitive_write`, and reports `audit_disabled`
+  when the rules are removed as described above. `audit_lost` needs a full
+  kernel backlog and is only tested against sample lines (`tests/runtime.rs`).
+  RHEL-family hosts are not tested (#53).
