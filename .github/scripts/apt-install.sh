@@ -5,10 +5,11 @@
 # timeout-minutes, which bounds this script's worst case of three 3-minute attempts.
 set -euo pipefail
 (( $# > 0 )) || { echo "usage: apt-install.sh <package>..." >&2; exit 2; }
-opts=(-qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
 for try in 1 2 3; do
+  # Not quiet: the Hit/Get lines show which source a stalled update hangs on.
   sudo timeout 90 apt-get "${opts[@]}" update &&
-    sudo timeout 90 apt-get "${opts[@]}" install -y --download-only "$@" && break
+    sudo timeout 90 apt-get -qq "${opts[@]}" install -y --download-only "$@" && break
   (( try < 3 )) || exit 1
   echo "::warning::package download attempt $try failed or timed out; retrying"
 done
