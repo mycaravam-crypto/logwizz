@@ -32,10 +32,16 @@ fn source_version() -> Option<String> {
     if Path::new(&top).canonicalize().ok()? != Path::new(&manifest).canonicalize().ok()? {
         return None;
     }
-    // Rebuild when the commit, the tags or the working tree change.
+    // Rebuild when the commit, the tags or the working tree change. Only paths
+    // that exist: cargo reruns the script on every build for a missing one,
+    // and packed-refs or index are often absent. A later `git pack-refs`
+    // still changes refs/heads, so the new file is picked up on the next run.
     if let Some(dir) = git(&manifest, &["rev-parse", "--absolute-git-dir"]) {
         for p in ["HEAD", "index", "packed-refs", "refs/heads", "refs/tags"] {
-            println!("cargo:rerun-if-changed={dir}/{p}");
+            let path = Path::new(&dir).join(p);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
         }
     }
     println!("cargo:rerun-if-changed=src");
