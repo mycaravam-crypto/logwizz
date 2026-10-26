@@ -249,13 +249,17 @@ class MainFailurePathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "fail2ban.log"
             stderr = io.StringIO()
-            with patch.object(BRIDGE, "OUTPUT", output), \\
-                 patch.object(BRIDGE.subprocess, "Popen", side_effect=FileNotFoundError("journalctl missing")) as popen, \\
-                 patch.dict(BRIDGE.os.environ, {
-                     "BRIDGE_DRY_RUN": "0",
-                     "BRIDGE_RULES": "ssh_bruteforce",
-                 }, clear=True), \\
-                 contextlib.redirect_stderr(stderr):
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(BRIDGE, "OUTPUT", output))
+                popen = stack.enter_context(patch.object(
+                    BRIDGE.subprocess, "Popen",
+                    side_effect=FileNotFoundError("journalctl missing"),
+                ))
+                stack.enter_context(patch.dict(BRIDGE.os.environ, {
+                    "BRIDGE_DRY_RUN": "0",
+                    "BRIDGE_RULES": "ssh_bruteforce",
+                }, clear=True))
+                stack.enter_context(contextlib.redirect_stderr(stderr))
                 code = BRIDGE.main()
 
             self.assertEqual(code, 1)
@@ -267,12 +271,13 @@ class MainFailurePathTests(unittest.TestCase):
 
     def test_invalid_configuration_aborts_before_starting_journal(self):
         stderr = io.StringIO()
-        with patch.object(BRIDGE.subprocess, "Popen") as popen, \\
-             patch.dict(BRIDGE.os.environ, {
-                 "BRIDGE_RULES": "",
-                 "BRIDGE_DRY_RUN": "0",
-             }, clear=True), \\
-             contextlib.redirect_stderr(stderr):
+        with contextlib.ExitStack() as stack:
+            popen = stack.enter_context(patch.object(BRIDGE.subprocess, "Popen"))
+            stack.enter_context(patch.dict(BRIDGE.os.environ, {
+                "BRIDGE_RULES": "",
+                "BRIDGE_DRY_RUN": "0",
+            }, clear=True))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
             code = BRIDGE.main()
 
         self.assertEqual(code, 2)
