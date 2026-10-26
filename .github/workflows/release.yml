@@ -89,6 +89,9 @@ jobs:
           sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml && grep -m1 '^version' Cargo.toml
           cargo update --workspace
       - name: Test and build release
+        env:
+          # build.rs: report the stamped version exactly, not the git describe of a source build.
+          LOGWIZZ_RELEASE: "1"
         run: |
           cargo test --release --locked --target x86_64-unknown-linux-musl
           cargo build --release --locked --target x86_64-unknown-linux-musl

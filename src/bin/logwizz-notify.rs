@@ -13,7 +13,7 @@ const EXIT_CONFIG: u8 = 2;
 /// Telegram, ntfy or a webhook. Configured through the environment; see
 /// packaging/notify.env.example.
 #[derive(Debug, Parser)]
-#[command(name = "logwizz-notify", version, about)]
+#[command(name = "logwizz-notify", version = env!("LOGWIZZ_VERSION"), about)]
 struct Cli {}
 
 fn main() -> ExitCode {

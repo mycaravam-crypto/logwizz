@@ -122,7 +122,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     };
 
     info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = env!("LOGWIZZ_VERSION"),
         files = monitor.files(),
         globs = cfg.globs.len(),
         rules = cfg.rules.len(),
