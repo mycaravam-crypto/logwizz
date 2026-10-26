@@ -1,5 +1,6 @@
 # logwizz detection configuration: port scans (nmap, masscan), SSH brute
-# force and probes, scanner user agents, log floods.
+# force and probes, logins from scanning sources, scanner user agents, log
+# floods.
 #
 # Scans of closed ports only show up in the logs if the firewall logs them:
 # load the nftables rules from docs/DETECTION.md first. Then:
@@ -137,6 +138,19 @@ match_type = "regex"
 # logins: failed ones can carry a password typed as the username.
 pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for (?P<login>\S+) from (?P<src>[0-9A-Fa-f.:]+) port \d+(?: ssh2: (?P<key>\S+ SHA256:\S+))?'
 severity = "warning"           # every login notifies; drop this rule if that is too chatty
+
+[[rules]]
+id = "login_after_scan"
+description = "Successful SSH login from a source that scanned or attacked this host"
+match_type = "regex"
+# The same line as ssh_login, which still reports it too: this rule only
+# fires when one of the rules below reported the source within the hour.
+pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for (?P<login>\S+) from (?P<src>[0-9A-Fa-f.:]+) port \d+'
+severity = "critical"
+[rules.after]
+rules = ["port_scan", "fast_scan", "slow_scan", "tcp_flag_scan", "ssh_bruteforce", "ssh_probe", "scanner_user_agent"]
+field = "src"
+within_secs = 3600
 
 [[rules]]
 id = "fail2ban_ban"

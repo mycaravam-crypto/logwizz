@@ -336,6 +336,52 @@ Accepted password for b from 198.51.100.7
     assert!(d.stop().success());
 }
 
+#[test]
+fn after_rule_reports_only_logins_from_earlier_scanners() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    write_new(&auth, "");
+    let rules = r#"
+[[rules]]
+id = "probe"
+match_type = "regex"
+pattern = 'Did not receive identification string from (?P<src>\S+)'
+severity = "warning"
+
+[[rules]]
+id = "login_after_probe"
+match_type = "regex"
+pattern = 'Accepted publickey for \S+ from (?P<src>\S+)'
+severity = "critical"
+[rules.after]
+rules = ["probe"]
+field = "src"
+within_secs = 3600
+"#;
+    let mut d = Daemon::start(dir.path(), &config("", &[&auth], rules));
+    thread::sleep(Duration::from_millis(300));
+    append(
+        &auth,
+        "Accepted publickey for a from 203.0.113.9 port 1
+Did not receive identification string from 203.0.113.9 port 2
+Accepted publickey for a from 198.51.100.7 port 3
+Accepted publickey for a from 203.0.113.9 port 4
+",
+    );
+    assert_eq!(d.event()["rule"], "probe");
+    let ev = d.event();
+    assert_eq!(ev["rule"], "login_after_probe");
+    assert_eq!(ev["fields"]["src"], "203.0.113.9");
+    assert!(ev["line"].as_str().unwrap().ends_with("port 4"), "{ev}");
+    assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
+    d.signal(libc::SIGUSR1);
+    let stats = d.wait_stderr("statistics");
+    for expected in ["rule_matches=4", "after_unmatched=2", "events_emitted=2"] {
+        assert!(stats.contains(expected), "{expected} missing: {stats}");
+    }
+    assert!(d.stop().success());
+}
+
 const NEW_RULE: &str = r#"
 [[rules]]
 id = "new_rule"

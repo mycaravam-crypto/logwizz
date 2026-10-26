@@ -271,6 +271,7 @@ matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIE
 | `severity` | required for `emit` | `debug`, `info`, `notice`, `warning`, `error`, `critical`. Not allowed for `ignore` rules. |
 | `action` | `"emit"` | `emit`: a match produces an event. `ignore`: a match produces nothing, and no later rule sees the line (counted in `lines_ignored`). |
 | `exclude` | unset | Table of capture group → values whose matches are discarded. See [Excluding trusted sources](#excluding-trusted-sources). |
+| `after` | unset | Count a match only after another rule reported the same source. See [Sequence rules](#sequence-rules). |
 
 Rules are compiled once at startup. Every enabled rule is evaluated against
 every line in configuration order, and each matching rule produces its own
@@ -402,6 +403,44 @@ window_secs = 60
 Values are per rule; repeat the list in each rule that should skip the
 source. For firewall-based detectors, excluding the address in the firewall
 rules instead also keeps it out of the kernel log.
+
+#### Sequence rules
+
+An `[rules.after]` table makes a rule count a match only if one of the named
+rules emitted an event with the same capture value shortly before. A login
+by itself is routine; a login from an address that scanned the host an hour
+ago is not:
+
+```toml
+[[rules]]
+id = "login_after_scan"
+match_type = "regex"
+pattern = 'sshd\[\d+\]: Accepted \S+ for \S+ from (?P<src>\S+) port'
+severity = "critical"
+[rules.after]
+rules = ["port_scan", "ssh_bruteforce"]   # 1 – 16 other rules
+field = "src"          # a capture group of this rule and of each named rule
+within_secs = 3600     # 1 – 86400
+```
+
+- A named rule's event is remembered when the rule decides to emit it:
+  after its `exclude`, `after` and threshold, before rate limiting and
+  deduplication. For a threshold rule, that is when the threshold is
+  reached, not every match.
+- A match with no such event in the last `within_secs` produces nothing and
+  is counted in `after_unmatched`. Otherwise the rule goes on as usual:
+  `exclude` comes first, then `after`, then its own threshold if it has one,
+  and the event looks like any other.
+- Rules on the same line are evaluated in configuration order, so a named
+  rule placed earlier can satisfy `after` from the same line.
+- Only rules that some `after` names are remembered: per (rule, field) the
+  most recent time of up to `limits.threshold_max_groups` values. When full,
+  values older than the longest `within_secs` asking for them are dropped
+  first, or else the oldest eighth (`after_evictions`).
+- The memory is kept in a reload as long as an `after` still names the same
+  rule id and field, and is lost on restart.
+- The named rules must exist, be enabled, emit events and capture `field`.
+  Not allowed on `ignore` rules.
 
 Limits: the configuration file may be at most 1 MiB and must not be
 world-writable.
@@ -615,7 +654,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
 line on stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 after_unmatched=0 after_evictions=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -633,6 +672,8 @@ retry.
 | `lines_ignored` | Lines that matched an `ignore` rule. |
 | `rule_matches` | (line, rule) matches of emitting rules, before exclusions, thresholds, rate limiting and deduplication. |
 | `matches_excluded` | Matches discarded by a rule's `exclude` values. |
+| `after_unmatched` | Matches of [sequence rules](#sequence-rules) without a recent event of a named rule for the same value. |
+| `after_evictions` | Values dropped because a sequence memory was full. |
 | `threshold_absorbed` | Matches of threshold rules that did not reach their threshold, fell into its cooldown, or lacked the grouping capture. |
 | `threshold_fired` | Thresholds reached (each one is an event before rate limiting and deduplication). |
 | `threshold_evictions` | Threshold groups dropped because a rule's group table was full. |
@@ -648,7 +689,7 @@ retry.
 | `glob_matches_refused` | Files matching a glob that were not followed because of `max_glob_files`. Each file is counted once while it stays refused. |
 | `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
-`rule_matches` = `matches_excluded` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
+`rule_matches` = `matches_excluded` + `after_unmatched` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
 `events_rate_limited` + `events_deduplicated`.
 
 ### Memory use
@@ -666,6 +707,8 @@ Every buffer has a configured bound. The worst case is approximately:
 - per threshold rule: about 300 bytes × `threshold_max_groups` (≈ 1.2 MiB by
   default), plus for `distinct` up to `threshold_max_groups` × `count` × 16
   bytes (≈ 1.3 MiB for `count = 20`)
+- per (rule, field) named by an `after`: about 100 bytes ×
+  `threshold_max_groups` (≈ 0.4 MiB by default)
 - a fixed 64 KiB read buffer, plus the compiled rules (at most 2 MiB each)
 
 With the defaults, this is about 9 MiB plus 128 KiB per monitored file,

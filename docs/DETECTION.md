@@ -16,6 +16,7 @@ makes scans visible, and the rules in
 | `account_change` | A user, group or password created, changed or deleted | `auth.log` |
 | `scanner_user_agent` | Requests with the user agent of nmap NSE, masscan, zgrab, sqlmap, nikto or nuclei | a web access log (combined format or Caddy JSON) |
 | `ssh_login` | Every successful SSH login, with its source | `auth.log` |
+| `login_after_scan` | A successful SSH login from a source any of the rules above reported within the hour | `auth.log` |
 | `fail2ban_ban` | fail2ban banning a source | `fail2ban.log` |
 | `log_flood` | More than 5000 lines in a minute in any watched file | – |
 

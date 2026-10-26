@@ -45,6 +45,8 @@ pub const MAX_THRESHOLD_GROUPS: usize = 1 << 20;
 pub const MAX_THRESHOLD_COUNT: u32 = 10_000;
 /// Cap on the `exclude` values of one rule.
 pub const MAX_EXCLUDE_VALUES: usize = 1024;
+/// Cap on the rules one `[rules.after]` table names.
+pub const MAX_AFTER_RULES: usize = 16;
 /// Cap on the distinct-value state one threshold rule may hold.
 pub const MAX_DISTINCT_BYTES: u64 = 64 << 20;
 /// Upper bound on the compiled size of a single regex, so that a pathological
@@ -236,6 +238,15 @@ struct RawRule {
     /// Capture group name -> values whose matches are discarded.
     #[serde(default)]
     exclude: BTreeMap<String, Vec<String>>,
+    after: Option<RawAfter>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAfter {
+    rules: Vec<String>,
+    field: String,
+    within_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +280,18 @@ pub struct Threshold {
     pub count: u32,
     pub window: Duration,
     pub cooldown: Duration,
+}
+
+/// A validated `[rules.after]`: a match counts only if one of `rules`
+/// emitted an event with the same `field` value within `within`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct After {
+    pub rules: Vec<String>,
+    /// Capture group name, the same in this rule and in `rules`.
+    pub field: String,
+    /// Index of `field` in this rule's pattern.
+    pub group: usize,
+    pub within: Duration,
 }
 
 /// Matches whose capture group `group` has one of `values` are discarded.
@@ -398,6 +421,8 @@ pub struct Rule {
     pub threshold: Option<Threshold>,
     /// Matches with these capture values are discarded before thresholds.
     pub exclude: Vec<Exclusion>,
+    /// Set: matches count only after an event of another rule.
+    pub after: Option<After>,
     pub matcher: Matcher,
 }
 
@@ -412,6 +437,7 @@ impl Rule {
             && self.action == other.action
             && self.threshold == other.threshold
             && self.exclude == other.exclude
+            && self.after == other.after
     }
 
     /// Whether a match with these capture values (from
@@ -751,10 +777,14 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 None => None,
             };
             let exclude = check_exclude(&r.exclude, r.action, &matcher)?;
-            Ok((matcher, threshold, exclude))
+            let after = match &r.after {
+                Some(a) => Some(check_after(a, &r.id, r.action, &matcher)?),
+                None => None,
+            };
+            Ok((matcher, threshold, exclude, after))
         });
         match compiled {
-            Ok((matcher, threshold, exclude)) if r.enabled => rules.push(Rule {
+            Ok((matcher, threshold, exclude, after)) if r.enabled => rules.push(Rule {
                 id: r.id,
                 description: r.description,
                 match_type: r.match_type,
@@ -763,12 +793,14 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 action: r.action,
                 threshold,
                 exclude,
+                after,
                 matcher,
             }),
             Ok(_) => disabled_rules += 1,
             Err(msg) => problems.push(format!("{label}: {msg}")),
         }
     }
+    check_after_references(&rules, &seen_ids, &mut problems);
     if problems.is_empty() && !rules.iter().any(|r| r.action == Action::Emit) {
         problems.push("no enabled [[rules]] entries that emit events".to_string());
     }
@@ -943,6 +975,61 @@ fn check_threshold(
         window: Duration::from_secs(t.window_secs),
         cooldown: Duration::from_secs(t.cooldown_secs),
     })
+}
+
+fn check_after(a: &RawAfter, id: &str, action: Action, matcher: &Matcher) -> Result<After, String> {
+    if action == Action::Ignore {
+        return Err("an ignore rule emits nothing, so it takes no after".to_string());
+    }
+    if a.rules.is_empty() || a.rules.len() > MAX_AFTER_RULES {
+        return Err(format!(
+            "after.rules must name 1 to {MAX_AFTER_RULES} rules, got {}",
+            a.rules.len()
+        ));
+    }
+    if a.rules.iter().any(|r| r == id) {
+        return Err("after.rules must not name the rule itself".to_string());
+    }
+    let group = matcher.group_index(&a.field).ok_or_else(|| {
+        format!(
+            "after.field: the pattern has no capture group named `{}`",
+            a.field
+        )
+    })?;
+    if !(1..=MAX_WINDOW_SECS).contains(&a.within_secs) {
+        return Err(format!(
+            "after.within_secs must be between 1 and {MAX_WINDOW_SECS}, got {}",
+            a.within_secs
+        ));
+    }
+    Ok(After {
+        rules: a.rules.clone(),
+        field: a.field.clone(),
+        group,
+        within: Duration::from_secs(a.within_secs),
+    })
+}
+
+/// The rules an enabled rule's `after` names must be enabled, emit events
+/// and capture the same field. `all_ids` includes disabled rules.
+fn check_after_references(rules: &[Rule], all_ids: &HashSet<String>, problems: &mut Vec<String>) {
+    for r in rules {
+        let Some(after) = &r.after else {
+            continue;
+        };
+        for name in &after.rules {
+            let msg = match rules.iter().find(|o| &o.id == name) {
+                Some(o) if o.action == Action::Ignore => "is an ignore rule".to_string(),
+                Some(o) if o.matcher.group_index(&after.field).is_none() => {
+                    format!("has no capture group named `{}`", after.field)
+                }
+                Some(_) => continue,
+                None if all_ids.contains(name) => "is disabled".to_string(),
+                None => "does not exist".to_string(),
+            };
+            problems.push(format!("rule {}: after.rules: `{name}` {msg}", r.id));
+        }
+    }
 }
 
 fn check_exclude(
@@ -1334,6 +1421,43 @@ mod tests {
                       pattern = '(?P<src>x)'\naction = \"ignore\"\n[rules.exclude]\nsrc = [\"x\"]\n\
                       [[rules]]\nid = \"e\"\nmatch_type = \"literal\"\npattern = \"y\"\nseverity = \"info\"\n";
         assert!(problems(ignore).join("; ").contains("takes no exclude"));
+    }
+
+    #[test]
+    fn after_validation() {
+        let text = |after: &str, scan: &str| {
+            format!(
+                "[[files]]\npath = \"/var/log/auth.log\"\n\
+                 [[rules]]\nid = \"scan\"\nmatch_type = \"regex\"\n\
+                 pattern = 'scan (?P<src>\\S+)'\nseverity = \"warning\"\n{scan}\n\
+                 [[rules]]\nid = \"login\"\nmatch_type = \"regex\"\n\
+                 pattern = 'login (?P<src>\\S+)'\nseverity = \"critical\"\n\
+                 [rules.after]\n{after}\n"
+            )
+        };
+        let ok = "rules = [\"scan\"]\nfield = \"src\"\nwithin_secs = 60";
+        let cfg = parse_str(&text(ok, "")).unwrap();
+        let after = cfg.rules[1].after.as_ref().unwrap();
+        assert_eq!(
+            (after.rules.as_slice(), after.group, after.within),
+            (&["scan".to_string()][..], 1, Duration::from_secs(60))
+        );
+
+        let p = |after: &str, scan: &str| problems(&text(after, scan)).join("; ");
+        assert!(p(&ok.replace("\"scan\"", "\"nope\""), "").contains("`nope` does not exist"));
+        assert!(p(ok, "enabled = false").contains("`scan` is disabled"));
+        assert!(p(ok, "action = \"ignore\"").contains("ignore"));
+        assert!(p(&ok.replace("\"scan\"", "\"login\""), "").contains("the rule itself"));
+        assert!(p(&ok.replace("\"scan\"", ""), "").contains("must name 1 to"));
+        assert!(p(&ok.replace("\"src\"", "\"user\""), "").contains("named `user`"));
+        assert!(p(&ok.replace("60", "0"), "").contains("within_secs"));
+        // The named rule needs the field too.
+        let scan_without_src = text(ok, "").replace("scan (?P<src>", "scan (?P<ip>");
+        assert!(
+            problems(&scan_without_src)
+                .join("; ")
+                .contains("`scan` has no capture group named `src`")
+        );
     }
 
     #[test]
