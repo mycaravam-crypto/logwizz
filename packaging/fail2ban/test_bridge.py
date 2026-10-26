@@ -97,7 +97,9 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(fmt(event("port_scan", V4), s))
         self.assertIsNone(fmt(event("port_scan", f"::ffff:{V4}"), s), "mapped")
         self.assertIsNone(fmt(event("port_scan", V6), s))
+        # An address is compared with networks of the other family too: no match, no error.
         self.assertIsNotNone(fmt(event("port_scan", "185.220.102.7"), s))
+        self.assertIsNotNone(fmt(event("port_scan", "2a02:4f8::1"), s))
 
     def test_invalid_settings_fail_closed(self):
         for env in [
