@@ -23,7 +23,7 @@ makes scans visible, and the rules in
 
 Each detector reports a source once and then stays silent for that source
 for its cooldown (10 minutes to an hour), so one scan is one notification.
-Send them to your phone with [logwizz-notify](../README.md#notifications).
+Send them to your phone with [logwizz-notify](NOTIFICATIONS.md).
 
 ## 1. Make the firewall log scans
 
