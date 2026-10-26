@@ -339,6 +339,10 @@ cooldown_secs = 300    # then stay silent for that group this long
   `"threshold": {"group": "203.0.113.66", "count": 20, "window_secs": 10}`
   (`group` is left out for `"file"` and for no grouping). The group then
   starts counting again after the cooldown.
+- A `distinct` rule's event also names the counted capture and the first
+  distinct values seen, up to 8 of up to 32 bytes each:
+  `"distinct": "dpt", "values": ["22", "23", "80", …]`. This tells a broad
+  sweep from a search for one service.
 - A match whose `group_by` or `distinct` group did not take part is not
   counted.
 - Windows and cooldowns (and `rate_limit_*`, dedup and
@@ -740,7 +744,8 @@ Every buffer has a configured bound. The worst case is approximately:
 - deduplication: about 100 bytes × `dedup_max_entries` (≈ 0.4 MiB by default)
 - per threshold rule: about 300 bytes × `threshold_max_groups` (≈ 1.2 MiB by
   default), plus for `distinct` up to `threshold_max_groups` × `count` × 16
-  bytes (≈ 1.3 MiB for `count = 20`; twice that for a sliding window)
+  bytes (≈ 1.3 MiB for `count = 20`; twice that for a sliding window), and
+  about 400 bytes × `threshold_max_groups` for the value samples (≈ 1.6 MiB)
 - per (rule, field) named by an `after`: about 100 bytes ×
   `threshold_max_groups` (≈ 0.4 MiB by default)
 - a fixed 64 KiB read buffer, plus the compiled rules (at most 2 MiB each)

@@ -74,6 +74,13 @@ struct WireEvent {
 struct WireThreshold {
     #[serde(default)]
     group: Option<String>,
+    #[serde(default)]
+    count: u64,
+    /// The capture a `distinct` rule counts, and the first of its values.
+    #[serde(default)]
+    distinct: Option<String>,
+    #[serde(default)]
+    values: Vec<String>,
 }
 
 impl Detection {
@@ -130,12 +137,26 @@ impl Detection {
                 None => s.to_string(),
             });
         let mut parts: Vec<String> = address.iter().cloned().collect();
+        // A distinct rule's listed capture shows its sampled values, so a
+        // scan reads `203.0.113.8 · 22, 23, 80…` rather than its last port.
+        let sample = ev.threshold.as_ref().filter(|t| !t.values.is_empty());
+        let value = |f: &str| match sample.filter(|t| t.distinct.as_deref() == Some(f)) {
+            Some(t) => {
+                let more = if t.count > t.values.len() as u64 {
+                    "…"
+                } else {
+                    ""
+                };
+                Some(format!("{}{more}", t.values.join(", ")))
+            }
+            None => listed(f).map(String::from),
+        };
         parts.extend(
             fields
                 .iter()
                 .filter(|f| *f != "login")
-                .filter_map(|f| listed(f))
-                .map(String::from),
+                .filter(|f| listed(f).is_some())
+                .filter_map(|f| value(f)),
         );
         let source = Some(clean(&parts.join(" · "), MAX_SOURCE_BYTES)).filter(|s| !s.is_empty());
         Ok((
@@ -583,6 +604,28 @@ mod tests {
         assert_eq!(
             (d.source.as_deref(), d.severity, d.host.as_str()),
             (Some("192.0.2.7"), Severity::Notice, "unknown")
+        );
+
+        // A listed distinct capture shows the sampled values.
+        let msg = r#"{"v":1,"ts":"2026-10-25T12:40:07Z","rule":"port_scan",
+            "fields":{"src":"203.0.113.8","dpt":"80"},
+            "threshold":{"group":"203.0.113.8","count":20,"window_secs":60,
+                "distinct":"dpt","values":["22","23","80"]}}"#;
+        let source = |fields: &[&str]| {
+            let fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+            Detection::parse(msg, None, &fields).unwrap().0.source
+        };
+        assert_eq!(
+            source(&["dpt"]).as_deref(),
+            Some("203.0.113.8 · 22, 23, 80…")
+        );
+        assert_eq!(source(&[]).as_deref(), Some("203.0.113.8"), "not listed");
+        let all = msg.replace("\"count\":20", "\"count\":3");
+        let (d, _) = Detection::parse(&all, None, &["dpt".into()]).unwrap();
+        assert_eq!(
+            d.source.as_deref(),
+            Some("203.0.113.8 · 22, 23, 80"),
+            "no more"
         );
 
         // A network group is shown instead of its last address.

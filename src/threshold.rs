@@ -23,10 +23,15 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 use crate::config::{GroupBy, Threshold, WindowType};
+use crate::event::excerpt;
 use crate::metrics::{self, Metrics};
 
 /// Minimum time between eviction warnings.
 const WARN_INTERVAL: Duration = Duration::from_secs(10);
+/// Distinct values a group keeps as a sample for its event.
+pub const SAMPLE_VALUES: usize = 8;
+/// Sampled values are cut to this many bytes.
+pub const SAMPLE_VALUE_BYTES: usize = 32;
 
 /// A threshold that was reached: what the event reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +40,9 @@ pub struct Fired {
     /// `group_by = "file"` (the event names the file) or no grouping.
     pub group: Option<Box<[u8]>>,
     pub count: u32,
+    /// `distinct` rules: the first distinct values seen, at most
+    /// [`SAMPLE_VALUES`], each cut to [`SAMPLE_VALUE_BYTES`].
+    pub sample: Vec<Box<[u8]>>,
 }
 
 #[derive(Debug)]
@@ -50,6 +58,8 @@ struct Group {
     /// in the window before `start`, and those values.
     prev_count: u32,
     prev_distinct: HashSet<u64>,
+    /// See [`Fired::sample`].
+    sample: Vec<Box<[u8]>>,
     silent_until: Option<Instant>,
 }
 
@@ -121,7 +131,10 @@ impl Thresholds {
             }
         };
         let distinct = match t.distinct {
-            Some(i) => Some(self.hasher.hash_one(field(i)?)),
+            Some(i) => {
+                let value = field(i)?;
+                Some((self.hasher.hash_one(value), value))
+            }
             None => None,
         };
         let table = &mut self.tables[rule];
@@ -150,6 +163,7 @@ impl Thresholds {
             distinct: HashSet::new(),
             prev_count: 0,
             prev_distinct: HashSet::new(),
+            sample: Vec::new(),
             silent_until: None,
         });
         g.last_seen = now;
@@ -163,6 +177,7 @@ impl Thresholds {
             g.distinct.clear();
             g.prev_count = 0;
             g.prev_distinct.clear();
+            g.sample.clear();
         } else if elapsed >= t.window {
             // Sliding only: the current window becomes the previous one.
             g.start += t.window;
@@ -170,10 +185,15 @@ impl Thresholds {
             g.prev_distinct = std::mem::take(&mut g.distinct);
         }
         match distinct {
-            Some(hash) => {
-                if g.distinct.insert(hash) && g.prev_distinct.contains(&hash) {
-                    // Already counted in the previous window's share.
-                    g.prev_count -= 1;
+            Some((hash, value)) => {
+                if g.distinct.insert(hash) {
+                    if g.prev_distinct.contains(&hash) {
+                        // Already counted in the previous window's share.
+                        g.prev_count -= 1;
+                    } else if g.sample.len() < SAMPLE_VALUES {
+                        g.sample
+                            .push(excerpt(value, Some(SAMPLE_VALUE_BYTES)).0.into());
+                    }
                 }
                 g.count = g.distinct.len() as u32;
             }
@@ -193,11 +213,13 @@ impl Thresholds {
         g.distinct = HashSet::new();
         g.prev_count = 0;
         g.prev_distinct = HashSet::new();
+        let sample = std::mem::take(&mut g.sample);
         g.start = now;
         g.silent_until = Some(now + t.cooldown);
         Some(Fired {
             group: reported.then(|| key.into()),
             count,
+            sample,
         })
     }
 }
@@ -417,7 +439,28 @@ mod tests {
             assert_eq!(obs("22"), None, "same port again and again");
         }
         assert_eq!(obs("23"), None);
-        assert_eq!(obs("24").map(|f| f.count), Some(3));
+        let fired = obs("24").unwrap();
+        assert_eq!(fired.count, 3);
+        let sample: Vec<&[u8]> = fired.sample.iter().map(|v| &**v).collect();
+        assert_eq!(sample, [&b"22"[..], b"23", b"24"], "in order first seen");
+        // The sample is capped in values and bytes.
+        let long = "9".repeat(100);
+        let mut th2 = Thresholds::new(1, 100, Arc::new(Metrics::default()));
+        let t2 = threshold(GroupBy::Capture(1), Some(2), 20);
+        let mut fired = None;
+        for p in 0..20 {
+            fired = th2.observe(
+                0,
+                "r",
+                &t2,
+                Path::new("a"),
+                &f("a", &format!("{p}{long}")),
+                t0,
+            );
+        }
+        let sample = fired.unwrap().sample;
+        assert_eq!(sample.len(), SAMPLE_VALUES);
+        assert!(sample.iter().all(|v| v.len() == SAMPLE_VALUE_BYTES));
     }
 
     #[test]

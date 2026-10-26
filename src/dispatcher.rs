@@ -133,6 +133,11 @@ struct JsonThreshold<'a> {
     group: Option<Cow<'a, str>>,
     count: u32,
     window_secs: u64,
+    /// The capture counted by `distinct`, and the first of its values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distinct: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    values: Vec<Cow<'a, str>>,
 }
 
 /// Named capture values, serialised as a JSON object in group order.
@@ -180,6 +185,16 @@ pub fn format_event(
         group: f.group.as_deref().map(String::from_utf8_lossy),
         count: f.count,
         window_secs: rule.threshold.as_ref().map_or(0, |t| t.window.as_secs()),
+        distinct: rule
+            .threshold
+            .as_ref()
+            .and_then(|t| t.distinct)
+            .and_then(|i| rule.matcher.group_name(i)),
+        values: f
+            .sample
+            .iter()
+            .map(|v| String::from_utf8_lossy(v))
+            .collect(),
     });
     if syslog_prefix {
         write!(out, "<{}>", rule.severity.syslog_priority())?;
@@ -229,6 +244,10 @@ pub fn format_event(
                     out.extend_from_slice(b" group=");
                     out.extend_from_slice(escape(group).as_bytes());
                 }
+                if let (Some(name), false) = (t.distinct, t.values.is_empty()) {
+                    write!(out, " {name}=")?;
+                    out.extend_from_slice(escape(&t.values.join(",")).as_bytes());
+                }
                 out.push(b']');
             }
         }
@@ -274,12 +293,11 @@ pub fn event_cost(ev: &Event) -> usize {
         .iter()
         .map(|(_, v)| FIELD_OVERHEAD + v.len())
         .sum();
-    let group = ev
-        .threshold
-        .as_ref()
-        .and_then(|t| t.group.as_ref())
-        .map_or(0, |g| g.len());
-    std::mem::size_of::<Event>() + ev.line.len() + fields + group
+    let threshold = ev.threshold.as_ref().map_or(0, |t| {
+        let sample: usize = t.sample.iter().map(|v| FIELD_OVERHEAD + v.len()).sum();
+        t.group.as_ref().map_or(0, |g| g.len()) + sample
+    });
+    std::mem::size_of::<Event>() + ev.line.len() + fields + threshold
 }
 
 /// Fixed bytes per captured field: its index and the boxed slice.
@@ -843,6 +861,7 @@ mod tests {
             threshold: Some(Box::new(crate::threshold::Fired {
                 group: Some(b"192.0.2.7"[..].into()),
                 count: 20,
+                sample: vec![b"22"[..].into(), b"23"[..].into()],
             })),
             ..event(line, false)
         };
@@ -861,11 +880,12 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&render(OutputFormat::Json)).unwrap();
         assert_eq!(
             v["threshold"],
-            serde_json::json!({"group": "192.0.2.7", "count": 20, "window_secs": 10})
+            serde_json::json!({"group": "192.0.2.7", "count": 20, "window_secs": 10,
+                "distinct": "dpt", "values": ["22", "23"]})
         );
         let human = render(OutputFormat::Human);
         assert!(
-            human.ends_with(" [threshold count=20 window=10s group=192.0.2.7]\n"),
+            human.ends_with(" [threshold count=20 window=10s group=192.0.2.7 dpt=22,23]\n"),
             "{human}"
         );
         assert!(

@@ -142,7 +142,7 @@ journalctl --namespace=logwizz -u logwizz -o cat -f
 ```
 
 ```json
-{"v":1,"ts":"...","host":"web1","pid":812,"file":"/var/log/kern.log","rule":"port_scan","description":"One source probed many closed ports","severity":"critical","match_type":"regex","line":"... logwizz-drop: ... SRC=203.0.113.66 ... DPT=443 ...","truncated":false,"fields":{"src":"203.0.113.66","dpt":"443"},"threshold":{"group":"203.0.113.66","count":20,"window_secs":60}}
+{"v":1,"ts":"...","host":"web1","pid":812,"file":"/var/log/kern.log","rule":"port_scan","description":"One source probed many closed ports","severity":"critical","match_type":"regex","line":"... logwizz-drop: ... SRC=203.0.113.66 ... DPT=443 ...","truncated":false,"fields":{"src":"203.0.113.66","dpt":"443"},"threshold":{"group":"203.0.113.66","count":20,"window_secs":60,"distinct":"dpt","values":["21","22","23","25","53","80","110","111"]}}
 ```
 
 The host check (`tests/host/run-vm.sh`, and the **host** CI workflow) does

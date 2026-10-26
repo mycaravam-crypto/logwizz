@@ -100,6 +100,11 @@ and `config/detection.toml`:
 | `ssh_login` | `deploy@203.0.113.8 · ED25519 SHA256:4Qs8…` |
 | `scanner_user_agent` | `203.0.113.8 · sqlmap` |
 | `account_change` | `usermod · add 'deploy' to group 'sudo'` |
+| `port_scan` (with `dpt` listed) | `203.0.113.8 · 22, 23, 80, 443, 3389, 5900, 8080, 8443…` |
+
+For a `distinct` threshold rule, a listed capture it counts shows the first
+values seen (up to 8, `…` when there were more) instead of the last one.
+Ports are safe to list.
 
 List only captures that cannot hold secrets: values from a fixed list
 (`tool`), fixed formats (`key`) or messages that never contain passwords

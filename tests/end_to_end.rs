@@ -634,7 +634,8 @@ cooldown_secs = 300
     assert_eq!(ev["fields"]["dpt"], "20");
     assert_eq!(
         ev["threshold"],
-        serde_json::json!({"group": "203.0.113.66", "count": 20, "window_secs": 10})
+        serde_json::json!({"group": "203.0.113.66", "count": 20, "window_secs": 10,
+            "distinct": "dpt", "values": ["1", "2", "3", "4", "5", "6", "7", "8"]})
     );
     assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
     d.signal(libc::SIGUSR1);
