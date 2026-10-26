@@ -242,5 +242,43 @@ class FollowProcessTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
 
+class MainFailurePathTests(unittest.TestCase):
+    """The optional bridge must stop safely when startup prerequisites fail."""
+
+    def test_missing_journalctl_fails_without_enforcement_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "fail2ban.log"
+            stderr = io.StringIO()
+            with patch.object(BRIDGE, "OUTPUT", output), \\
+                 patch.object(BRIDGE.subprocess, "Popen", side_effect=FileNotFoundError("journalctl missing")) as popen, \\
+                 patch.dict(BRIDGE.os.environ, {
+                     "BRIDGE_DRY_RUN": "0",
+                     "BRIDGE_RULES": "ssh_bruteforce",
+                 }, clear=True), \\
+                 contextlib.redirect_stderr(stderr):
+                code = BRIDGE.main()
+
+            self.assertEqual(code, 1)
+            popen.assert_called_once()
+            self.assertIn("journalctl missing", stderr.getvalue())
+            # Opening the sink is not enforcement: it must remain empty on startup failure.
+            self.assertTrue(output.exists())
+            self.assertEqual(output.read_text(), "")
+
+    def test_invalid_configuration_aborts_before_starting_journal(self):
+        stderr = io.StringIO()
+        with patch.object(BRIDGE.subprocess, "Popen") as popen, \\
+             patch.dict(BRIDGE.os.environ, {
+                 "BRIDGE_RULES": "",
+                 "BRIDGE_DRY_RUN": "0",
+             }, clear=True), \\
+             contextlib.redirect_stderr(stderr):
+            code = BRIDGE.main()
+
+        self.assertEqual(code, 2)
+        popen.assert_not_called()
+        self.assertIn("explicit empty allowlist", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
