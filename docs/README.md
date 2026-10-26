@@ -15,6 +15,7 @@ Use this page to find the right level of detail.
 - [Notification operations](NOTIFICATIONS.md): Telegram setup, aggregation windows, delivery guarantees and security.
 - [Benchmarks](BENCHMARKS.md): performance methodology and results.
 - [Host verification](HOST-VERIFICATION.md): real systemd service validation and filesystem access.
+- [Release verification](RELEASE-VERIFICATION.md): verify release provenance and inspect published CycloneDX SBOMs.
 
 ## Configuration and deployment
 

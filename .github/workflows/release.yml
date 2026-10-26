@@ -69,6 +69,37 @@ jobs:
         run: |
           cargo test --release --locked --target x86_64-unknown-linux-musl
           cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Generate per-binary CycloneDX SBOMs
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --describe binaries --spec-version 1.5 --target x86_64-unknown-linux-musl
+          python3 - <<'PY'
+          import json
+          import shutil
+          from pathlib import Path
+
+          expected = {
+              "logwizz": Path("/tmp/logwizz-sbom.cdx.json"),
+              "logwizz-notify": Path("/tmp/logwizz-notify-sbom.cdx.json"),
+          }
+          found = set()
+          for path in Path(".").glob("*.json"):
+              try:
+                  bom = json.loads(path.read_text())
+              except (OSError, json.JSONDecodeError):
+                  continue
+              if not isinstance(bom, dict):
+                  continue
+              metadata = bom.get("metadata")
+              component = metadata.get("component") if isinstance(metadata, dict) else None
+              name = component.get("name") if isinstance(component, dict) else None
+              if name in expected:
+                  shutil.copyfile(path, expected[name])
+                  found.add(name)
+          missing = set(expected) - found
+          if missing:
+              raise SystemExit(f"missing CycloneDX SBOM(s) for: {', '.join(sorted(missing))}")
+          PY
       - name: Package
         env:
           VERSION: ${{ needs.version.outputs.value }}
@@ -83,6 +114,8 @@ jobs:
           cp packaging/logwizz.service dist/logwizz.service
           cp packaging/logwizz-notify.service packaging/notify.env.example dist/
           cp config/logwizz.example.toml dist/logwizz.example.toml
+          cp /tmp/logwizz-sbom.cdx.json dist/logwizz-sbom.cdx.json
+          cp /tmp/logwizz-notify-sbom.cdx.json dist/logwizz-notify-sbom.cdx.json
           cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -95,6 +128,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,6 +137,24 @@ jobs:
           persist-credentials: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: dist, path: dist }
+      - name: Attest logwizz build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/logwizz-v${{ needs.version.outputs.value }}-linux-x64
+      - name: Attest logwizz SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2
+        with:
+          subject-path: dist/logwizz-v${{ needs.version.outputs.value }}-linux-x64
+          sbom-path: dist/logwizz-sbom.cdx.json
+      - name: Attest logwizz-notify build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/logwizz-notify-v${{ needs.version.outputs.value }}-linux-x64
+      - name: Attest logwizz-notify SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2
+        with:
+          subject-path: dist/logwizz-notify-v${{ needs.version.outputs.value }}-linux-x64
+          sbom-path: dist/logwizz-notify-sbom.cdx.json
       - name: Tag and publish
         env:
           GH_TOKEN: ${{ github.token }}
