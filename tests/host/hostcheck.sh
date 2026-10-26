@@ -321,5 +321,49 @@ else
 fi
 systemctl stop logwizz
 
+# 19. Real Linux Audit integration in a disposable Debian/Ubuntu guest.
+# This checks actual audit rules, their on-disk SYSCALL format and unprivileged
+# logwizz access, not just the synthetic lines in tests/runtime.rs.
+if ! command -v auditctl >/dev/null || ! command -v augenrules >/dev/null; then
+  res runtime_audit FAIL "auditd/auditctl is missing from the guest"
+else
+  # Configure group-readable audit logs without granting logwizz new rights.
+  if grep -q '^log_group[[:space:]]*=' /etc/audit/auditd.conf; then
+    sed -i -E 's/^log_group[[:space:]]*=.*/log_group = adm/' /etc/audit/auditd.conf
+  else
+    echo 'log_group = adm' >> /etc/audit/auditd.conf
+  fi
+  systemctl restart auditd 2>/dev/null || service auditd restart 2>/dev/null || true
+  install -m 0640 "$P/logwizz.rules" /etc/audit/rules.d/logwizz.rules
+  if augenrules --load >/root/lwz-augenrules.log 2>&1 &&
+      auditctl -l | grep -q 'logwizz_service_exec' &&
+      auditctl -l | grep -q 'logwizz_sensitive_write'; then
+    # Append only the rules: runtime.toml includes general and output tables
+    # which cannot appear again in the host configuration.
+    sed -n '/^\[\[rules\]\]/,$p' "$P/runtime.toml" >> /etc/logwizz/logwizz.toml
+    printf '\n[[files]]\npath = "/var/log/audit/audit.log"\n' >> /etc/logwizz/logwizz.toml
+    if logwizz --config /etc/logwizz/logwizz.toml --check-config >/root/lwz-runtime-config.log 2>&1; then
+      # On these distros auditd should make its log root:adm 0640.
+      stat -c '%U:%G %a %n' /var/log/audit/audit.log
+      systemctl start logwizz
+      sleep 2
+      runuser -u www-data -- /bin/true
+      : >> /etc/passwd
+      if wait_for '"rule":"service_exec"' 20 && wait_for '"rule":"sensitive_write"' 20 &&
+          events | grep '"rule":"service_exec"' | grep -q '"file":"/var/log/audit/audit.log"' &&
+          events | grep '"rule":"sensitive_write"' | grep -q '"file":"/var/log/audit/audit.log"'; then
+        res runtime_audit PASS "real auditd records detected by unprivileged logwizz"
+      else
+        res runtime_audit FAIL "missing audit events: $(tail -n 8 /var/log/audit/audit.log | tr '\n' ';')"
+      fi
+      systemctl stop logwizz
+    else
+      res runtime_audit FAIL "invalid runtime configuration: $(cat /root/lwz-runtime-config.log)"
+    fi
+  else
+    res runtime_audit FAIL "audit rules not loaded: $(cat /root/lwz-augenrules.log)"
+  fi
+fi
+
 echo "=== journal (tail)"; journalctl --namespace=logwizz -u logwizz -o short-precise --no-pager | tail -40
 echo "SUMMARY pass=$pass fail=$fail known=$known"
