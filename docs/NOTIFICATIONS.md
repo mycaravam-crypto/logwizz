@@ -56,6 +56,7 @@ Keep `notify.env` owned by root and mode `0600`. The bot token, endpoint URLs an
 | `NOTIFY_WINDOW_SECS` | `60` | Aggregation window, 10–3600 seconds. |
 | `NOTIFY_MIN_PRIORITY` | `warning` | Lowest severity forwarded: `debug`, `info`, `notice`, `warning`, `error` (or `err`), `critical` (or `crit`). |
 | `NOTIFY_MAX_PENDING` | `4096` | Maximum pending rule/window summaries, 1–65536. |
+| `NOTIFY_RULES` | unset (all rules) | Rule IDs whose events are sent, comma-separated. Events of other rules are skipped before aggregation; they stay in the journal. Set but empty is an error. |
 | `NOTIFY_FIELDS` | `login` | Captures that may be sent, comma-separated (up to 16 names of `a-z`, `0-9`, `_`). See [Sources and fields](#sources-and-fields). |
 
 Invalid settings stop the notifier with exit code 2 and a message that names the variable but never its value.

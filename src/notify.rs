@@ -14,6 +14,7 @@
 pub mod aggregate;
 pub mod transport;
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufReader};
 use std::os::unix::process::CommandExt;
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::config::check_rule_id;
 use crate::event::Severity;
 use crate::journal::read_line;
 use aggregate::{Aggregator, Detection, Key, NotAnEvent, Recorded, Summary};
@@ -101,6 +103,8 @@ pub struct Settings {
     pub state_dir: PathBuf,
     /// Captures that may leave the host (NOTIFY_FIELDS).
     pub fields: Vec<String>,
+    /// Rules whose events are sent (NOTIFY_RULES); `None`: all rules.
+    pub rules: Option<HashSet<String>>,
 }
 
 impl Settings {
@@ -177,6 +181,25 @@ impl Settings {
         {
             return Err("NOTIFY_FIELDS must list up to 16 capture names (a-z, 0-9, _)".into());
         }
+        // Unset means all rules; an explicitly empty list is a mistake, not
+        // a way to send nothing.
+        let rules = match get("NOTIFY_RULES") {
+            None => None,
+            Some(v) => {
+                let rules: HashSet<String> = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .map(String::from)
+                    .collect();
+                if rules.is_empty() || rules.iter().any(|r| check_rule_id(r).is_err()) {
+                    return Err("NOTIFY_RULES must list rule IDs (ASCII letters, digits, \
+                                '_', '-', '.', ':'), comma-separated"
+                        .into());
+                }
+                Some(rules)
+            }
+        };
         // systemd may pass several directories, separated by ':'.
         let state_dir = var("STATE_DIRECTORY")
             .map(|d| PathBuf::from(d.split(':').next().unwrap_or_default()))
@@ -191,6 +214,7 @@ impl Settings {
             )?,
             state_dir,
             fields,
+            rules,
         })
     }
 }
@@ -492,6 +516,8 @@ struct Notifier<D> {
     deliver: D,
     state_dir: PathBuf,
     fields: Vec<String>,
+    /// NOTIFY_RULES; `None`: all rules.
+    rules: Option<HashSet<String>>,
     cursor: Option<String>,
     dirty: bool,
     last_save: Instant,
@@ -559,7 +585,10 @@ impl<D: Deliver> Notifier<D> {
                     if fallback {
                         warn!(rule = %d.rule, "event has no valid timestamp; using the journal's");
                     }
-                    if self.agg.record(&d) == Recorded::Full {
+                    // Filtered events take no pending slot; the cursor still
+                    // moves past them below.
+                    let wanted = self.rules.as_ref().is_none_or(|r| r.contains(&d.rule));
+                    if wanted && self.agg.record(&d) == Recorded::Full {
                         return Recorded::Full;
                     }
                 }
@@ -610,6 +639,7 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         deliver: settings.transport,
         state_dir,
         fields: settings.fields,
+        rules: settings.rules,
         cursor: state.cursor,
         dirty: !legacy.is_empty(),
         last_save: Instant::now(),
@@ -619,6 +649,7 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         transport = ?n.deliver.kind,
         window_secs = settings.window_secs,
         min_priority = %settings.min_priority,
+        rules = n.rules.as_ref().map_or(0, HashSet::len),
         pending = n.agg.len(),
         journal_mode = ?mode,
         "logwizz-notify started"
@@ -780,6 +811,16 @@ mod tests {
         );
         assert!(with(("NOTIFY_FIELDS", "Key")).is_err());
         assert!(with(("NOTIFY_FIELDS", "a b")).is_err());
+        assert_eq!(with(("NOTIFY_FIELDS", "login")).unwrap().rules, None);
+        let rules = with(("NOTIFY_RULES", " ssh_bruteforce, port_scan,"))
+            .unwrap()
+            .rules;
+        let want: HashSet<String> = ["ssh_bruteforce", "port_scan"].map(String::from).into();
+        assert_eq!(rules, Some(want));
+        for bad in ["", " , ", "ssh brute", "a/b"] {
+            let e = with(("NOTIFY_RULES", bad)).unwrap_err();
+            assert!(e.starts_with("NOTIFY_RULES") && !e.contains("brute"), "{e}");
+        }
     }
 
     #[test]
@@ -882,6 +923,7 @@ mod tests {
             },
             state_dir: dir.to_path_buf(),
             fields: vec!["login".into()],
+            rules: None,
             cursor: None,
             dirty: false,
             last_save: Instant::now(),
@@ -985,5 +1027,22 @@ mod tests {
         };
         assert_eq!(n.consume(&other), Recorded::Yes);
         assert_eq!(n.cursor.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn rule_allowlist_skips_other_rules_but_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = notifier(dir.path(), 1, true);
+        n.rules = Some(["wanted".to_string()].into());
+        let now = now_secs();
+        assert_eq!(n.consume(&event_entry("a", now, "other")), Recorded::Yes);
+        assert_eq!(n.cursor.as_deref(), Some("a"));
+        assert!(n.agg.is_empty(), "a filtered event takes no pending slot");
+        assert_eq!(n.consume(&event_entry("b", now, "wanted")), Recorded::Yes);
+        // The only slot is taken; filtered events still pass.
+        assert_eq!(n.consume(&event_entry("c", now, "other")), Recorded::Yes);
+        assert_eq!(n.cursor.as_deref(), Some("c"));
+        let rules: Vec<_> = n.agg.summaries().map(|s| s.rule.as_str()).collect();
+        assert_eq!(rules, ["wanted"]);
     }
 }

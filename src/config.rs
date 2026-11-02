@@ -937,7 +937,8 @@ fn check_glob(text: &str, exclude: Option<&str>) -> Result<Glob, String> {
     })
 }
 
-fn check_rule_id(id: &str) -> Result<(), String> {
+/// Checks the syntax of a rule ID (also used for `NOTIFY_RULES`).
+pub fn check_rule_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("rule id must not be empty".to_string());
     }
