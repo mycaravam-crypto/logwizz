@@ -129,6 +129,10 @@ if (( seen == 0 )); then
   echo "F2B status: $(fail2ban-client status logwizz)"
   echo "F2B log: $(journalctl -u fail2ban -n 35 --no-pager)"
   echo "nft: $(nft list table inet f2b-table 2>&1)"
+  echo "nft get json: $(nft -j get element inet f2b-table addr-set-logwizz '{' "$BAN" '}' 2>&1)"
+  echo "nft chain json: $(nft -j list chain inet f2b-table f2b-chain 2>&1)"
+  echo "Fail2ban actions: $(fail2ban-client get logwizz actions 2>&1)"
+  echo "Fail2ban file log: $(tail -n 100 /var/log/fail2ban.log 2>&1)"
   echo "report: $(journalctl --namespace=logwizz SYSLOG_IDENTIFIER=logwizz-ban -o cat --no-pager)"
   echo "sink: $(cat "$SINK")"
   exit 1
