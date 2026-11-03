@@ -43,6 +43,8 @@ jobs:
       # Keep the optional Fail2ban integration covered when the notifier changes.
       - name: Test optional Fail2ban bridge
         run: python3 packaging/fail2ban/test_bridge.py
+      - name: Test native Fail2ban action report
+        run: python3 packaging/fail2ban/test_report.py
       - name: Verify optional Fail2ban systemd unit
         run: |
           sudo install -D -m 0755 packaging/fail2ban/logwizz-fail2ban-bridge /usr/local/libexec/logwizz-fail2ban-bridge

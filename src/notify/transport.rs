@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use super::action::BanReport;
 use super::aggregate::Summary;
 
 /// Where summaries go.
@@ -32,10 +33,13 @@ impl std::fmt::Debug for Kind {
 /// Sends one summary. Implemented by [`Curl`]; tests use fakes.
 pub trait Deliver {
     fn deliver(&mut self, summary: &Summary, partial: bool) -> Result<(), String>;
+    fn deliver_action(&mut self, action: &BanReport) -> Result<(), String>;
 }
 
 /// Telegram's reply is small; anything bigger is not a Telegram reply.
 const MAX_RESPONSE_BYTES: &str = "65536";
+/// ntfy priority 4 is its high-priority notification level.
+const NTFY_PRIORITY_HIGH: &str = "4";
 
 #[derive(Debug)]
 pub struct Curl {
@@ -96,6 +100,48 @@ impl Curl {
         }
         c
     }
+
+    /// Separate, immediate per-IP ban action message (no aggregation).
+    pub fn request_action(&self, a: &BanReport) -> String {
+        let mut c = String::new();
+        let mut opt = |name: &str, value: &str| {
+            c.push_str(name);
+            c.push_str(" = \"");
+            c.push_str(&quote(value));
+            c.push_str("\"\n");
+        };
+        match &self.kind {
+            Kind::Telegram { token, chat_id } => {
+                opt(
+                    "url",
+                    &format!("https://api.telegram.org/bot{token}/sendMessage"),
+                );
+                opt("data-urlencode", &format!("chat_id={chat_id}"));
+                opt("data-urlencode", &format!("text={}", a.to_telegram_html()));
+                opt("data-urlencode", "parse_mode=HTML");
+                opt("data-urlencode", "disable_web_page_preview=true");
+                opt("max-filesize", MAX_RESPONSE_BYTES);
+            }
+            Kind::Ntfy { url } => {
+                opt("url", url);
+                opt("header", &format!("Title: logwizz Fail2ban: {}", a.jail));
+                opt("header", &format!("Priority: {NTFY_PRIORITY_HIGH}"));
+                opt("header", "Tags: warning");
+                opt("data-binary", &a.to_text());
+                opt("output", "/dev/null");
+            }
+            Kind::Webhook { url } => {
+                opt("url", url);
+                opt("header", "Content-Type: application/json");
+                opt("data-binary", &a.to_json().to_string());
+                opt("output", "/dev/null");
+            }
+        }
+        if let Some(auth) = &self.auth {
+            opt("header", &format!("Authorization: {auth}"));
+        }
+        c
+    }
 }
 
 /// Escapes a value for a double-quoted curl config string.
@@ -115,8 +161,8 @@ fn quote(v: &str) -> String {
     out
 }
 
-impl Deliver for Curl {
-    fn deliver(&mut self, s: &Summary, partial: bool) -> Result<(), String> {
+impl Curl {
+    fn send_config(&self, config: String) -> Result<(), String> {
         let mut child = Command::new("curl")
             .args([
                 "--silent",
@@ -140,7 +186,6 @@ impl Deliver for Curl {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot run curl: {e}"))?;
-        let config = self.request(s, partial);
         let written = child
             .stdin
             .take()
@@ -170,6 +215,16 @@ impl Deliver for Curl {
             }
         }
         Ok(())
+    }
+}
+
+impl Deliver for Curl {
+    fn deliver(&mut self, s: &Summary, partial: bool) -> Result<(), String> {
+        self.send_config(self.request(s, partial))
+    }
+
+    fn deliver_action(&mut self, action: &BanReport) -> Result<(), String> {
+        self.send_config(self.request_action(action))
     }
 }
 
@@ -213,6 +268,65 @@ mod tests {
         );
         // One line per option: the body cannot inject options.
         assert_eq!(r.lines().count(), 5, "{r}");
+    }
+
+    #[test]
+    fn action_requests_are_independent_of_detection_schema() {
+        let ban = BanReport::parse(
+            "LOGWIZZ_BAN_V1 jail=logwizz ip=198.51.100.24 bantime=3600",
+            "web1",
+            42,
+        )
+        .unwrap();
+        let webhook = Curl {
+            kind: Kind::Webhook {
+                url: "https://example.invalid/hook".into(),
+            },
+            auth: None,
+        };
+        let request = webhook.request_action(&ban);
+        assert!(request.contains("logwizz.action/v1"), "{request}");
+        assert!(request.contains("actionban_reported"), "{request}");
+        assert!(!request.contains("logwizz.notification/v1"));
+        let telegram = Curl {
+            kind: Kind::Telegram {
+                token: "123:ABC".into(),
+                chat_id: "-100123".into(),
+            },
+            auth: None,
+        };
+        assert!(
+            telegram
+                .request_action(&ban)
+                .contains("Fail2ban actionban reported")
+        );
+    }
+
+    #[test]
+    fn ntfy_action_request_includes_ban_metadata() {
+        let ban = BanReport::parse(
+            "LOGWIZZ_BAN_V1 jail=logwizz ip=198.51.100.24 bantime=3600",
+            "web1",
+            42,
+        )
+        .unwrap();
+        let ntfy = Curl {
+            kind: Kind::Ntfy {
+                url: "https://ntfy.sh/alerts".into(),
+            },
+            auth: None,
+        };
+        let request = ntfy.request_action(&ban);
+        assert!(
+            request.contains("url = \"https://ntfy.sh/alerts\""),
+            "{request}"
+        );
+        assert!(request.contains("header = \"Title: logwizz Fail2ban: logwizz\""));
+        assert!(request.contains("header = \"Priority: 4\""));
+        assert!(request.contains("header = \"Tags: warning\""));
+        assert!(request.contains("data-binary = \"Fail2ban actionban reported"));
+        assert!(request.contains("Jail: logwizz\\nIP: 198.51.100.24"));
+        assert!(request.contains("Ban duration: 3600 s"));
     }
 
     #[test]

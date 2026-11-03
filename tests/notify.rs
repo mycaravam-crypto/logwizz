@@ -191,6 +191,17 @@ fn event(cursor: &str, rule: &str, ts: &str, src: Option<&str>) -> Value {
     json!({"__CURSOR": cursor, "MESSAGE": ev.to_string(), "__REALTIME_TIMESTAMP": format!("{}000000", now())})
 }
 
+fn ban_record(cursor: &str, ip: &str, uid: &str) -> Value {
+    json!({
+        "__CURSOR": cursor,
+        "__REALTIME_TIMESTAMP": format!("{}000000", now()),
+        "_UID": uid,
+        "_HOSTNAME": "test-host",
+        "SYSLOG_IDENTIFIER": "logwizz-ban",
+        "MESSAGE": format!("LOGWIZZ_BAN_V1 jail=logwizz ip={ip} bantime=3600"),
+    })
+}
+
 fn stop(child: &mut Child) -> ExitStatus {
     // SAFETY: plain kill(2) on our own child.
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
@@ -269,6 +280,71 @@ fn webhook_summary_on_stop_and_resume_after_cursor() {
     let jargs = fs::read_to_string(w.path.join("journalctl.args")).unwrap();
     assert!(jargs.contains("--after-cursor=c4\n"), "{jargs}");
     assert_eq!(w.requests().len(), 1);
+}
+
+#[test]
+fn rule_allowlist_preserves_cursor_and_bypasses_action_reports() {
+    let w = Work::new();
+    let t = open_ts();
+    w.journal(&[
+        event("c1", "not_allowed", &t, Some("203.0.113.1")),
+        ban_record("c2", "198.51.100.24", "1000"), // spoofed: ignored
+        event("c3", "ssh", &t, Some("203.0.113.2")),
+        ban_record("c4", "198.51.100.24", "0"), // root-only report
+        event("c5", "not_allowed", &t, Some("203.0.113.3")),
+    ]);
+    let mut env = WEBHOOK.to_vec();
+    env.push(("NOTIFY_RULES", "ssh"));
+    let mut child = w.start(&env);
+    w.wait_cursor("c5");
+    assert!(stop(&mut child).success(), "{}", w.stderr());
+    let mut bodies: Vec<Value> = w
+        .requests()
+        .iter()
+        .map(|req| serde_json::from_str(value(req, "data-binary")[0]).unwrap())
+        .collect();
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    bodies.sort_by_key(|b| b["schema"].as_str().unwrap().to_owned());
+    assert_eq!(bodies[0]["schema"], "logwizz.action/v1");
+    assert_eq!(bodies[0]["ip"], "198.51.100.24");
+    assert_eq!(bodies[0]["status"], "actionban_reported");
+    assert_eq!(bodies[1]["schema"], "logwizz.notification/v1");
+    assert_eq!(bodies[1]["rule"], "ssh");
+    assert_eq!(bodies[1]["count"], 1);
+    let jargs = fs::read_to_string(w.path.join("journalctl.args")).unwrap();
+    assert!(
+        jargs.contains("_SYSTEMD_UNIT=logwizz.service\n+\nSYSLOG_IDENTIFIER=logwizz-ban\n_UID=0\n"),
+        "{jargs}"
+    );
+    let mut child = w.start(&env);
+    thread::sleep(Duration::from_millis(500));
+    assert!(stop(&mut child).success());
+    assert_eq!(
+        w.requests().len(),
+        2,
+        "restart must not replay filtered events or reports"
+    );
+}
+
+#[test]
+fn failed_ban_notification_survives_restart() {
+    let w = Work::new();
+    w.journal(&[ban_record("ban", "198.51.100.24", "0")]);
+    fs::write(w.path.join("curl-fail"), "").unwrap();
+    let mut child = w.start(&WEBHOOK);
+    w.wait_cursor("ban");
+    assert_eq!(stop(&mut child).code(), Some(1));
+    let state = w.state();
+    assert_eq!(state["actions"].as_array().unwrap().len(), 1);
+    assert!(state["actions"][0]["retry_count"].as_u64().unwrap() >= 1);
+    fs::remove_file(w.path.join("curl-fail")).unwrap();
+    let mut child = w.start(&WEBHOOK);
+    thread::sleep(Duration::from_millis(500));
+    assert!(stop(&mut child).success(), "{}", w.stderr());
+    assert_eq!(w.state()["actions"], json!([]));
+    let reqs = w.requests();
+    let body: Value = serde_json::from_str(value(reqs.last().unwrap(), "data-binary")[0]).unwrap();
+    assert_eq!(body["schema"], "logwizz.action/v1");
 }
 
 #[test]
@@ -414,6 +490,14 @@ fn configuration_errors_exit_2_without_secrets() {
         "{err}"
     );
     assert!(!err.contains("not-a-valid-token"));
+
+    let mut child = w.start(&[
+        ("NOTIFY_KIND", "webhook"),
+        ("NOTIFY_URL", URL),
+        ("NOTIFY_RULES", ""),
+    ]);
+    assert_eq!(child.wait().unwrap().code(), Some(2));
+    assert!(w.stderr().contains("NOTIFY_RULES"));
 }
 
 #[test]
