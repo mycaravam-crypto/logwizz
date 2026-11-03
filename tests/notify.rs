@@ -312,8 +312,10 @@ fn rule_allowlist_preserves_cursor_and_bypasses_action_reports() {
     assert_eq!(bodies[1]["rule"], "ssh");
     assert_eq!(bodies[1]["count"], 1);
     let jargs = fs::read_to_string(w.path.join("journalctl.args")).unwrap();
-    assert!(jargs.contains("SYSLOG_IDENTIFIER=logwizz-ban"), "{jargs}");
-    assert!(jargs.contains("_UID=0"), "{jargs}");
+    assert!(
+        jargs.contains("_SYSTEMD_UNIT=logwizz.service\n+\nSYSLOG_IDENTIFIER=logwizz-ban\n_UID=0\n"),
+        "{jargs}"
+    );
     let mut child = w.start(&env);
     thread::sleep(Duration::from_millis(500));
     assert!(stop(&mut child).success());
