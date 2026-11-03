@@ -101,7 +101,7 @@ On a host without Fail2ban, set `enabled = false` on the `/var/log/fail2ban.log`
 
 ### Optional immediate actionban reporting
 
-The existing `fail2ban_ban` rule reacts to an early Fail2ban log entry. For more specific action reporting, install and explicitly enable the optional `packaging/fail2ban/action.d/logwizz-report.conf` action *after* the real firewall action, as described in [FAIL2BAN.md](FAIL2BAN.md#optional-actionban-reporting). It emits a fixed-format message through the `logwizz` namespaced journal socket. The notifier accepts it only with `SYSLOG_IDENTIFIER=logwizz-ban` and journald's trusted `_UID=0` field. It is not a normal detection and cannot cause a new bridge ban.
+The existing `fail2ban_ban` rule reacts to an early Fail2ban log entry. For more specific action reporting, install and explicitly enable the optional `packaging/fail2ban/action.d/logwizz-report.py` action *after* the real firewall action, as described in [FAIL2BAN.md](FAIL2BAN.md#optional-actionban-reporting). It emits a fixed-format message through the `logwizz` namespaced journal socket. The notifier accepts it only with `SYSLOG_IDENTIFIER=logwizz-ban` and journald's trusted `_UID=0` field. It is not a normal detection and cannot cause a new bridge ban.
 
 Example Telegram notification:
 

@@ -10,8 +10,8 @@ findtime = 600
 bantime  = 3600
 
 # Optional actionban reporting to logwizz-notify (requires the
-# packaging/fail2ban/action.d/logwizz-report.conf file to be installed).
+# packaging/fail2ban/action.d/logwizz-report.py file to be installed).
 # Firewall action must be listed first. A report indicates an actionban
 # callback, not independently verified firewall enforcement.
 # action = %(action_)s
-#          logwizz-report[name=logwizz]
+#          logwizz-report.py
