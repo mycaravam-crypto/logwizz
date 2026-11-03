@@ -175,6 +175,12 @@ mod tests {
             "LOGWIZZ_BAN_V1 jail=x ip=198.51.100.24 bantime=-2",
             "LOGWIZZ_BAN_V1 jail=x ip=198.51.100.24 bantime=1 extra",
             "LOGWIZZ_BAN_V1 jail=x ip=198.51.100.24",
+            "LOGWIZZ_BAN_V2 jail=logwizz ip=invalid bantime=3600",
+            "LOGWIZZ_BAN_V2 jail=bad;jail ip=198.51.100.24 bantime=3600",
+            "LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24",
+            "LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24 bantime=-2",
+            "LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24 bantime=1 trailing",
+            "LOGWIZZ_BAN_V3 jail=logwizz ip=198.51.100.24 bantime=3600",
             "logwizz rule=ssh_bruteforce src=198.51.100.24",
         ] {
             assert!(BanReport::parse(bad, "web1", 42).is_none(), "{bad}");
