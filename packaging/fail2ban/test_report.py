@@ -39,7 +39,7 @@ def load_action():
     return module
 
 
-def chain_entries(jail="logwizz", verdict="drop", address_family="ip", hook="input"):
+def chain_entries(jail="logwizz", verdict="drop", address_family="ip", hook="input", membership_op="in"):
     set_name = ("addr-set-" if address_family == "ip" else "addr6-set-") + jail
     return [
         {"metainfo": {"json_schema_version": 1}},
@@ -51,7 +51,7 @@ def chain_entries(jail="logwizz", verdict="drop", address_family="ip", hook="inp
             "family": "inet", "table": "f2b-table", "chain": "f2b-chain",
             "expr": [
                 {"match": {
-                    "op": "==",
+                    "op": membership_op,
                     "left": {"payload": {"protocol": address_family, "field": "saddr"}},
                     "right": "@" + set_name,
                 }},
@@ -77,13 +77,16 @@ class ReportTests(unittest.TestCase):
     def received(self):
         return self.listener.recv(4096).decode("ascii")
 
-    def nft(self, *, member=True, verdict="drop", hook="input", family="ip"):
+    def nft(self, *, member=True, verdict="drop", hook="input", family="ip", membership_op="in"):
         def query(*args):
             if args[0] == "get":
                 if not member:
                     raise subprocess.CalledProcessError(1, ["nft"])
                 return [{"element": {"elem": ["198.51.100.24"]}}]
-            return chain_entries(verdict=verdict, hook=hook, address_family=family)
+            return chain_entries(
+                verdict=verdict, hook=hook, address_family=family,
+                membership_op=membership_op,
+            )
         return mock.patch.object(self.report, "_nft_json", side_effect=query)
 
     def test_verified_ipv4_journal_record(self):
@@ -96,6 +99,11 @@ class ReportTests(unittest.TestCase):
             "PRIORITY=4\nSYSLOG_IDENTIFIER=logwizz-ban\n"
             "MESSAGE=LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24 bantime=3600\n",
         )
+
+    def test_legacy_equality_operator_remains_supported(self):
+        with self.nft(membership_op="=="):
+            self.action.ban({"ip": "198.51.100.24", "bantime": 60})
+        self.assertIn("LOGWIZZ_BAN_V2", self.received())
 
     def test_verified_ipv6_permanent(self):
         with self.nft(family="ip6"):
