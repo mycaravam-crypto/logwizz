@@ -77,7 +77,21 @@ printf 'NOTIFY_URL=https://127.0.0.1:8109/\nNOTIFY_KIND=webhook\nNOTIFY_WINDOW_S
 chmod 0600 /etc/logwizz/notify.env
 systemctl start logwizz-notify
 fail2ban-client -t
-systemctl enable --now fail2ban
+# Cloud-init may have started Fail2ban before this jail file was installed.
+# Always restart to load the dedicated test jail, then wait for the socket.
+systemctl restart fail2ban
+ready=0
+for ((i=0;i<80;i++)); do
+  if fail2ban-client ping >/dev/null 2>&1 &&
+     fail2ban-client status logwizz >/dev/null 2>&1; then ready=1; break; fi
+  sleep 0.25
+done
+if (( ready == 0 )); then
+  echo "Fail2ban test jail not ready"
+  systemctl status fail2ban --no-pager || true
+  journalctl -u fail2ban -n 45 --no-pager || true
+  exit 1
+fi
 fail2ban-client status logwizz
 
 write_match() {
@@ -152,7 +166,12 @@ EOF
 sed -i 's/^action = %(action_)s$/action = lwz-e2e-failing/' \
   /etc/fail2ban/jail.d/zz-logwizz-e2e.local
 systemctl restart fail2ban
-fail2ban-client status logwizz >/dev/null
+ready=0
+for ((i=0;i<80;i++)); do
+  if fail2ban-client status logwizz >/dev/null 2>&1; then ready=1; break; fi
+  sleep 0.25
+done
+(( ready == 1 ))
 write_match "$BROKEN"
 sleep 5
 (( $(report_count "$BROKEN") == 0 ))
