@@ -64,12 +64,35 @@ def _is_verified_nftables(jail, address):
     family = "ip" if address.version == 4 else "ip6"
     set_name = ("addr-set-" if address.version == 4 else "addr6-set-") + jail
 
-    # "get element" fails with nonzero status when the key is not in the set.
-    elements = _nft_json(
-        "get", "element", NFT_FAMILY, NFT_TABLE, set_name,
-        "{", str(address), "}",
-    )
-    if not any(isinstance(obj, dict) and "element" in obj for obj in elements):
+    # nft "get element" may print the legacy text representation even with
+    # -j, which raises JSONDecodeError on supported Debian releases. Query
+    # the full named set as structured JSON and compare exact IP membership.
+    # Do not accept prefix/range expressions: the stock action inserts hosts.
+    elements = _nft_json("list", "set", NFT_FAMILY, NFT_TABLE, set_name)
+    found = False
+    for obj in elements:
+        if not isinstance(obj, dict) or not isinstance(obj.get("set"), dict):
+            continue
+        entry = obj["set"]
+        if (
+            entry.get("family") != NFT_FAMILY
+            or entry.get("table") != NFT_TABLE
+            or entry.get("name") != set_name
+            or entry.get("type") != ("ipv4_addr" if address.version == 4 else "ipv6_addr")
+        ):
+            continue
+        for item in entry.get("elem", []):
+            if isinstance(item, str):
+                candidate = item
+            elif isinstance(item, dict):
+                value = item.get("elem", item)
+                candidate = value.get("val") if isinstance(value, dict) else None
+            else:
+                candidate = None
+            if candidate == str(address):
+                found = True
+                break
+    if not found:
         return False
 
     nft = _nft_json("list", "chain", NFT_FAMILY, NFT_TABLE, NFT_CHAIN)
@@ -103,7 +126,7 @@ def _is_verified_nftables(jail, address):
         contains_ip_set = any(
             isinstance(expr, dict)
             and isinstance(expr.get("match"), dict)
-            and expr["match"].get("op") == "=="
+            and expr["match"].get("op") in ("==", "in")
             and expr["match"].get("right") == "@" + set_name
             and isinstance(expr["match"].get("left"), dict)
             and expr["match"]["left"].get("payload") == {

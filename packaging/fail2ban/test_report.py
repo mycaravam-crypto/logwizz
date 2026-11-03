@@ -39,7 +39,7 @@ def load_action():
     return module
 
 
-def chain_entries(jail="logwizz", verdict="drop", address_family="ip", hook="input"):
+def chain_entries(jail="logwizz", verdict="drop", address_family="ip", hook="input", membership_op="in"):
     set_name = ("addr-set-" if address_family == "ip" else "addr6-set-") + jail
     return [
         {"metainfo": {"json_schema_version": 1}},
@@ -51,7 +51,7 @@ def chain_entries(jail="logwizz", verdict="drop", address_family="ip", hook="inp
             "family": "inet", "table": "f2b-table", "chain": "f2b-chain",
             "expr": [
                 {"match": {
-                    "op": "==",
+                    "op": membership_op,
                     "left": {"payload": {"protocol": address_family, "field": "saddr"}},
                     "right": "@" + set_name,
                 }},
@@ -77,13 +77,21 @@ class ReportTests(unittest.TestCase):
     def received(self):
         return self.listener.recv(4096).decode("ascii")
 
-    def nft(self, *, member=True, verdict="drop", hook="input", family="ip"):
+    def nft(self, *, member=True, verdict="drop", hook="input", family="ip", membership_op="in"):
         def query(*args):
-            if args[0] == "get":
-                if not member:
-                    raise subprocess.CalledProcessError(1, ["nft"])
-                return [{"element": {"elem": ["198.51.100.24"]}}]
-            return chain_entries(verdict=verdict, hook=hook, address_family=family)
+            if args[:2] == ("list", "set"):
+                address = "198.51.100.24" if family == "ip" else "2001:db8::1"
+                set_name = ("addr-set-" if family == "ip" else "addr6-set-") + "logwizz"
+                return [{"set": {
+                    "family": "inet", "table": "f2b-table",
+                    "name": set_name,
+                    "type": "ipv4_addr" if family == "ip" else "ipv6_addr",
+                    "elem": [address] if member else [],
+                }}]
+            return chain_entries(
+                verdict=verdict, hook=hook, address_family=family,
+                membership_op=membership_op,
+            )
         return mock.patch.object(self.report, "_nft_json", side_effect=query)
 
     def test_verified_ipv4_journal_record(self):
@@ -96,6 +104,11 @@ class ReportTests(unittest.TestCase):
             "PRIORITY=4\nSYSLOG_IDENTIFIER=logwizz-ban\n"
             "MESSAGE=LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24 bantime=3600\n",
         )
+
+    def test_legacy_equality_operator_remains_supported(self):
+        with self.nft(membership_op="=="):
+            self.action.ban({"ip": "198.51.100.24", "bantime": 60})
+        self.assertIn("LOGWIZZ_BAN_V2", self.received())
 
     def test_verified_ipv6_permanent(self):
         with self.nft(family="ip6"):
@@ -120,6 +133,20 @@ class ReportTests(unittest.TestCase):
                 with self.assertRaises(socket.timeout):
                     self.received()
 
+    def test_wrong_set_type_and_prefix_do_not_verify(self):
+        def wrong_set(*args):
+            if args[:2] == ("list", "set"):
+                return [{"set": {
+                    "family": "inet", "table": "f2b-table",
+                    "name": "addr-set-logwizz", "type": "ipv4_addr",
+                    "elem": [{"prefix": {"addr": "198.51.100.0", "len": 24}}],
+                }}]
+            return chain_entries()
+        with mock.patch.object(self.report, "_nft_json", side_effect=wrong_set):
+            self.action.ban({"ip": "198.51.100.24", "bantime": 60})
+        with self.assertRaises(socket.timeout):
+            self.received()
+
     def test_malformed_or_injected_values_rejected(self):
         for data in [
             {"ip": '198.51.100.24"$(touch /tmp/unsafe)', "bantime": 3600},
@@ -134,14 +161,13 @@ class ReportTests(unittest.TestCase):
             self.received()
 
     def test_nft_query_is_readonly_argv_with_timeout(self):
-        response = mock.Mock(stdout='{"nftables":[{"element":{"elem":["198.51.100.24"]}}]}')
+        response = mock.Mock(stdout='{"nftables":[{"set":{"elem":["198.51.100.24"]}}]}')
         with mock.patch.object(self.report.subprocess, "run", return_value=response) as run:
             self.report._nft_json(
-                "get", "element", "inet", "f2b-table", "addr-set-logwizz",
-                "{", "198.51.100.24", "}"
+                "list", "set", "inet", "f2b-table", "addr-set-logwizz"
             )
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["/usr/sbin/nft", "-j", "get", "element"])
+        self.assertEqual(argv[:4], ["/usr/sbin/nft", "-j", "list", "set"])
         self.assertNotIn("shell", run.call_args.kwargs)
         self.assertEqual(run.call_args.kwargs["timeout"], 3)
         self.assertTrue(run.call_args.kwargs["check"])
