@@ -317,7 +317,11 @@ fn rule_allowlist_preserves_cursor_and_bypasses_action_reports() {
     let mut child = w.start(&env);
     thread::sleep(Duration::from_millis(500));
     assert!(stop(&mut child).success());
-    assert_eq!(w.requests().len(), 2, "restart must not replay filtered events or reports");
+    assert_eq!(
+        w.requests().len(),
+        2,
+        "restart must not replay filtered events or reports"
+    );
 }
 
 #[test]
@@ -485,7 +489,11 @@ fn configuration_errors_exit_2_without_secrets() {
     );
     assert!(!err.contains("not-a-valid-token"));
 
-    let mut child = w.start(&[("NOTIFY_KIND", "webhook"), ("NOTIFY_URL", URL), ("NOTIFY_RULES", "")]);
+    let mut child = w.start(&[
+        ("NOTIFY_KIND", "webhook"),
+        ("NOTIFY_URL", URL),
+        ("NOTIFY_RULES", ""),
+    ]);
     assert_eq!(child.wait().unwrap().code(), Some(2));
     assert!(w.stderr().contains("NOTIFY_RULES"));
 }

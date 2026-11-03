@@ -110,7 +110,10 @@ impl Curl {
         };
         match &self.kind {
             Kind::Telegram { token, chat_id } => {
-                opt("url", &format!("https://api.telegram.org/bot{token}/sendMessage"));
+                opt(
+                    "url",
+                    &format!("https://api.telegram.org/bot{token}/sendMessage"),
+                );
                 opt("data-urlencode", &format!("chat_id={chat_id}"));
                 opt("data-urlencode", &format!("text={}", a.to_telegram_html()));
                 opt("data-urlencode", "parse_mode=HTML");
@@ -290,7 +293,11 @@ mod tests {
             },
             auth: None,
         };
-        assert!(telegram.request_action(&ban).contains("Fail2ban actionban reported"));
+        assert!(
+            telegram
+                .request_action(&ban)
+                .contains("Fail2ban actionban reported")
+        );
     }
 
     #[test]

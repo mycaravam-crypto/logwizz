@@ -443,13 +443,13 @@ fn spawn_journal(
         "--output=json",
         "--no-pager",
     ])
-        .arg(format!("--priority={}", min.syslog_priority()))
-        .arg(match cursor {
-            Some(c) => format!("--after-cursor={c}"),
-            None => "--lines=0".into(),
-        })
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped());
+    .arg(format!("--priority={}", min.syslog_priority()))
+    .arg(match cursor {
+        Some(c) => format!("--after-cursor={c}"),
+        None => "--lines=0".into(),
+    })
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped());
     // SAFETY: prctl is async-signal-safe and touches no memory of the
     // parent. journalctl exits with the reader thread, i.e. with us.
     unsafe {
@@ -620,7 +620,7 @@ impl<D: Deliver> Notifier<D> {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 return false;
             }
-            if self.actions[i].retry_after > now {
+            if deadline.is_none() && self.actions[i].retry_after > now {
                 i += 1;
                 continue;
             }
@@ -809,12 +809,7 @@ fn main_loop<D: Deliver>(n: &mut Notifier<D>, rx: &Receiver<Entry>, stop: &Atomi
     let keys = n.agg.keys();
     let deadline = Instant::now() + SHUTDOWN_BUDGET;
     let actions_ok = n.send_actions(now, Some(deadline));
-    let ok = n.send(
-        &keys,
-        now,
-        Some(now),
-        Some(deadline),
-    );
+    let ok = n.send(&keys, now, Some(now), Some(deadline));
     n.save(true);
     if ok && actions_ok && n.agg.is_empty() && n.actions.is_empty() {
         info!("logwizz-notify stopped");
