@@ -317,11 +317,11 @@ mod tests {
             auth: None,
         };
         let request = ntfy.request_action(&ban);
-        assert!(request.contains("url = \\"https://ntfy.sh/alerts\\""), "{request}");
-        assert!(request.contains("header = \\"Title: logwizz Fail2ban: logwizz\\""));
-        assert!(request.contains("header = \\"Priority: 4\\""));
-        assert!(request.contains("header = \\"Tags: warning\\""));
-        assert!(request.contains("data-binary = \\"Fail2ban actionban reported"));
+        assert!(request.contains("url = \"https://ntfy.sh/alerts\""), "{request}");
+        assert!(request.contains("header = \"Title: logwizz Fail2ban: logwizz\""));
+        assert!(request.contains("header = \"Priority: 4\""));
+        assert!(request.contains("header = \"Tags: warning\""));
+        assert!(request.contains("data-binary = \"Fail2ban actionban reported"));
         assert!(request.contains("Jail: logwizz\\nIP: 198.51.100.24"));
         assert!(request.contains("Ban duration: 3600 s"));
     }
