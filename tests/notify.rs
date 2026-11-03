@@ -327,6 +327,24 @@ fn rule_allowlist_preserves_cursor_and_bypasses_action_reports() {
 }
 
 #[test]
+fn verified_nftables_action_event_is_distinct_from_legacy_callback() {
+    let w = Work::new();
+    let mut verified = ban_record("v2", "198.51.100.24", "0");
+    verified["MESSAGE"] = json!("LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24 bantime=3600");
+    w.journal(&[verified]);
+    let mut child = w.start(&WEBHOOK);
+    w.wait_cursor("v2");
+    assert!(stop(&mut child).success(), "{}", w.stderr());
+    let requests = w.requests();
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_str(value(&requests[0], "data-binary")[0]).unwrap();
+    assert_eq!(body["schema"], "logwizz.action/v1");
+    assert_eq!(body["status"], "firewall_rule_verified");
+    assert_eq!(body["verification"], "nftables-set-and-input-drop-rule");
+    assert_eq!(body["ip"], "198.51.100.24");
+}
+
+#[test]
 fn failed_ban_notification_survives_restart() {
     let w = Work::new();
     w.journal(&[ban_record("ban", "198.51.100.24", "0")]);

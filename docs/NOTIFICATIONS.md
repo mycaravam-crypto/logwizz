@@ -101,20 +101,20 @@ On a host without Fail2ban, set `enabled = false` on the `/var/log/fail2ban.log`
 
 ### Optional immediate actionban reporting
 
-The existing `fail2ban_ban` rule reacts to an early Fail2ban log entry. For more specific action reporting, install and explicitly enable the optional `packaging/fail2ban/action.d/logwizz-report.py` action *after* the real firewall action, as described in [FAIL2BAN.md](FAIL2BAN.md#optional-actionban-reporting). It emits a fixed-format message through the `logwizz` namespaced journal socket. The notifier accepts it only with `SYSLOG_IDENTIFIER=logwizz-ban` and journald's trusted `_UID=0` field. It is not a normal detection and cannot cause a new bridge ban.
+The existing `fail2ban_ban` rule reacts to an early Fail2ban log entry. For verified nftables reporting, install and explicitly enable the optional `packaging/fail2ban/action.d/logwizz-report.py` action *after* the stock `nftables-multiport` firewall action, as described in [FAIL2BAN.md](FAIL2BAN.md#optional-actionban-reporting). After read-only verification of IP set membership and an active input drop/reject rule, it emits a fixed-format V2 message through the `logwizz` namespaced journal socket. The notifier accepts it only with `SYSLOG_IDENTIFIER=logwizz-ban` and journald's trusted `_UID=0` field. It is not a normal detection and cannot cause a new bridge ban.
 
 Example Telegram notification:
 
 ```text
-🛡 Fail2ban actionban reported
+🛡 Fail2ban nftables ban verified
 logwizz · web1
 198.51.100.24 · 3600 s
-Firewall enforcement not independently verified
+nftables set and input drop/reject rule present at report time
 ```
 
-Webhook notifications use the separate `logwizz.action/v1` schema with `action`, `status: actionban_reported`, `backend: fail2ban`, `host`, `jail`, `ip`, `bantime_secs` and `reported_at`; existing `logwizz.notification/v1` summaries remain unchanged. Action callbacks bypass `NOTIFY_RULES` and are sent individually without an aggregation window. Pending reports are stored atomically with the journal cursor, retried and delivered at least once. `NOTIFY_MAX_PENDING` also bounds pending action reports.
+Webhook notifications retain the separate `logwizz.action/v1` schema with `action`, `backend: fail2ban`, `host`, `jail`, `ip`, `bantime_secs` and `reported_at`. Verified V2 events use `status: firewall_rule_verified` and `verification: nftables-set-and-input-drop-rule`; old V1 events continue to use `status: actionban_reported`. Existing `logwizz.notification/v1` detection summaries remain unchanged. Action callbacks bypass `NOTIFY_RULES` and are sent individually without an aggregation window. Pending reports are stored atomically with the journal cursor, retried and delivered at least once. `NOTIFY_MAX_PENDING` also bounds pending action reports.
 
-**Limit:** Fail2ban continues to later actions even if an earlier firewall action fails. A callback proves that Fail2ban invoked `actionban` for this IP, not that the firewall enforced the ban. A disabled jail, ignored IP or already banned IP normally produces no new callback. A missing notification may also mean that reporting or delivery failed, not necessarily that there was no ban.
+**Limit:** Fail2ban continues to later actions even if an earlier firewall action fails. The V2 reporter therefore checks nftables separately and **does not send** a verified report if the IP is absent from the set or the input-hook blocking rule is missing. Unsupported backends fail closed. A verified notification establishes nftables rule+set state at reporting time, **not actual packet reachability**, and not whether the rule was created by this particular event. Disabled/ignored/already-banned IPs normally produce no new callback; an absent notification remains inconclusive.
 
 Reporting requires systemd journal namespaces (>= 245), an active notifier and `NOTIFY_MIN_PRIORITY=warning` (or more permissive). It is opt-in. If the legacy `fail2ban_ban` detection still watches `/var/log/fail2ban.log`, both mechanisms can produce notifications for one ban; disable that file source if only callback notifications are desired.
 
