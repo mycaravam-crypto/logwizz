@@ -26,9 +26,13 @@ the documentation-only TEST-NET block; Fail2ban operates within the guest.
    but cannot generate a verified claim without installed nftables state.
 7. A stopped jail never emits a new report.
 8. A 2,000-line input burst checks exactly 2,000 emitted detection events
-   (no observed loss for this load), records RSS/CPU samples, and requires
-   resident memory below 64 MiB. This is a repeatable bounded-load check,
-   not a worst-case CPU SLA or proof that all overload scenarios are lossless.
+   (no observed loss for this load), records RSS/CPU samples while the
+   workload is processed, and requires each observed resident-memory sample
+   to remain below 64 MiB. The test first waits for an emitted readiness
+   marker from the monitored file, because `startup_mode = "tail"` intentionally
+   ignores data written before the reader opens that file. This is a
+   repeatable bounded-load check, not a worst-case CPU SLA, continuous peak
+   memory measurement, or proof that all overload scenarios are lossless.
 
 The bridge dry-run/no-enforcement, non-global-IP, rule allowlist and
 invalid-settings paths are covered by packaging/fail2ban/test_bridge.py.

@@ -12,8 +12,12 @@ JAIL_READY_RETRIES=80
 BAN_WAIT_RETRIES=120
 UNBAN_WAIT_RETRIES=80
 BURST_EVENTS=2000
-BURST_WAIT_RETRIES=120
-MAX_RSS_KIB=65536
+# Both readiness and event collection are polled every 250 ms.
+BURST_READY_RETRIES=80     # 20 seconds to observe an event from the monitored file
+BURST_WAIT_RETRIES=120     # 30 seconds to collect the complete bounded burst
+BURST_POLL_SECS=0.25
+BURST_SAMPLE_EVERY=10     # collect resource snapshots about every 2.5 seconds
+MAX_RSS_KIB=$((64 * 1024)) # 64 MiB
 sink_pid=""
 cleanup() {
   systemctl stop logwizz-notify fail2ban logwizz >/dev/null 2>&1 || true
@@ -197,26 +201,60 @@ echo 'PASS disabled jail generates no new report'
 # Record bounded memory evidence under a burst without claiming a CPU SLO.
 systemctl start logwizz
 pid=$(systemctl show -p MainPID --value logwizz)
+
+# Type=exec only confirms that execve succeeded, not that the tail-mode reader
+# has opened /var/log/lwtest.log. A burst written before its first poll is
+# deliberately skipped by startup_mode=tail. Observe an event through the same
+# file reader and journal output before injecting the measured workload.
+ready_marker="LWZ-T-READY-$$"
+burst_ready=0
+for ((i=0;i<BURST_READY_RETRIES;i++)); do
+  printf '%s\n' "$ready_marker" >> /var/log/lwtest.log
+  if journalctl --namespace=logwizz -u logwizz -o cat --no-pager |
+      grep -F "$ready_marker" >/dev/null; then
+    burst_ready=1
+    break
+  fi
+  sleep "$BURST_POLL_SECS"
+done
+if (( burst_ready == 0 )); then
+  echo "FAIL logwizz reader did not emit its readiness probe"
+  journalctl --namespace=logwizz -u logwizz -n 25 --no-pager || true
+  exit 1
+fi
+
 # The bundled host rule matches LWZ-T; verify that every line emerges as
 # exactly one detection rather than measuring an unrelated, ignored burst.
 for ((i=0;i<BURST_EVENTS;i++)); do
   printf 'LWZ-T-RESOURCE event %04d\n' "$i"
 done >> /var/log/lwtest.log
+
 observed=0
+peak_rss_kib=0
 for ((i=0;i<BURST_WAIT_RETRIES;i++)); do
   observed=$(journalctl --namespace=logwizz -u logwizz -o cat --no-pager |
     grep -Fc 'LWZ-T-RESOURCE event' || true)
-  (( observed >= BURST_EVENTS )) && break
-  sleep 0.25
+
+  # Sample while the burst is being processed, not only once after it ends.
+  if ! sample=$(ps -o rss=,%cpu= -p "$pid" 2>/dev/null); then
+    echo "FAIL logwizz exited while processing the burst"
+    exit 1
+  fi
+  read -r rss cpu <<< "$sample"
+  if [[ ! "$rss" =~ ^[0-9]+$ ]] || (( rss == 0 || rss >= MAX_RSS_KIB )); then
+    echo "FAIL memory limit: rss_kib=$rss limit=$MAX_RSS_KIB"
+    exit 1
+  fi
+  if (( rss > peak_rss_kib )); then peak_rss_kib=$rss; fi
+  if (( i % BURST_SAMPLE_EVERY == 0 )); then
+    echo "SAMPLE resource rss_kib=$rss cpu_percent=$cpu emitted=$observed"
+  fi
+
+  if (( observed >= BURST_EVENTS )); then break; fi
+  sleep "$BURST_POLL_SECS"
 done
-(( observed == BURST_EVENTS )) || {
-  echo "FAIL burst event loss/backpressure: emitted=$observed expected=$BURST_EVENTS"
+if (( observed != BURST_EVENTS )); then
+  echo "FAIL burst event mismatch: emitted=$observed expected=$BURST_EVENTS"
   exit 1
-}
-rss=$(ps -o rss= -p "$pid" | tr -d ' ')
-cpu=$(ps -o %cpu= -p "$pid" | tr -d ' ')
-[[ "$rss" =~ ^[0-9]+$ ]] && (( rss > 0 && rss < MAX_RSS_KIB )) || {
-  echo "FAIL memory limit: rss_kib=$rss limit=$MAX_RSS_KIB"
-  exit 1
-}
-echo "PASS resource sample rss_kb=$rss cpu_percent=$cpu emitted=$observed injected=$BURST_EVENTS"
+fi
+echo "PASS resource samples peak_rss_kib=$peak_rss_kib last_cpu_percent=$cpu emitted=$observed injected=$BURST_EVENTS"
