@@ -13,6 +13,17 @@ fn detection() -> Config {
     config::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config/detection.toml")).unwrap()
 }
 
+#[test]
+fn bundled_profile_watches_fail2ban_log_for_action_feedback() {
+    let cfg = detection();
+    assert!(
+        cfg.files
+            .contains(&Path::new("/var/log/fail2ban.log").to_path_buf()),
+        "the bundled detection profile must watch Fail2ban for ban notifications"
+    );
+    assert!(cfg.rules.iter().any(|r| r.id == "fail2ban_ban"));
+}
+
 /// Rule ids matching `line`, with their captured fields as name=value.
 fn hits(cfg: &Config, line: &str) -> Vec<String> {
     cfg.rules

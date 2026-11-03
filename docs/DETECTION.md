@@ -18,7 +18,7 @@ makes scans visible, and the rules in
 | `scanner_user_agent` | Requests with the user agent of nmap NSE, masscan, zgrab, sqlmap, nikto or nuclei | a web access log (combined format or Caddy JSON) |
 | `ssh_login` | Every successful SSH login, with its source | `auth.log` |
 | `login_after_scan` | A successful SSH login from a source any of the rules above reported within the hour | `auth.log` |
-| `fail2ban_ban` | fail2ban banning a source | `fail2ban.log` |
+| `fail2ban_ban` | Fail2ban reporting a Ban action (separate alert, not firewall verification) | `fail2ban.log` |
 | `log_flood` | More than 5000 lines in a minute in any watched file | – |
 
 Each detector reports a source once and then stays silent for that source
@@ -118,7 +118,10 @@ systemctl restart logwizz
 ```
 
 Adjust the `[[files]]` paths to your distribution (comments in the file),
-and enable the web access log if you run a web server. On systems without
+and enable the web access log if you run a web server. The bundled profile
+watches `/var/log/fail2ban.log` to send separate `fail2ban_ban` notifications;
+set its `enabled = false` if Fail2ban is not installed (or change the path if
+its log is elsewhere). On systems without
 rsyslog, use the `[journal]` source instead of enabling file paths for the
 same kernel or SSH messages. For example, add `[journal]` with
 `matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIER=sshd-session"]`

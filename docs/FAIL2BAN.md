@@ -119,6 +119,18 @@ Test on a disposable host or with a controlled test event before relying on
 automatic blocking. The first version is a narrow integration, not a
 replacement for reviewing your detection thresholds.
 
+### Ban notifications
+
+The supplied `config/detection.toml` monitors `/var/log/fail2ban.log` and has a
+`fail2ban_ban` rule. A Fail2ban `Ban <ip>` log entry produces a separate Logwizz
+notification (after its aggregation window), whereas the original detection
+notification alone says nothing about a ban. This also works for other
+Fail2ban jails; no source-rule attribution is attempted. A Fail2ban `Ban` log
+is a report from Fail2ban, **not proof that a firewall rule took effect**.
+If there is no follow-up notification, do not infer the IP was not blocked:
+check the jail and logs. Disable the Fail2ban file source on systems without
+that log.
+
 ## Operational notes
 
 - **Policy stays in Fail2ban.** The example uses `maxretry = 1` because
