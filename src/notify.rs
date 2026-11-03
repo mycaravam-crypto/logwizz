@@ -614,7 +614,11 @@ impl<D: Deliver> Notifier<D> {
     /// Sends each action report individually; unlike detection summaries,
     /// these have no window and are unaffected by NOTIFY_RULES.
     fn send_actions(&mut self, now: u64, deadline: Option<Instant>) -> bool {
+        if self.actions.is_empty() {
+            return true;
+        }
         let mut ok = true;
+        let mut attempted = false;
         let mut i = 0;
         while i < self.actions.len() {
             if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -636,8 +640,11 @@ impl<D: Deliver> Notifier<D> {
                 }
             }
             self.dirty = true;
+            attempted = true;
         }
-        self.save(true);
+        if attempted {
+            self.save(true);
+        }
         ok
     }
 
