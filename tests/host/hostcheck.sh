@@ -349,5 +349,14 @@ if command -v auditctl >/dev/null || { apt-get update -q && apt-get install -qy 
   systemctl stop logwizz
 else res runtime_exec KNOWN "skipped: could not install auditd"; fi
 
+# 20. Real Fail2ban / nftables host test in the throwaway VM. Test helper
+# performs actual ban/unban, ignored and failed actions, verified journal+
+# webhook feedback, and records bounded-resource evidence.
+if bash "$P/fail2ban-e2e.sh" > /root/fail2ban-e2e.log 2>&1; then
+  res fail2ban_e2e PASS "$(grep '^PASS ' /root/fail2ban-e2e.log | tr '\n' ';')"
+else
+  res fail2ban_e2e FAIL "$(tail -n 45 /root/fail2ban-e2e.log | tr '\n' ';')"
+fi
+
 echo "=== journal (tail)"; journalctl --namespace=logwizz -u logwizz -o short-precise --no-pager | tail -40
 echo "SUMMARY pass=$pass fail=$fail known=$known"
