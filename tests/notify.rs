@@ -330,9 +330,7 @@ fn rule_allowlist_preserves_cursor_and_bypasses_action_reports() {
 fn verified_nftables_action_event_is_distinct_from_legacy_callback() {
     let w = Work::new();
     let mut verified = ban_record("v2", "198.51.100.24", "0");
-    verified["MESSAGE"] = json!(
-        "LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24 bantime=3600"
-    );
+    verified["MESSAGE"] = json!("LOGWIZZ_BAN_V2 jail=logwizz ip=198.51.100.24 bantime=3600");
     w.journal(&[verified]);
     let mut child = w.start(&WEBHOOK);
     w.wait_cursor("v2");
