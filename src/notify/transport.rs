@@ -317,7 +317,10 @@ mod tests {
             auth: None,
         };
         let request = ntfy.request_action(&ban);
-        assert!(request.contains("url = \"https://ntfy.sh/alerts\""), "{request}");
+        assert!(
+            request.contains("url = \"https://ntfy.sh/alerts\""),
+            "{request}"
+        );
         assert!(request.contains("header = \"Title: logwizz Fail2ban: logwizz\""));
         assert!(request.contains("header = \"Priority: 4\""));
         assert!(request.contains("header = \"Tags: warning\""));
