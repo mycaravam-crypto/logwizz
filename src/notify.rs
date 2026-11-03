@@ -1041,7 +1041,8 @@ mod tests {
     fn stop_flushes_open_windows_as_partial_and_saves() {
         let dir = tempfile::tempdir().unwrap();
         let mut n = notifier(dir.path(), 10, false);
-        let now = now_secs();
+        // Keep the window open even if the test crosses a clock boundary.
+        let now = now_secs() + 120;
         let (tx, rx) = sync_channel(16);
         for i in 0..3 {
             tx.send(event_entry(&format!("c{i}"), now, "ssh")).unwrap();
