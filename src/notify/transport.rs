@@ -38,6 +38,8 @@ pub trait Deliver {
 
 /// Telegram's reply is small; anything bigger is not a Telegram reply.
 const MAX_RESPONSE_BYTES: &str = "65536";
+/// ntfy priority 4 is its high-priority notification level.
+const NTFY_PRIORITY_HIGH: &str = "4";
 
 #[derive(Debug)]
 pub struct Curl {
@@ -123,7 +125,7 @@ impl Curl {
             Kind::Ntfy { url } => {
                 opt("url", url);
                 opt("header", &format!("Title: logwizz Fail2ban: {}", a.jail));
-                opt("header", "Priority: 4");
+                opt("header", &format!("Priority: {NTFY_PRIORITY_HIGH}"));
                 opt("header", "Tags: warning");
                 opt("data-binary", &a.to_text());
                 opt("output", "/dev/null");
