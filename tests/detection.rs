@@ -17,7 +17,8 @@ fn detection() -> Config {
 fn bundled_profile_watches_fail2ban_log_for_action_feedback() {
     let cfg = detection();
     assert!(
-        cfg.files.contains(&Path::new("/var/log/fail2ban.log").to_path_buf()),
+        cfg.files
+            .contains(&Path::new("/var/log/fail2ban.log").to_path_buf()),
         "the bundled detection profile must watch Fail2ban for ban notifications"
     );
     assert!(cfg.rules.iter().any(|r| r.id == "fail2ban_ban"));
