@@ -25,9 +25,10 @@ the documentation-only TEST-NET block; Fail2ban operates within the guest.
 6. An intentionally failing firewall action still reaches the reporter,
    but cannot generate a verified claim without installed nftables state.
 7. A stopped jail never emits a new report.
-8. A 2,000-line input burst records memory and CPU samples and requires
-   resident memory under 64 MiB. This is a diagnostic snapshot, not a
-   CPU SLA or guaranteed worst-case bound.
+8. A 2,000-line input burst checks exactly 2,000 emitted detection events
+   (no observed loss for this load), records RSS/CPU samples, and requires
+   resident memory below 64 MiB. This is a repeatable bounded-load check,
+   not a worst-case CPU SLA or proof that all overload scenarios are lossless.
 
 The bridge dry-run/no-enforcement, non-global-IP, rule allowlist and
 invalid-settings paths are covered by packaging/fail2ban/test_bridge.py.
