@@ -40,7 +40,7 @@ enabled = false                # enable if Caddy logs requests here (JSON format
 
 [[files]]
 path = "/var/log/fail2ban.log"
-enabled = false                # enable if fail2ban runs here
+enabled = true                 # report Fail2ban bans; disable if Fail2ban is absent or logs elsewhere
 
 # --- Port scans (needs the nftables rules from docs/DETECTION.md) ---
 
@@ -173,7 +173,7 @@ within_secs = 3600
 
 [[rules]]
 id = "fail2ban_ban"
-description = "fail2ban banned a source"
+description = "Fail2ban reported a Ban action"
 match_type = "regex"
 pattern = 'fail2ban\.actions\s+\[\d+\]: NOTICE\s+\[[^\]]+\] Ban (?P<src>\S+)'
 severity = "warning"

@@ -79,6 +79,21 @@ With several sources, the five most frequent are listed one per line with
 their counts. ntfy receives the plain-text form shown under
 [Other transports](#other-transports).
 
+## Fail2ban ban feedback
+
+A detection alert such as `port_scan` or `ssh_bruteforce` means **a rule fired**, not that an IP was blocked. The bundled `config/detection.toml` now also watches `/var/log/fail2ban.log`: when Fail2ban logs a `fail2ban.actions ... Ban <ip>` entry, the existing `fail2ban_ban` rule produces a **separate** notification after the normal aggregation window:
+
+```text
+🟡 Fail2ban reported a Ban action
+fail2ban_ban · warning · web1
+
+1× from 198.51.100.24
+```
+
+This is positive feedback that **Fail2ban reported a ban**; it is not a firewall-rule verification. The event can come from any Fail2ban jail, not necessarily the Logwizz bridge. Detection and ban messages are deliberately **not correlated**. Absence of a ban message does not prove no ban happened (log not available, another log location, delivery/filtering, or no ban). Check the actual jail state with `sudo fail2ban-client status logwizz` when certainty is required.
+
+On a host without Fail2ban, set `enabled = false` on the `/var/log/fail2ban.log` entry in `config/detection.toml` to avoid a missing-file warning. If Fail2ban logs elsewhere, adjust that path. Existing deployed configurations are not changed by an upgrade; deploy the updated detection profile or enable the file entry manually.
+
 ## Summary behavior
 
 - Events are grouped by **rule and fixed event-time window**: a window starts at a multiple of `NOTIFY_WINDOW_SECS` since the epoch, in the event's own `ts`.
