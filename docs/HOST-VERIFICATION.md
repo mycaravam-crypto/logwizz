@@ -122,3 +122,7 @@ once.
   first, restarts the service, then stops the reader during a burst of events.
 - **Run-to-run variation:** results that depend on timing (findings 3 and 4) can differ between runs. Each run uses
   a fresh VM.
+
+## Additional Fail2ban security E2E
+
+See [SECURITY-E2E.md](SECURITY-E2E.md) for live Fail2ban/nftables ban and unban checks in each disposable VM (issue #91). Results appear in the host workflow summary and saved artifacts.

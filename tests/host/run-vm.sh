@@ -36,7 +36,9 @@ install -m 0755 "$root/target/x86_64-unknown-linux-musl/release/logwizz" payload
 install -m 0755 "$root/target/x86_64-unknown-linux-musl/release/logwizz-notify" payload/logwizz-notify
 cp "$root/packaging/logwizz.service" "$root/packaging/logwizz-notify.service" \
   "$here/hostcheck.sh" "$here/logwizz.nft" "$root/docs/DETECTION.md" \
-  "$root/config/runtime.toml" "$root/packaging/audit/logwizz.rules" payload/
+  "$root/config/runtime.toml" "$root/packaging/audit/logwizz.rules" \
+  "$here/fail2ban-e2e.sh" "$root/packaging/fail2ban/action.d/logwizz-report.py" payload/
+install -m 0644 "$root/packaging/fail2ban/filter.d/logwizz.conf" payload/logwizz-fail2ban-filter.conf
 # The host config already watches auth.log and syslog. On Ubuntu 24.04, rsyslog
 # copies kernel messages to syslog, so adding detection.toml's kern.log here
 # would monitor each firewall line twice. Append the shipped rules only; the
@@ -53,6 +55,7 @@ packages:
   - nmap
   - strace
   - auditd
+  - fail2ban
 runcmd:
   - [sh, -c, 'systemctl enable --now rsyslog; sleep 1; logger -p auth.notice "logwizz hostcheck bootstrap"; sleep 1; mkdir -p /mnt/payload && mount -o ro LABEL=PAYLOAD /mnt/payload && bash /mnt/payload/hostcheck.sh > /dev/ttyS1 2>&1; echo HOSTCHECK-DONE > /dev/ttyS1; poweroff']
 EOF
