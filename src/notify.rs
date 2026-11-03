@@ -11,6 +11,7 @@
 //! summaries end: no event is counted twice, and a summary sent but not yet
 //! removed from the saved state is sent again (at-least-once delivery).
 
+pub mod action;
 pub mod aggregate;
 pub mod transport;
 
@@ -30,6 +31,7 @@ use tracing::{info, warn};
 
 use crate::event::Severity;
 use crate::journal::read_line;
+use action::BanReport;
 use aggregate::{Aggregator, Detection, Key, NotAnEvent, Recorded, Summary};
 use transport::{Curl, Deliver, Kind};
 
@@ -101,6 +103,8 @@ pub struct Settings {
     pub state_dir: PathBuf,
     /// Captures that may leave the host (NOTIFY_FIELDS).
     pub fields: Vec<String>,
+    /// Optional detection rule allowlist; reported bans bypass it.
+    pub rules: Option<Vec<String>>,
 }
 
 impl Settings {
@@ -177,6 +181,25 @@ impl Settings {
         {
             return Err("NOTIFY_FIELDS must list up to 16 capture names (a-z, 0-9, _)".into());
         }
+        let rules = match get("NOTIFY_RULES") {
+            None => None,
+            Some(value) => {
+                let items: Vec<_> = value.split(',').map(str::trim).collect();
+                if items.is_empty()
+                    || items.len() > 64
+                    || items.iter().any(|item| {
+                        item.is_empty()
+                            || item.len() > 64
+                            || !item
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+                    })
+                {
+                    return Err("NOTIFY_RULES must list 1..64 valid rule IDs".into());
+                }
+                Some(items.into_iter().map(String::from).collect())
+            }
+        };
         // systemd may pass several directories, separated by ':'.
         let state_dir = var("STATE_DIRECTORY")
             .map(|d| PathBuf::from(d.split(':').next().unwrap_or_default()))
@@ -191,6 +214,7 @@ impl Settings {
             )?,
             state_dir,
             fields,
+            rules,
         })
     }
 }
@@ -202,6 +226,8 @@ struct State {
     v: u32,
     cursor: Option<String>,
     summaries: Vec<Summary>,
+    #[serde(default)]
+    actions: Vec<BanReport>,
 }
 
 fn load_state(dir: &Path, window_secs: u64) -> io::Result<State> {
@@ -333,11 +359,17 @@ fn load_legacy(dir: &Path, window_secs: u64) -> State {
     state
 }
 
-fn save_state(dir: &Path, cursor: Option<&str>, agg: &Aggregator) -> io::Result<()> {
+fn save_state(
+    dir: &Path,
+    cursor: Option<&str>,
+    agg: &Aggregator,
+    actions: &[BanReport],
+) -> io::Result<()> {
     let state = State {
         v: STATE_VERSION,
         cursor: cursor.map(String::from),
         summaries: agg.summaries().cloned().collect(),
+        actions: actions.to_vec(),
     };
     let mut bytes = serde_json::to_vec(&state).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -351,6 +383,8 @@ struct Entry {
     message: Option<String>,
     /// `__REALTIME_TIMESTAMP`, in seconds.
     time: Option<u64>,
+    is_ban_report: bool,
+    host: String,
 }
 
 #[derive(Deserialize)]
@@ -361,6 +395,12 @@ struct RawEntry {
     message: Option<serde_json::Value>,
     #[serde(rename = "__REALTIME_TIMESTAMP", default)]
     realtime: Option<String>,
+    #[serde(rename = "SYSLOG_IDENTIFIER", default)]
+    identifier: Option<String>,
+    #[serde(rename = "_UID", default)]
+    uid: Option<String>,
+    #[serde(rename = "_HOSTNAME", default)]
+    host: Option<String>,
 }
 
 fn parse_entry(json: &[u8]) -> Option<Entry> {
@@ -377,6 +417,9 @@ fn parse_entry(json: &[u8]) -> Option<Entry> {
             .realtime
             .and_then(|t| t.parse::<u64>().ok())
             .map(|us| us / 1_000_000),
+        is_ban_report: raw.identifier.as_deref() == Some(action::IDENTIFIER)
+            && raw.uid.as_deref() == Some("0"),
+        host: raw.host.unwrap_or_else(|| "unknown".into()),
     })
 }
 
@@ -391,7 +434,15 @@ fn spawn_journal(
     if mode == JournalMode::Namespace {
         cmd.arg("--namespace=logwizz");
     }
-    cmd.args(["--unit=logwizz", "--follow", "--output=json", "--no-pager"])
+    cmd.args([
+        "--unit=logwizz",
+        "+",
+        "SYSLOG_IDENTIFIER=logwizz-ban",
+        "_UID=0",
+        "--follow",
+        "--output=json",
+        "--no-pager",
+    ])
         .arg(format!("--priority={}", min.syslog_priority()))
         .arg(match cursor {
             Some(c) => format!("--after-cursor={c}"),
@@ -492,6 +543,9 @@ struct Notifier<D> {
     deliver: D,
     state_dir: PathBuf,
     fields: Vec<String>,
+    rules: Option<Vec<String>>,
+    max_pending: usize,
+    actions: Vec<BanReport>,
     cursor: Option<String>,
     dirty: bool,
     last_save: Instant,
@@ -504,7 +558,12 @@ impl<D: Deliver> Notifier<D> {
         if !self.dirty || (!force && self.last_save.elapsed() < SAVE_INTERVAL) {
             return;
         }
-        match save_state(&self.state_dir, self.cursor.as_deref(), &self.agg) {
+        match save_state(
+            &self.state_dir,
+            self.cursor.as_deref(),
+            &self.agg,
+            &self.actions,
+        ) {
             Ok(()) => {
                 self.dirty = false;
                 self.last_save = Instant::now();
@@ -552,21 +611,72 @@ impl<D: Deliver> Notifier<D> {
         ok
     }
 
+    /// Sends each action report individually; unlike detection summaries,
+    /// these have no window and are unaffected by NOTIFY_RULES.
+    fn send_actions(&mut self, now: u64, deadline: Option<Instant>) -> bool {
+        let mut ok = true;
+        let mut i = 0;
+        while i < self.actions.len() {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return false;
+            }
+            if self.actions[i].retry_after > now {
+                i += 1;
+                continue;
+            }
+            match self.deliver.deliver_action(&self.actions[i]) {
+                Ok(()) => {
+                    self.actions.remove(i);
+                }
+                Err(e) => {
+                    ok = false;
+                    let delay = self.actions[i].failed(now);
+                    warn!(error = %e, retry_in_secs = delay, "ban report delivery failed; retained");
+                    i += 1;
+                }
+            }
+            self.dirty = true;
+        }
+        self.save(true);
+        ok
+    }
+
     fn consume(&mut self, entry: &Entry) -> Recorded {
         if let Some(message) = &entry.message {
-            match Detection::parse(message, entry.time, &self.fields) {
-                Ok((d, fallback)) => {
-                    if fallback {
-                        warn!(rule = %d.rule, "event has no valid timestamp; using the journal's");
-                    }
-                    if self.agg.record(&d) == Recorded::Full {
+            if entry.is_ban_report {
+                // Only _UID=0 with the dedicated identifier reaches here.
+                // A report is not a firewall-enforcement verification.
+                if let Some(report) =
+                    BanReport::parse(message, &entry.host, entry.time.unwrap_or_else(now_secs))
+                {
+                    if self.actions.len() >= self.max_pending {
                         return Recorded::Full;
                     }
+                    self.actions.push(report);
                 }
-                Err(NotAnEvent::NoTime) => {
-                    warn!("skipping an event without a valid timestamp");
+            } else {
+                match Detection::parse(message, entry.time, &self.fields) {
+                    Ok((d, fallback)) => {
+                        if self
+                            .rules
+                            .as_ref()
+                            .is_some_and(|rules| !rules.iter().any(|r| r == &d.rule))
+                        {
+                            // The cursor still advances for filtered rules.
+                        } else {
+                            if fallback {
+                                warn!(rule = %d.rule, "event has no valid timestamp; using the journal's");
+                            }
+                            if self.agg.record(&d) == Recorded::Full {
+                                return Recorded::Full;
+                            }
+                        }
+                    }
+                    Err(NotAnEvent::NoTime) => {
+                        warn!("skipping an event without a valid timestamp");
+                    }
+                    Err(NotAnEvent::Other) => {}
                 }
-                Err(NotAnEvent::Other) => {}
             }
         }
         self.cursor = Some(entry.cursor.clone());
@@ -610,6 +720,9 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         deliver: settings.transport,
         state_dir,
         fields: settings.fields,
+        rules: settings.rules,
+        max_pending: settings.max_pending,
+        actions: state.actions,
         cursor: state.cursor,
         dirty: !legacy.is_empty(),
         last_save: Instant::now(),
@@ -620,6 +733,7 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         window_secs = settings.window_secs,
         min_priority = %settings.min_priority,
         pending = n.agg.len(),
+        pending_actions = n.actions.len(),
         journal_mode = ?mode,
         "logwizz-notify started"
     );
@@ -660,6 +774,8 @@ fn main_loop<D: Deliver>(n: &mut Notifier<D>, rx: &Receiver<Entry>, stop: &Atomi
                 paused = true;
             }
         }
+        // Ban reports are delivered individually, including during a backlog.
+        n.send_actions(now_secs(), None);
         // Windows closed by the clock go out once the journal is quiet (or
         // consumption is paused); superseded windows at most once a second
         // even while a backlog is being read.
@@ -682,27 +798,32 @@ fn main_loop<D: Deliver>(n: &mut Notifier<D>, rx: &Receiver<Entry>, stop: &Atomi
         // left off. Closed ones are sent now.
         let now = now_secs();
         let due = n.agg.due(now, true);
-        n.send(&due, now, None, Some(Instant::now() + SHUTDOWN_BUDGET));
+        let deadline = Instant::now() + SHUTDOWN_BUDGET;
+        n.send_actions(now, Some(deadline));
+        n.send(&due, now, None, Some(deadline));
         n.save(true);
         return Exit::JournalEnded;
     }
     // Stopping: send everything, open windows as partial summaries.
     let now = now_secs();
     let keys = n.agg.keys();
+    let deadline = Instant::now() + SHUTDOWN_BUDGET;
+    let actions_ok = n.send_actions(now, Some(deadline));
     let ok = n.send(
         &keys,
         now,
         Some(now),
-        Some(Instant::now() + SHUTDOWN_BUDGET),
+        Some(deadline),
     );
     n.save(true);
-    if ok && n.agg.is_empty() {
+    if ok && actions_ok && n.agg.is_empty() && n.actions.is_empty() {
         info!("logwizz-notify stopped");
         Exit::Clean
     } else {
         warn!(
             pending = n.agg.len(),
-            "logwizz-notify stopped with summaries pending"
+            pending_actions = n.actions.len(),
+            "logwizz-notify stopped with deliveries pending"
         );
         Exit::Pending
     }
@@ -743,6 +864,7 @@ mod tests {
         assert_eq!(s.min_priority, Severity::Warning);
         assert_eq!(s.state_dir, Path::new("/var/lib/logwizz-notify"));
         assert_eq!(s.fields, ["login"]);
+        assert!(s.rules.is_none());
 
         let err = |pairs: &[(&str, &str)]| Settings::from_env(env(pairs)).unwrap_err();
         assert!(err(&[]).contains("TELEGRAM_BOT_TOKEN is not set"));
@@ -780,6 +902,15 @@ mod tests {
         );
         assert!(with(("NOTIFY_FIELDS", "Key")).is_err());
         assert!(with(("NOTIFY_FIELDS", "a b")).is_err());
+        assert_eq!(
+            with(("NOTIFY_RULES", "ssh_bruteforce,port_scan"))
+                .unwrap()
+                .rules,
+            Some(vec!["ssh_bruteforce".into(), "port_scan".into()])
+        );
+        for invalid in ["", " ", ",", "ssh,", "bad rule", "bad/name"] {
+            assert!(with(("NOTIFY_RULES", invalid)).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]
@@ -815,6 +946,7 @@ mod tests {
                 v: STATE_VERSION + 1,
                 cursor: Some("saved-cursor".into()),
                 summaries: Vec::new(),
+                actions: Vec::new(),
             })
             .unwrap(),
         )
@@ -849,6 +981,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         sent: Vec<(String, u64, bool)>,
+        actions: Vec<String>,
         fail: bool,
     }
 
@@ -858,6 +991,14 @@ mod tests {
                 return Err("down".into());
             }
             self.sent.push((s.rule.clone(), s.count, partial));
+            Ok(())
+        }
+
+        fn deliver_action(&mut self, a: &BanReport) -> Result<(), String> {
+            if self.fail {
+                return Err("down".into());
+            }
+            self.actions.push(a.ip.clone());
             Ok(())
         }
     }
@@ -870,6 +1011,8 @@ mod tests {
                 crate::event::format_rfc3339_secs(ts)
             )),
             time: None,
+            is_ban_report: false,
+            host: "unknown".into(),
         }
     }
 
@@ -882,6 +1025,9 @@ mod tests {
             },
             state_dir: dir.to_path_buf(),
             fields: vec!["login".into()],
+            rules: None,
+            max_pending,
+            actions: Vec::new(),
             cursor: None,
             dirty: false,
             last_save: Instant::now(),
@@ -902,6 +1048,8 @@ mod tests {
             cursor: "c3".into(),
             message: Some("logwizz started".into()),
             time: None,
+            is_ban_report: false,
+            host: "unknown".into(),
         })
         .unwrap();
         // Stop once the queued entries have been consumed.
@@ -982,8 +1130,34 @@ mod tests {
             cursor: "c".into(),
             message: None,
             time: None,
+            is_ban_report: false,
+            host: "unknown".into(),
         };
         assert_eq!(n.consume(&other), Recorded::Yes);
         assert_eq!(n.cursor.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn rule_filter_does_not_block_reports_or_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = notifier(dir.path(), 1, false);
+        n.rules = Some(vec!["allowed".into()]);
+        let now = now_secs();
+        assert_eq!(n.consume(&event_entry("a", now, "filtered")), Recorded::Yes);
+        assert_eq!(n.cursor.as_deref(), Some("a"));
+        assert!(n.agg.is_empty());
+        let report = Entry {
+            cursor: "b".into(),
+            message: Some("LOGWIZZ_BAN_V1 jail=logwizz ip=198.51.100.24 bantime=3600".into()),
+            time: Some(now),
+            is_ban_report: true,
+            host: "web1".into(),
+        };
+        assert_eq!(n.consume(&report), Recorded::Yes);
+        assert_eq!(n.cursor.as_deref(), Some("b"));
+        assert_eq!(n.actions.len(), 1);
+        assert!(n.send_actions(now, None));
+        assert_eq!(n.deliver.actions, ["198.51.100.24"]);
+        assert!(n.actions.is_empty());
     }
 }

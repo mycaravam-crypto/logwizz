@@ -131,6 +131,36 @@ If there is no follow-up notification, do not infer the IP was not blocked:
 check the jail and logs. Disable the Fail2ban file source on systems without
 that log.
 
+## Optional actionban reporting
+
+The `logwizz-report` Fail2ban action emits an individual message from an `actionban` callback. It is opt-in: no existing jail changes unless explicitly configured. Install the action file:
+
+```sh
+sudo install -D -m 0644 packaging/fail2ban/action.d/logwizz-report.conf /etc/fail2ban/action.d/logwizz-report.conf
+sudoedit /etc/fail2ban/jail.d/logwizz.local
+```
+
+Keep the real firewall action first and append the new reporter in `[logwizz]`:
+
+```ini
+[logwizz]
+action = %(action_)s
+         logwizz-report[name=logwizz]
+```
+
+Do not replace the firewall action with the reporter. A different jail can opt in with `logwizz-report[name=<jail>]` after its real ban action. Validate and reload:
+
+```sh
+sudo fail2ban-client -t
+sudo fail2ban-client reload
+sudo fail2ban-client status logwizz
+sudo journalctl --namespace=logwizz SYSLOG_IDENTIFIER=logwizz-ban _UID=0 -n 20
+```
+
+The callback writes through `/run/systemd/journal.logwizz/dev-log` using `logger` and works with systemd >= 245; it requires an active journal namespace and runs as Fail2ban's privileged user. `logwizz-notify` reads it at warning priority, bypasses `NOTIFY_RULES`, and delivers it independently of aggregated detections.
+
+**Reporting semantics:** Fail2ban executes separate actions even if a preceding firewall action failed. The callback therefore establishes that Fail2ban reached `actionban`, not that the firewall ban took effect. It does not run for an ignored or already-banned address. Missing notifications are inconclusive; validate firewall state when necessary. The existing `fail2ban_ban` log-based detection is independent and may yield a duplicate alert when both are enabled. Disable that file source if only callback reporting is wanted.
+
 ## Operational notes
 
 - **Policy stays in Fail2ban.** The example uses `maxretry = 1` because

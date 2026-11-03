@@ -57,6 +57,7 @@ Keep `notify.env` owned by root and mode `0600`. The bot token, endpoint URLs an
 | `NOTIFY_MIN_PRIORITY` | `warning` | Lowest severity forwarded: `debug`, `info`, `notice`, `warning`, `error` (or `err`), `critical` (or `crit`). |
 | `NOTIFY_MAX_PENDING` | `4096` | Maximum pending rule/window summaries, 1–65536. |
 | `NOTIFY_FIELDS` | `login` | Captures that may be sent, comma-separated (up to 16 names of `a-z`, `0-9`, `_`). See [Sources and fields](#sources-and-fields). |
+| `NOTIFY_RULES` | unset (all) | Comma-separated detection rule allowlist (1–64 IDs). Empty or invalid values exit 2; actionban reports bypass this filter. |
 
 Invalid settings stop the notifier with exit code 2 and a message that names the variable but never its value.
 
@@ -79,6 +80,10 @@ With several sources, the five most frequent are listed one per line with
 their counts. ntfy receives the plain-text form shown under
 [Other transports](#other-transports).
 
+## Optional rule allowlist
+
+`NOTIFY_RULES=ssh_bruteforce,port_scan` forwards only these detection rules. Unset means all rules. Filtering takes place before aggregation; filtered events consume no pending slot but still advance the journal cursor, including across restarts. The notifier does not read `detection.toml`, so an unknown but well-formed rule ID simply never matches. An explicitly empty list is invalid.
+
 ## Fail2ban ban feedback
 
 A detection alert such as `port_scan` or `ssh_bruteforce` means **a rule fired**, not that an IP was blocked. The bundled `config/detection.toml` now also watches `/var/log/fail2ban.log`: when Fail2ban logs a `fail2ban.actions ... Ban <ip>` entry, the existing `fail2ban_ban` rule produces a **separate** notification after the normal aggregation window:
@@ -93,6 +98,25 @@ fail2ban_ban · warning · web1
 This is positive feedback that **Fail2ban reported a ban**; it is not a firewall-rule verification. The event can come from any Fail2ban jail, not necessarily the Logwizz bridge. Detection and ban messages are deliberately **not correlated**. Absence of a ban message does not prove no ban happened (log not available, another log location, delivery/filtering, or no ban). Check the actual jail state with `sudo fail2ban-client status logwizz` when certainty is required.
 
 On a host without Fail2ban, set `enabled = false` on the `/var/log/fail2ban.log` entry in `config/detection.toml` to avoid a missing-file warning. If Fail2ban logs elsewhere, adjust that path. Existing deployed configurations are not changed by an upgrade; deploy the updated detection profile or enable the file entry manually.
+
+### Optional immediate actionban reporting
+
+The existing `fail2ban_ban` rule reacts to an early Fail2ban log entry. For more specific action reporting, install and explicitly enable the optional `packaging/fail2ban/action.d/logwizz-report.conf` action *after* the real firewall action, as described in [FAIL2BAN.md](FAIL2BAN.md#optional-actionban-reporting). It emits a fixed-format message through the `logwizz` namespaced journal socket. The notifier accepts it only with `SYSLOG_IDENTIFIER=logwizz-ban` and journald's trusted `_UID=0` field. It is not a normal detection and cannot cause a new bridge ban.
+
+Example Telegram notification:
+
+```text
+🛡 Fail2ban actionban reported
+logwizz · web1
+198.51.100.24 · 3600 s
+Firewall enforcement not independently verified
+```
+
+Webhook notifications use the separate `logwizz.action/v1` schema with `action`, `status: actionban_reported`, `backend: fail2ban`, `host`, `jail`, `ip`, `bantime_secs` and `reported_at`; existing `logwizz.notification/v1` summaries remain unchanged. Action callbacks bypass `NOTIFY_RULES` and are sent individually without an aggregation window. Pending reports are stored atomically with the journal cursor, retried and delivered at least once. `NOTIFY_MAX_PENDING` also bounds pending action reports.
+
+**Limit:** Fail2ban continues to later actions even if an earlier firewall action fails. A callback proves that Fail2ban invoked `actionban` for this IP, not that the firewall enforced the ban. A disabled jail, ignored IP or already banned IP normally produces no new callback. A missing notification may also mean that reporting or delivery failed, not necessarily that there was no ban.
+
+Reporting requires systemd journal namespaces (>= 245), an active notifier and `NOTIFY_MIN_PRIORITY=warning` (or more permissive). It is opt-in. If the legacy `fail2ban_ban` detection still watches `/var/log/fail2ban.log`, both mechanisms can produce notifications for one ban; disable that file source if only callback notifications are desired.
 
 ## Summary behavior
 
