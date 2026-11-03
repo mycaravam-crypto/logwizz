@@ -435,7 +435,7 @@ fn spawn_journal(
         cmd.arg("--namespace=logwizz");
     }
     cmd.args([
-        "--unit=logwizz",
+        "_SYSTEMD_UNIT=logwizz.service",
         "+",
         "SYSLOG_IDENTIFIER=logwizz-ban",
         "_UID=0",
