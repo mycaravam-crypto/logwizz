@@ -8,6 +8,12 @@ BROKEN=198.51.100.26
 DISABLED=198.51.100.27
 LOG=/var/log/logwizz/fail2ban.log
 SINK=/root/fail2ban-e2e.jsonl
+JAIL_READY_RETRIES=80
+BAN_WAIT_RETRIES=120
+UNBAN_WAIT_RETRIES=80
+BURST_EVENTS=2000
+BURST_WAIT_RETRIES=120
+MAX_RSS_KIB=65536
 sink_pid=""
 cleanup() {
   systemctl stop logwizz-notify fail2ban logwizz >/dev/null 2>&1 || true
@@ -81,7 +87,7 @@ fail2ban-client -t
 # Always restart to load the dedicated test jail, then wait for the socket.
 systemctl restart fail2ban
 ready=0
-for ((i=0;i<80;i++)); do
+for ((i=0;i<JAIL_READY_RETRIES;i++)); do
   if fail2ban-client ping >/dev/null 2>&1 &&
      fail2ban-client status logwizz >/dev/null 2>&1; then ready=1; break; fi
   sleep 0.25
@@ -120,7 +126,7 @@ webhook_has() {
 ! status_has "$BAN"
 write_match "$BAN"
 seen=0
-for ((i=0;i<120;i++)); do
+for ((i=0;i<BAN_WAIT_RETRIES;i++)); do
   if status_has "$BAN" && nft_has "$BAN" &&
     (( $(report_count "$BAN") == 1 )) && webhook_has "$BAN"; then seen=1; break; fi
   sleep 0.25
@@ -144,7 +150,7 @@ write_match "$BAN"
 sleep 3
 (( $(report_count "$BAN") == 1 ))
 fail2ban-client set logwizz unbanip "$BAN" >/dev/null
-for ((i=0;i<80;i++)); do
+for ((i=0;i<UNBAN_WAIT_RETRIES;i++)); do
   if ! status_has "$BAN" && ! nft_has "$BAN"; then break; fi
   sleep 0.2
 done
@@ -171,7 +177,7 @@ sed -i 's/^action = %(action_)s$/action = lwz-e2e-failing/' \
   /etc/fail2ban/jail.d/zz-logwizz-e2e.local
 systemctl restart fail2ban
 ready=0
-for ((i=0;i<80;i++)); do
+for ((i=0;i<JAIL_READY_RETRIES;i++)); do
   if fail2ban-client status logwizz >/dev/null 2>&1; then ready=1; break; fi
   sleep 0.25
 done
@@ -191,9 +197,26 @@ echo 'PASS disabled jail generates no new report'
 # Record bounded memory evidence under a burst without claiming a CPU SLO.
 systemctl start logwizz
 pid=$(systemctl show -p MainPID --value logwizz)
-for ((i=0;i<2000;i++)); do printf 'LWZ-RESOURCE event %04d\n' "$i"; done >> /var/log/lwtest.log
-sleep 2
+# The bundled host rule matches LWZ-T; verify that every line emerges as
+# exactly one detection rather than measuring an unrelated, ignored burst.
+for ((i=0;i<BURST_EVENTS;i++)); do
+  printf 'LWZ-T-RESOURCE event %04d\n' "$i"
+done >> /var/log/lwtest.log
+observed=0
+for ((i=0;i<BURST_WAIT_RETRIES;i++)); do
+  observed=$(journalctl --namespace=logwizz -u logwizz -o cat --no-pager |
+    grep -Fc 'LWZ-T-RESOURCE event' || true)
+  (( observed >= BURST_EVENTS )) && break
+  sleep 0.25
+done
+(( observed == BURST_EVENTS )) || {
+  echo "FAIL burst event loss/backpressure: emitted=$observed expected=$BURST_EVENTS"
+  exit 1
+}
 rss=$(ps -o rss= -p "$pid" | tr -d ' ')
 cpu=$(ps -o %cpu= -p "$pid" | tr -d ' ')
-[[ "$rss" =~ ^[0-9]+$ ]] && (( rss > 0 && rss < 65536 ))
-echo "PASS resource sample rss_kb=$rss cpu_percent=$cpu injected_lines=2000"
+[[ "$rss" =~ ^[0-9]+$ ]] && (( rss > 0 && rss < MAX_RSS_KIB )) || {
+  echo "FAIL memory limit: rss_kib=$rss limit=$MAX_RSS_KIB"
+  exit 1
+}
+echo "PASS resource sample rss_kb=$rss cpu_percent=$cpu emitted=$observed injected=$BURST_EVENTS"
