@@ -103,7 +103,7 @@ def _is_verified_nftables(jail, address):
         contains_ip_set = any(
             isinstance(expr, dict)
             and isinstance(expr.get("match"), dict)
-            and expr["match"].get("op") == "=="
+            and expr["match"].get("op") in ("==", "in")
             and expr["match"].get("right") == "@" + set_name
             and isinstance(expr["match"].get("left"), dict)
             and expr["match"]["left"].get("payload") == {
