@@ -133,22 +133,23 @@ that log.
 
 ## Optional actionban reporting
 
-The `logwizz-report` Fail2ban action emits an individual message from an `actionban` callback. It is opt-in: no existing jail changes unless explicitly configured. Install the action file:
+The `logwizz-report.py` Fail2ban action emits an individual message **only after observing nftables enforcement state** for the just-banned address. It is opt-in: no existing jail changes unless explicitly configured. Install the action file:
 
 ```sh
 sudo install -D -m 0644 packaging/fail2ban/action.d/logwizz-report.py /etc/fail2ban/action.d/logwizz-report.py
 sudoedit /etc/fail2ban/jail.d/logwizz.local
 ```
 
-Keep the real firewall action first and append the new reporter in `[logwizz]`:
+The verification currently supports **the stock Fail2ban `nftables-multiport` backend only**, with the default `inet f2b-table f2b-chain` input chain and per-jail `addr-set-<jail>` (IPv4) / `addr6-set-<jail>` (IPv6). Configure the real nftables firewall action **first** and the reporter second:
 
 ```ini
 [logwizz]
+banaction = nftables-multiport
 action = %(action_)s
          logwizz-report.py
 ```
 
-Do not replace the firewall action with the reporter. A different jail can opt in with `logwizz-report.py` after its real ban action. Validate and reload:
+Do **not** replace the firewall action with the reporter. For a different jail using the same nftables backend, add `logwizz-report.py` after its ban action. With iptables, custom nftables table/chain/set names, missing nft binaries or unsupported chains, the verifier **fails closed**: no verified notification is sent and Fail2ban logs a warning. Validate and reload:
 
 ```sh
 sudo fail2ban-client -t
@@ -157,9 +158,9 @@ sudo fail2ban-client status logwizz
 sudo journalctl --namespace=logwizz SYSLOG_IDENTIFIER=logwizz-ban _UID=0 -n 20
 ```
 
-The Python action sends a validated native journal record directly through `/run/systemd/journal.logwizz/socket` (systemd >= 245), with no shell command, subprocess or tag interpolation. It requires an active journal namespace and runs as Fail2ban's privileged user. `logwizz-notify` reads it at warning priority, bypasses `NOTIFY_RULES`, and delivers it independently of aggregated detections.
+The Python action performs **read-only**, bounded-time `nft -j get element` and `nft -j list chain` queries via fixed argument vectors (no shell or interpolation). It requires (1) the exact IP in the jail's nftables address set and (2) an active input-hook filter chain containing a rule matching that specific set and a drop/reject verdict. Only then does it send `LOGWIZZ_BAN_V2` via the namespaced journald socket (systemd >= 245); `logwizz-notify` emits `status: firewall_rule_verified` with evidence `nftables-set-and-input-drop-rule`. The daemon remains unprivileged; the verification runs in Fail2ban's existing root process.
 
-**Reporting semantics:** Fail2ban executes separate actions even if a preceding firewall action failed. The callback therefore establishes that Fail2ban reached `actionban`, not that the firewall ban took effect. It does not run for an ignored or already-banned address. Missing notifications are inconclusive; validate firewall state when necessary. The existing `fail2ban_ban` log-based detection is independent and may yield a duplicate alert when both are enabled. Disable that file source if only callback reporting is wanted.
+**Guarantee boundary:** This is evidence of an installed nftables address-set entry **and active input-chain block rule at report time**. It does not inspect actual packet traversal, upstream accept rules or concurrent changes. It cannot certify end-to-end connectivity loss. Crucially, Fail2ban may execute the reporter after a *failed* firewall action: without both nftables checks succeeding, **no verified message is sent**. Missing notifications are inconclusive (unsupported backend, disabled/ignored/already-banned IP, backend failure, delivery failure). The existing `fail2ban_ban` log detection may still generate a separate **unverified** message; disable its source if only verified events are wanted. Historical `LOGWIZZ_BAN_V1` records retain the honest `actionban_reported` status.
 
 ## Operational notes
 

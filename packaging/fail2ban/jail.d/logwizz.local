@@ -11,7 +11,9 @@ bantime  = 3600
 
 # Optional actionban reporting to logwizz-notify (requires the
 # packaging/fail2ban/action.d/logwizz-report.py file to be installed).
-# Firewall action must be listed first. A report indicates an actionban
-# callback, not independently verified firewall enforcement.
+# Only the stock nftables-multiport backend is verified; other backends
+# fail closed. The action queries set membership and a linked input drop rule
+# before reporting. Keep the real firewall action first.
+# banaction = nftables-multiport
 # action = %(action_)s
 #          logwizz-report.py
