@@ -4,7 +4,7 @@
 # Each event's ts is its cursor, so a restarted notifier resumes after the last one it saw.
 # ponytail: resumes from the current event file only; events rotated away while the notifier is down are lost.
 set -eu
-file=${LOGWIZZ_EVENTS_FILE:-/alerts/events.jsonl}
+file=/alerts/events.jsonl
 after=
 start=-n0
 priority=warning

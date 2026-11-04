@@ -69,14 +69,14 @@ services:
     volumes:
       - monitor-data:/alerts:ro
       - notify-state:/var/lib/logwizz-notify
-      - ${TEST_CERTS:?}:/certs:ro
+      - ${TEST_CERTS:-./notify}:/certs:ro
 
   sink:
     image: python:3.13-alpine
     command: ["python3", "-u", "/test_sink.py"]
     volumes:
       - ./notify/test_sink.py:/test_sink.py:ro
-      - ${TEST_CERTS:?}:/certs:ro
+      - ${TEST_CERTS:-./notify}:/certs:ro
 
 volumes:
   guard-events:
