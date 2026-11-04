@@ -80,5 +80,17 @@ class GuardTests(unittest.TestCase):
                 ready.stat.return_value.st_mtime = 99
                 self.assertEqual(guard.healthy(), 1)
 
+    def test_unsafe_events_path_is_rejected_before_nftables_install(self):
+        for path in ("/etc/passwd", "/events/../etc/passwd", "/events/other.log"):
+            with self.subTest(path=path):
+                with patch.dict(guard.os.environ, {
+                    "LOGWIZZ_EGRESS_ALLOW": "198.18.0.2:8080",
+                    "LOGWIZZ_EVENTS_PATH": path,
+                }):
+                    with patch.object(guard, "nft") as nft:
+                        with self.assertRaisesRegex(ValueError, "events destination"):
+                            guard.run()
+                        nft.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
