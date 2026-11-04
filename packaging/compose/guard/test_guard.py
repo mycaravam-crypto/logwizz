@@ -92,5 +92,54 @@ class GuardTests(unittest.TestCase):
                             guard.run()
                         nft.assert_not_called()
 
+    def test_main_dispatch_and_exit_codes(self):
+        with patch.object(guard.sys, "argv", ["guard.py", "--health"]), patch.object(
+            guard, "healthy", return_value=1
+        ) as health:
+            self.assertEqual(guard.main(), 1)
+            health.assert_called_once_with()
+
+        with patch.object(guard.sys, "argv", ["guard.py", "--validate"]), patch.dict(
+            guard.os.environ, {"LOGWIZZ_EGRESS_ALLOW": "198.18.0.2:8080"}
+        ):
+            self.assertEqual(guard.main(), 0)
+
+        with patch.object(guard.sys, "argv", ["guard.py", "--validate"]), patch.dict(
+            guard.os.environ, {"LOGWIZZ_EGRESS_ALLOW": ""}
+        ):
+            self.assertEqual(guard.main(), 2)
+
+        with patch.object(guard.sys, "argv", ["guard.py", "--unknown"]):
+            self.assertEqual(guard.main(), 2)
+
+        with patch.object(guard.sys, "argv", ["guard.py"]), patch.object(
+            guard, "run", side_effect=RuntimeError("simulated firewall failure")
+        ):
+            self.assertEqual(guard.main(), 1)
+
+    def test_run_rejects_existing_table_before_policy_install(self):
+        with patch.dict(guard.os.environ, {"LOGWIZZ_EGRESS_ALLOW": "198.18.0.2:8080"}):
+            with patch.object(guard.pathlib.Path, "mkdir"), patch.object(
+                guard.os, "open", return_value=42
+            ), patch.object(guard.os, "close") as close, patch.object(
+                guard, "table_exists", return_value=True
+            ), patch.object(guard, "nft") as nft:
+                with self.assertRaisesRegex(RuntimeError, "already exists"):
+                    guard.run()
+                close.assert_called_once_with(42)
+                nft.assert_not_called()
+
+    def test_run_aborts_if_policy_validation_fails(self):
+        with patch.dict(guard.os.environ, {"LOGWIZZ_EGRESS_ALLOW": "198.18.0.2:8080"}):
+            with patch.object(guard.pathlib.Path, "mkdir"), patch.object(
+                guard.os, "open", return_value=42
+            ), patch.object(guard, "table_exists", return_value=False), patch.object(
+                guard, "nft", side_effect=RuntimeError("simulated nft validation failure")
+            ) as nft:
+                with self.assertRaisesRegex(RuntimeError, "simulated nft validation failure"):
+                    guard.run()
+                self.assertEqual(nft.call_count, 1)
+                self.assertEqual(nft.call_args.args[:3], ("-c", "-f", "-"))
+
 if __name__ == "__main__":
     unittest.main()
