@@ -88,6 +88,11 @@ START="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 # Both endpoints exist. Only the approved port should be reachable.
 docker run --rm --pull never --network "$NET" "$IMAGE" \
     wget -q -T 5 -O /dev/null "http://$DEST:8080/"
+sleep 0.5
+if grep -q '"rule":"docker_egress_denied"' "$TMP/events.jsonl"; then
+    echo "FAIL: allowed egress generated a denial" >&2
+    exit 1
+fi
 if docker run --rm --pull never --network "$NET" "$IMAGE" \
     wget -q -T 3 -O /dev/null "http://$DEST:8081/"; then
     echo "FAIL: unapproved egress succeeded" >&2
@@ -99,5 +104,6 @@ for ((i=0; i<50; i++)); do
 done
 grep -q '"rule":"docker_egress_denied"' "$TMP/events.jsonl"
 grep -q '"dpt":"8081"' "$TMP/events.jsonl"
-journalctl -k --since "$START" -o cat --no-pager | grep -q 'logwizz-egress-deny:'
+journalctl -k --since "$START" -o cat --no-pager > "$TMP/kernel.log"
+grep -q 'logwizz-egress-deny:' "$TMP/kernel.log"
 echo "PASS: allowed egress works, denied egress is blocked and LogWizz detected it"
