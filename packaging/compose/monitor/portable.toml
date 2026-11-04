@@ -1,0 +1,16 @@
+# Experimental file-based input; production host configuration is unchanged.
+[general]
+startup_mode = "beginning"
+
+[output]
+format = "json"
+
+[[files]]
+path = "/events/egress.log"
+
+[[rules]]
+id = "docker_egress_denied_aggregate"
+description = "Protected network namespace attempted denied outbound connections"
+match_type = "regex"
+pattern = 'logwizz-egress-deny: packets=(?P<packets>[0-9]+) total_packets=(?P<total_packets>[0-9]+)'
+severity = "warning"
