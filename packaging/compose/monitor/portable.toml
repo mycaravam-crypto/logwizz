@@ -1,6 +1,8 @@
 # Experimental file-based input; production host configuration is unchanged.
 [general]
 startup_mode = "beginning"
+# Resume here after a restart: nothing is missed or alerted twice.
+state_file = "/data/state.json"
 
 [output]
 format = "json"

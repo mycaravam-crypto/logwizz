@@ -12,6 +12,8 @@ RUN cargo build --release --locked --bin logwizz
 FROM alpine:3.22
 RUN addgroup -S logwizz && adduser -S -G logwizz logwizz
 COPY --from=builder /src/target/release/logwizz /usr/local/bin/logwizz
+RUN mkdir -p /data && chown logwizz:logwizz /data
 COPY packaging/compose/monitor/portable.toml /etc/logwizz/portable.toml
+COPY packaging/compose/monitor/run.sh /usr/local/bin/run-monitor
 USER logwizz
-ENTRYPOINT ["/usr/local/bin/logwizz", "--config", "/etc/logwizz/portable.toml"]
+ENTRYPOINT ["/usr/local/bin/run-monitor"]
