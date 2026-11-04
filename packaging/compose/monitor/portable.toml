@@ -1,0 +1,25 @@
+# Experimental file-based input; production host configuration is unchanged.
+[general]
+startup_mode = "beginning"
+# Resume here after a restart: nothing is missed or alerted twice.
+state_file = "/data/state.json"
+
+[output]
+format = "json"
+
+[[files]]
+path = "/events/egress.log"
+
+[[rules]]
+id = "docker_egress_denied_aggregate"
+description = "Protected network namespace attempted denied outbound connections"
+match_type = "regex"
+pattern = 'logwizz-egress-deny: packets=(?P<packets>[0-9]+) total_packets=(?P<total_packets>[0-9]+)'
+severity = "warning"
+
+[[rules]]
+id = "docker_egress_counter_reset"
+description = "Guard packet counter reset unexpectedly"
+match_type = "regex"
+pattern = 'logwizz-egress-counter-reset: previous=(?P<previous>[0-9]+) current=(?P<current>[0-9]+)'
+severity = "error"

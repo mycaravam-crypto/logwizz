@@ -1,0 +1,90 @@
+# Disposable integration test; not a production deployment.
+# Use: docker compose -f packaging/compose/compose.test.yml up -d --build --wait
+services:
+  guard:
+    build:
+      context: ../..
+      dockerfile: packaging/compose/guard/Dockerfile
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: [/run]
+    environment:
+      LOGWIZZ_EGRESS_ALLOW: "172.31.244.10:8080"
+    volumes:
+      - guard-events:/events
+    healthcheck:
+      test: ["CMD", "python3", "/usr/local/bin/logwizz-guard", "--health"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    networks: [default]
+
+  app:
+    image: busybox:1.36
+    network_mode: "service:guard"
+    depends_on:
+      guard:
+        condition: service_healthy
+    command: ["sh", "-c", "sleep 1000000"]
+
+  endpoint:
+    image: python:3.13-alpine
+    command: ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0"]
+    networks:
+      default:
+        ipv4_address: 172.31.244.10
+
+  logwizz:
+    build:
+      context: ../..
+      dockerfile: packaging/compose/monitor/Dockerfile
+    user: "logwizz"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      guard:
+        condition: service_healthy
+    volumes:
+      - guard-events:/events:ro
+      - monitor-data:/data
+
+  notify:
+    build:
+      context: ../..
+      dockerfile: packaging/compose/notify/Dockerfile
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NOTIFY_KIND: webhook
+      NOTIFY_URL: https://sink:8443/
+      NOTIFY_WINDOW_SECS: "10"
+      CURL_CA_BUNDLE: /certs/cert
+    depends_on: [logwizz, sink]
+    volumes:
+      - monitor-data:/alerts:ro
+      - notify-state:/var/lib/logwizz-notify
+      - ${TEST_CERTS:-./notify}:/certs:ro
+
+  sink:
+    image: python:3.13-alpine
+    command: ["python3", "-u", "/test_sink.py"]
+    volumes:
+      - ./notify/test_sink.py:/test_sink.py:ro
+      - ${TEST_CERTS:-./notify}:/certs:ro
+
+volumes:
+  guard-events:
+  monitor-data:
+  notify-state:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.244.0/24
