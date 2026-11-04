@@ -14,3 +14,10 @@ description = "Protected network namespace attempted denied outbound connections
 match_type = "regex"
 pattern = 'logwizz-egress-deny: packets=(?P<packets>[0-9]+) total_packets=(?P<total_packets>[0-9]+)'
 severity = "warning"
+
+[[rules]]
+id = "docker_egress_counter_reset"
+description = "Guard packet counter reset unexpectedly"
+match_type = "regex"
+pattern = 'logwizz-egress-counter-reset: previous=(?P<previous>[0-9]+) current=(?P<current>[0-9]+)'
+severity = "error"
