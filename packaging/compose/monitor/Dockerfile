@@ -6,6 +6,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY build.rs ./
 COPY build ./build
+COPY benches ./benches
 RUN cargo build --release --locked --bin logwizz
 
 FROM alpine:3.22
