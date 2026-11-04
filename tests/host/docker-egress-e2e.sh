@@ -70,8 +70,8 @@ HTTP2=$!
 
 sed -e "s/inet logwizz_egress/inet $TABLE/" \
     -e "s/br-logwizz/$BR/g" \
-    -e "s/192\\.0\\.2\\.10/$DEST/" \
-    -e 's/tcp dport 443/tcp dport 8080/' \
+    -e "s/<ALLOW_IPV4>/$DEST/" \
+    -e 's/<ALLOW_TCP_PORT>/8080/' \
     "$ROOT/packaging/docker/logwizz-egress.nft" > "$TMP/egress.nft"
 nft -c -f "$TMP/egress.nft"
 nft -f "$TMP/egress.nft"
