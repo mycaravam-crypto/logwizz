@@ -45,7 +45,7 @@ def ruleset(allowed: list[tuple[str, int]]) -> str:
         f"table inet {TABLE} {{",
         f"  counter {COUNTER} {{ packets 0 bytes 0 }}",
         "  chain output {",
-        "    type filter hook output priority 0; policy accept;",
+        "    type filter hook output priority 0; policy drop;",
         '    oifname "lo" accept',
         "    ct state established,related accept",
     ]
