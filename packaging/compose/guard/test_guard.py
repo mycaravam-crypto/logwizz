@@ -29,6 +29,7 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(len(allowed), 2)
         self.assertIn("ip daddr 198.18.0.2 tcp dport 8080 accept", policy)
         self.assertIn("ip daddr 192.0.2.1 tcp dport 5432 accept", policy)
+        self.assertIn("type filter hook output priority 0; policy drop;", policy)
         self.assertIn('oifname "lo" accept', policy)
         self.assertIn("ct state established,related accept", policy)
         self.assertLess(policy.index("ip daddr"), policy.index("counter name denied drop"))
