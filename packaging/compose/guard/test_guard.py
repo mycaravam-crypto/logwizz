@@ -57,16 +57,6 @@ class GuardTests(unittest.TestCase):
         with patch.object(guard, "nft", return_value='{"nftables":[]}'), self.assertRaisesRegex(RuntimeError, "missing"):
             guard.denied_packets()
 
-    def test_table_existence_uses_explicit_list(self):
-        present = '{"nftables":[{"table":{"family":"inet","name":"logwizz_guard"}}]}'
-        absent = '{"nftables":[{"table":{"family":"inet","name":"other"}}]}'
-        with patch.object(guard, "nft", return_value=present):
-            self.assertTrue(guard.table_exists())
-        with patch.object(guard, "nft", return_value=absent):
-            self.assertFalse(guard.table_exists())
-        with patch.object(guard, "nft", side_effect=RuntimeError("permission denied")), self.assertRaises(RuntimeError):
-            guard.table_exists()
-
     def test_health_fails_closed_when_missing_stale_or_unreadable(self):
         with patch.object(guard, "READY") as ready, patch.object(guard, "denied_packets", return_value=0):
             ready.is_file.return_value = False
@@ -117,23 +107,24 @@ class GuardTests(unittest.TestCase):
         ):
             self.assertEqual(guard.main(), 1)
 
-    def test_run_rejects_existing_table_before_policy_install(self):
+    def test_run_replaces_its_own_table_in_one_atomic_transaction(self):
+        # A restarted guard must reinstall over its surviving table, in a single nft input.
         with patch.dict(guard.os.environ, {"LOGWIZZ_EGRESS_ALLOW": "198.18.0.2:8080"}):
             with patch.object(guard.pathlib.Path, "mkdir"), patch.object(
                 guard.os, "open", return_value=42
-            ), patch.object(guard.os, "close") as close, patch.object(
-                guard, "table_exists", return_value=True
-            ), patch.object(guard, "nft") as nft:
-                with self.assertRaisesRegex(RuntimeError, "already exists"):
+            ), patch.object(guard, "nft", side_effect=[None, None, RuntimeError("stop")]) as nft:
+                with self.assertRaisesRegex(RuntimeError, "stop"):
                     guard.run()
-                close.assert_called_once_with(42)
-                nft.assert_not_called()
+        for call in nft.call_args_list[:2]:
+            policy = call.kwargs["input_data"]
+            self.assertTrue(policy.startswith(f"table inet {guard.TABLE}\ndelete table inet {guard.TABLE}\n"))
+            self.assertIn("policy drop;", policy)
 
     def test_run_aborts_if_policy_validation_fails(self):
         with patch.dict(guard.os.environ, {"LOGWIZZ_EGRESS_ALLOW": "198.18.0.2:8080"}):
             with patch.object(guard.pathlib.Path, "mkdir"), patch.object(
                 guard.os, "open", return_value=42
-            ), patch.object(guard, "table_exists", return_value=False), patch.object(
+            ), patch.object(
                 guard, "nft", side_effect=RuntimeError("simulated nft validation failure")
             ) as nft:
                 with self.assertRaisesRegex(RuntimeError, "simulated nft validation failure"):

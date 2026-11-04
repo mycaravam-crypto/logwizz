@@ -68,15 +68,6 @@ def nft(*args: str, input_data: str | None = None) -> str:
     return result.stdout
 
 
-def table_exists() -> bool:
-    data = json.loads(nft("-j", "list", "tables"))
-    return any(
-        item.get("table", {}).get("name") == TABLE
-        and item["table"].get("family") == "inet"
-        for item in data.get("nftables", [])
-    )
-
-
 def counter_change(last: int, current: int) -> tuple[int, bool]:
     """Return new denied packets and whether an unexpected reset occurred."""
     if current < last:
@@ -116,11 +107,10 @@ def run() -> None:
     # A dedicated named Docker volume is trusted. Never share it with the app.
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
-    policy = ruleset(allowed)
-    # Refuse to overwrite any existing policy. No flushing of host or Docker rules.
-    if table_exists():
-        os.close(fd)
-        raise RuntimeError(f"table {TABLE} already exists; refusing to replace it")
+    # One atomic nft transaction: a restarted guard replaces its own table with no moment
+    # of open egress, and a failed install leaves the old policy enforcing. Only this table
+    # is touched; declaring it first makes the delete valid on a first start.
+    policy = f"table inet {TABLE}\ndelete table inet {TABLE}\n" + ruleset(allowed)
     nft("-c", "-f", "-", input_data=policy)
     nft("-f", "-", input_data=policy)
     signal.signal(signal.SIGTERM, on_stop)
