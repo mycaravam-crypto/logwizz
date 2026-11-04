@@ -13,6 +13,7 @@ Use this page to find the right level of detail.
 - [Detection guide](DETECTION.md): configure firewall logging and detect port scans, SSH brute force, scanner probes and log floods.
 - [Runtime detection](RUNTIME-DETECTION.md): optional; programs started by a service user and changes to identity files, from the Linux audit log.
 - [Fail2ban integration](FAIL2BAN.md): optional, standalone bridge from selected detection events to Fail2ban.
+- [Docker egress guard](DOCKER-EGRESS.md): optional per-bridge outbound allowlist, blocked-egress alerts and isolated test.
 - [Notification operations](NOTIFICATIONS.md): Telegram setup, aggregation windows, delivery guarantees and security.
 - [Benchmarks](BENCHMARKS.md): performance methodology and results.
 - [Host verification](HOST-VERIFICATION.md): real systemd service validation and filesystem access.
