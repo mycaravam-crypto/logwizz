@@ -70,5 +70,8 @@ fn firewall_template_preserves_same_bridge_traffic() {
     let deny = template
         .find("iifname \"br-logwizz\" counter drop")
         .expect("egress deny rule");
-    assert!(internal < deny, "same-bridge exception must precede the drop");
+    assert!(
+        internal < deny,
+        "same-bridge exception must precede the drop"
+    );
 }
