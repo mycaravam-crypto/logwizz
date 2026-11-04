@@ -50,3 +50,13 @@ fn docker_egress_rule_captures_denied_connections_only() {
     assert!(!pattern.is_match(allowed));
     assert!(!pattern.is_match("logwizz-egress-deny: unstructured noise"));
 }
+
+#[test]
+fn firewall_template_requires_explicit_destination_and_port() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("packaging/docker/logwizz-egress.nft");
+    let template = fs::read_to_string(path).unwrap();
+    assert!(template.contains("<ALLOW_IPV4>"));
+    assert!(template.contains("<ALLOW_TCP_PORT>"));
+    assert!(!template.contains("192.0.2.10"));
+}
