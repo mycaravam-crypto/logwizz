@@ -21,7 +21,9 @@ systemd units, Fail2ban bridge, and host-level Docker firewall rules.
   are dropped. Established replies and namespace loopback work.
 - The guard polls an nftables deny **packet counter**, writing aggregated
   events such as `logwizz-egress-deny: packets=3 total_packets=8` to the
-  shared file. **No destination address, port, or source container identity
+  shared file. An unexpected counter reset emits a separate
+  `docker_egress_counter_reset` error event; it does not silently erase
+  the observation or terminate monitoring. **No destination address, port, or source container identity
   is available** in these events. Do not present them as packet-level IDS.
 - DNS via Docker's embedded loopback resolver (`127.0.0.11`) can be
   permitted by the loopback exception. It represents a possible DNS
