@@ -68,6 +68,22 @@ def nft(*args: str, input_data: str | None = None) -> str:
     return result.stdout
 
 
+def table_exists() -> bool:
+    data = json.loads(nft("-j", "list", "tables"))
+    return any(
+        item.get("table", {}).get("name") == TABLE
+        and item["table"].get("family") == "inet"
+        for item in data.get("nftables", [])
+    )
+
+
+def counter_change(last: int, current: int) -> tuple[int, bool]:
+    """Return new denied packets and whether an unexpected reset occurred."""
+    if current < last:
+        return 0, True
+    return current - last, False
+
+
 def denied_packets() -> int:
     data = json.loads(nft("-j", "list", "counter", "inet", TABLE, COUNTER))
     for entry in data.get("nftables", []):
@@ -102,11 +118,7 @@ def run() -> None:
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     policy = ruleset(allowed)
     # Refuse to overwrite any existing policy. No flushing of host or Docker rules.
-    try:
-        nft("list", "table", "inet", TABLE)
-    except RuntimeError:
-        pass
-    else:
+    if table_exists():
         os.close(fd)
         raise RuntimeError(f"table {TABLE} already exists; refusing to replace it")
     nft("-c", "-f", "-", input_data=policy)
@@ -118,12 +130,13 @@ def run() -> None:
     with os.fdopen(fd, "a", encoding="ascii", buffering=1) as events:
         while not STOP:
             current = denied_packets()  # Failure ends the health loop; never drop enforcement.
-            if current < last:
-                raise RuntimeError("egress deny counter unexpectedly reset")
-            if current > last:
-                delta = current - last
+            delta, reset = counter_change(last, current)
+            if reset:
+                # Reset is suspicious; alert instead of silently suppressing it or crashing.
+                events.write(f"logwizz-egress-counter-reset: previous={last} current={current}\n")
+            elif delta:
                 events.write(f"logwizz-egress-deny: packets={delta} total_packets={current}\n")
-                last = current
+            last = current
             READY.touch()
             time.sleep(1)
     # Intentionally do NOT delete nftables rules while a protected app may still run.
