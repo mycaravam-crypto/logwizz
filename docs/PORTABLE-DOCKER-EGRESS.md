@@ -37,6 +37,17 @@ container, not the application. Compose requires `depends_on` with
 `condition: service_healthy` so the app starts only after `nftables`
 installation and the guard's heartbeat have been verified.
 
+## Sending alerts
+
+The monitor writes each event to stdout and to `/data/events.jsonl`, keeping one
+rotated copy. A separate `notify` container runs the **unmodified** `logwizz-notify`
+binary, so the token and the network stay away from the process that parses logs.
+That binary reads events through `journalctl`, and containers have no journal, so
+the image puts a small `journalctl` script first on `PATH` that presents the event
+file in the same JSON format. Settings are those of [NOTIFICATIONS.md](NOTIFICATIONS.md).
+
+Limit: events rotated away while the notifier is down are not delivered.
+
 ## Linux disposable-host smoke test
 
 Use a disposable Docker Engine. Do not run this on a production host.
@@ -54,6 +65,7 @@ a fixed-IP test endpoint, and the LogWizz monitor. It proves:
    increments (so an unrelated connection refusal cannot count as success).
 3. LogWizz emits a `docker_egress_denied_aggregate` event.
 4. Allowed access still works after the denial.
+5. The real `logwizz-notify` delivers a summary over HTTPS, without the raw log line.
 
 All containers, test volumes, and the test network are removed on exit.
 The test uses a fixed test-only subnet (`172.31.244.0/24`); Docker will
@@ -79,6 +91,10 @@ not establish Windows compatibility.
   before guard installation may survive, and the allowlist does not follow
   DNS changes or runtime-configured ERP source hosts. A separate integration
   step must implement and test an operator-managed deployment policy.
+- A restarted guard atomically replaces its own table, so rules stay enforced
+  throughout. For the application to survive that, a separate do-nothing container
+  must own the network namespace, with guard and application both joining it.
+  Otherwise a guard restart leaves the application in a namespace with no network.
 - A guard crash, namespace replacement, or Docker restart changes lifecycle
   conditions. Prove fail-closed behavior across restarts before production
   use; `depends_on` governs startup only, not ongoing enforcement.

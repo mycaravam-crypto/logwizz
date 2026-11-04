@@ -1,0 +1,25 @@
+#!/bin/sh
+# Stands in for journalctl, which logwizz-notify reads events from: there is no journal
+# in a container, so this presents the monitor's event file in journalctl's JSON format.
+# Each event's ts is its cursor, so a restarted notifier resumes after the last one it saw.
+# ponytail: resumes from the current event file only; events rotated away while the notifier is down are lost.
+set -eu
+file=${LOGWIZZ_EVENTS_FILE:-/alerts/events.jsonl}
+after=
+start=-n0
+priority=warning
+for arg in "$@"; do
+    case $arg in
+        --help) echo "--namespace"; exit 0 ;;
+        --after-cursor=*) after=${arg#*=}; start=-n+1 ;;
+        --priority=*) priority=${arg#*=} ;;
+    esac
+done
+exec tail "$start" -F "$file" 2>/dev/null | exec jq --unbuffered -Rc --arg after "$after" --arg min "$priority" '
+    {debug: 7, info: 6, notice: 5, warning: 4, err: 3, error: 3, crit: 2, critical: 2} as $rank
+    | . as $line
+    | (fromjson? // empty)
+    | select(.ts > $after)
+    | select($rank[.severity] <= ($rank[$min] // ($min | tonumber)))
+    | {__CURSOR: .ts, MESSAGE: $line, _HOSTNAME: .host,
+       __REALTIME_TIMESTAMP: (.ts | sub("\\.[0-9]+"; "") | fromdate * 1000000 | tostring)}'

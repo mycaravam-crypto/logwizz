@@ -4,9 +4,17 @@ set -eu
 COMPOSE_FILE=packaging/compose/compose.test.yml
 COMPOSE_PROJECT_NAME=logwizz-portable-test
 export COMPOSE_PROJECT_NAME
+TEST_CERTS=$(mktemp -d)
+export TEST_CERTS
 clean() {
     docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
+    rm -rf "$TEST_CERTS"
 }
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=sink -addext subjectAltName=DNS:sink \
+    -keyout "$TEST_CERTS/key" -out "$TEST_CERTS/cert" 2>/dev/null
+cat "$TEST_CERTS/key" "$TEST_CERTS/cert" > "$TEST_CERTS/sink.pem"
+chmod 755 "$TEST_CERTS"
+chmod 644 "$TEST_CERTS/sink.pem" "$TEST_CERTS/cert"
 trap clean EXIT INT TERM
 
 docker compose -f "$COMPOSE_FILE" up -d --build --wait
@@ -40,4 +48,22 @@ if [ "$ok" != 1 ]; then
     exit 1
 fi
 docker compose -f "$COMPOSE_FILE" exec -T app wget -q -T 5 -O /dev/null http://172.31.244.10:8080/
-echo "PASS: allowed egress, denied egress, nftables counter, LogWizz event, recovery"
+# The real notifier delivers a summary over HTTPS, without the raw log line.
+ok=0
+for _ in $(seq 1 40); do
+    if docker compose -f "$COMPOSE_FILE" logs --no-color sink | grep -q '"rule":"docker_egress_denied_aggregate"'; then
+        ok=1
+        break
+    fi
+    sleep 1
+done
+if [ "$ok" != 1 ]; then
+    echo "FAIL: logwizz-notify delivered no summary" >&2
+    docker compose -f "$COMPOSE_FILE" logs notify sink logwizz
+    exit 1
+fi
+if docker compose -f "$COMPOSE_FILE" logs --no-color sink | grep -q 'logwizz-egress-deny'; then
+    echo "FAIL: raw log line left the host" >&2
+    exit 1
+fi
+echo "PASS: allowed egress, denied egress, nftables counter, LogWizz event, recovery, notification"

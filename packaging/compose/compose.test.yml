@@ -41,6 +41,7 @@ services:
       context: ../..
       dockerfile: packaging/compose/monitor/Dockerfile
     user: "logwizz"
+    init: true
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -49,9 +50,38 @@ services:
         condition: service_healthy
     volumes:
       - guard-events:/events:ro
+      - monitor-data:/data
+
+  notify:
+    build:
+      context: ../..
+      dockerfile: packaging/compose/notify/Dockerfile
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NOTIFY_KIND: webhook
+      NOTIFY_URL: https://sink:8443/
+      NOTIFY_WINDOW_SECS: "10"
+      CURL_CA_BUNDLE: /certs/cert
+    depends_on: [logwizz, sink]
+    volumes:
+      - monitor-data:/alerts:ro
+      - notify-state:/var/lib/logwizz-notify
+      - ${TEST_CERTS:?}:/certs:ro
+
+  sink:
+    image: python:3.13-alpine
+    command: ["python3", "-u", "/test_sink.py"]
+    volumes:
+      - ./notify/test_sink.py:/test_sink.py:ro
+      - ${TEST_CERTS:?}:/certs:ro
 
 volumes:
   guard-events:
+  monitor-data:
+  notify-state:
 
 networks:
   default:
