@@ -22,14 +22,17 @@ nftables blocks the connection; LogWizz reports the denied attempt. This is
          com.docker.network.bridge.name: br-logwizz
    ```
 
-2. Start the network, then edit `packaging/docker/logwizz-egress.nft`:
-   replace `192.0.2.10` with the **IPv4 destinations** your app actually needs,
-   and adjust the allowed TCP port (443 by default). Use stable destination
-   addresses; DNS names are not supported. Review the whole file before applying.
+2. Start the network, then copy the **intentionally non-loadable template**
+   to a local deployment file. Replace `<ALLOW_IPV4>` and `<ALLOW_TCP_PORT>`
+   with the required **IPv4 destination** and TCP port. The unmodified
+   template fails `nft -c` instead of silently using example values.
+   Use stable destination addresses; DNS names are not supported.
 
    ```sh
-   sudo nft -c -f packaging/docker/logwizz-egress.nft
-   sudo nft -f packaging/docker/logwizz-egress.nft
+   cp packaging/docker/logwizz-egress.nft /tmp/logwizz-egress.nft
+   ${EDITOR:-vi} /tmp/logwizz-egress.nft
+   sudo nft -c -f /tmp/logwizz-egress.nft
+   sudo nft -f /tmp/logwizz-egress.nft
    sudo nft list table inet logwizz_egress
    ```
 
