@@ -59,3 +59,19 @@ fn firewall_template_requires_explicit_destination_and_port() {
     assert!(template.contains("<ALLOW_TCP_PORT>"));
     assert!(!template.contains("192.0.2.10"));
 }
+
+#[test]
+fn firewall_template_preserves_same_bridge_traffic() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/docker/logwizz-egress.nft");
+    let template = fs::read_to_string(path).unwrap();
+    let internal = template
+        .find("iifname \"br-logwizz\" oifname \"br-logwizz\" accept")
+        .expect("same-bridge exemption is required with br_netfilter");
+    let deny = template
+        .find("iifname \"br-logwizz\" counter drop")
+        .expect("egress deny rule");
+    assert!(
+        internal < deny,
+        "same-bridge exception must precede the drop"
+    );
+}

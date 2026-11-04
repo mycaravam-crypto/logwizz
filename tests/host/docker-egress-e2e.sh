@@ -29,6 +29,7 @@ docker image inspect "$IMAGE" >/dev/null || {
 }
 # Fail rather than take over or delete any pre-existing network resources.
 ! docker network inspect "$NET" >/dev/null 2>&1 || { echo "$NET exists" >&2; exit 1; }
+! docker container inspect "$NET-internal" >/dev/null 2>&1 || { echo "$NET-internal exists" >&2; exit 1; }
 ! nft list table inet "$TABLE" >/dev/null 2>&1 || { echo "$TABLE exists" >&2; exit 1; }
 ! ip link show "$UPLINK" >/dev/null 2>&1 || { echo "$UPLINK exists" >&2; exit 1; }
 ! ip netns list | grep -q "^$NS " || { echo "$NS exists" >&2; exit 1; }
@@ -37,11 +38,13 @@ TMP="$(mktemp -d)"
 LW_PID=""
 HTTP1=""
 HTTP2=""
+INTERNAL=""
 cleanup() {
     set +e
     [[ -z $LW_PID ]] || { kill "$LW_PID" 2>/dev/null; wait "$LW_PID" 2>/dev/null; }
     [[ -z $HTTP1 ]] || { kill "$HTTP1" 2>/dev/null; wait "$HTTP1" 2>/dev/null; }
     [[ -z $HTTP2 ]] || { kill "$HTTP2" 2>/dev/null; wait "$HTTP2" 2>/dev/null; }
+    [[ -z $INTERNAL ]] || docker rm -f "$INTERNAL" >/dev/null 2>&1
     nft delete table inet "$TABLE" >/dev/null 2>&1
     docker network rm "$NET" >/dev/null 2>&1
     ip netns del "$NS" >/dev/null 2>&1
@@ -84,6 +87,15 @@ LW_PID=$!
 sleep 2
 kill -0 "$LW_PID" || { cat "$TMP/logwizz.err" >&2; exit 1; }
 START="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+# When br_netfilter is enabled, same-bridge traffic may traverse inet forward.
+# It must remain allowed independently of the egress destination allowlist.
+docker run -d --pull never --name "$NET-internal" --network "$NET" "$IMAGE" \
+    sh -c 'mkdir -p /www; echo internal >/www/index.html; busybox httpd -f -p 8080 -h /www' >/dev/null
+INTERNAL="$NET-internal"
+sleep 1
+docker run --rm --pull never --network "$NET" "$IMAGE" \
+    wget -q -T 5 -O /dev/null "http://$INTERNAL:8080/"
 
 # Both endpoints exist. Only the approved port should be reachable.
 docker run --rm --pull never --network "$NET" "$IMAGE" \

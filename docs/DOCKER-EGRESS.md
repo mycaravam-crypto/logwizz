@@ -40,7 +40,9 @@ nftables blocks the connection; LogWizz reports the denied attempt. This is
    `drop` is authoritative; an `accept` here does **not** override another
    firewall chain's drop. All **new** forwarded IPv6 traffic from the selected
    bridge is denied, even if Docker enables IPv6. Already-established
-   connections continue. No other Docker network is intentionally affected.
+   connections continue. Traffic between containers on the **same** bridge
+   is explicitly allowed, including when Linux `br_netfilter` passes bridged
+   packets through the inet forward hook. No other Docker network is intentionally affected.
 
 3. To detect denied traffic, merge the `[journal]` and `[[rules]]` blocks from
    `config/docker-egress.toml` into the existing LogWizz config, or use that
@@ -88,9 +90,10 @@ the reviewed table into your host's existing firewall management when ready.
 
 ## Boundaries
 
-- Only traffic **forwarded from `br-logwizz`** is controlled. Same-bridge
-  traffic, container-to-host INPUT traffic, host-network containers, host
-  processes, and Docker's embedded DNS forwarding are not covered.
+- Only traffic **forwarded from `br-logwizz`** to other interfaces is controlled.
+  Same-bridge traffic is exempt (not isolated), including with `br_netfilter`.
+  Container-to-host INPUT traffic, host-network containers, host processes,
+  and Docker's embedded DNS forwarding are not covered.
 - Approved outbound endpoints may still be abused. Encrypted traffic is not
   inspected. Existing connections are not terminated on policy installation.
 - Events identify the container's **source IP at the time**, not its durable
