@@ -1,0 +1,25 @@
+# OPTIONAL, standalone Docker egress TEMPLATE; intentionally invalid until configured.
+# Replace <ALLOW_IPV4> and <ALLOW_TCP_PORT> with real deployment values.
+# Verify with nft -c -f before installing. Never apply with placeholders.
+# Never flush the full ruleset: Docker owns its own firewall rules.
+# Apply only after the bridge interface exists. Uninstall: nft delete table inet logwizz_egress
+table inet logwizz_egress {
+    set https_v4 {
+        type ipv4_addr
+        flags interval
+        elements = { <ALLOW_IPV4> }
+    }
+
+    chain forward {
+        type filter hook forward priority -50; policy accept;
+
+        # Scope every rule to this dedicated Docker bridge; do not affect other networks.
+        # Existing connections can continue; this profile gates NEW outbound flows.
+        iifname "br-logwizz" ct state established,related accept
+        iifname "br-logwizz" ip daddr @https_v4 tcp dport <ALLOW_TCP_PORT> accept
+
+        # Rate limiting caps log volume, NOT blocking; IPv6 and non-TCP are denied too.
+        iifname "br-logwizz" limit rate 5/second burst 10 packets log prefix "logwizz-egress-deny: " level warn
+        iifname "br-logwizz" counter drop
+    }
+}

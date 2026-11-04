@@ -1,0 +1,27 @@
+# Optional Docker egress detection profile for hosts with journald.
+# Merge the [journal] and [[rules]] sections into an existing logwizz config.
+# Log source MUST be trusted kernel messages, not container/application logs.
+# Requires packaging/docker/logwizz-egress.nft to log blocked forwarded traffic.
+
+[general]
+state_file = "/var/lib/logwizz/offsets.json"
+
+[output]
+format = "json"
+syslog_prefix = true
+
+[journal]
+matches = ["_TRANSPORT=kernel"]
+
+[[rules]]
+id = "docker_egress_denied"
+description = "Docker bridge attempted a disallowed outbound connection"
+match_type = "regex"
+pattern = 'logwizz-egress-deny: .*SRC=(?P<src>[0-9A-Fa-f:.]+) DST=(?P<dst>[0-9A-Fa-f:.]+) .*PROTO=(?P<proto>[A-Za-z0-9]+)(?: .*DPT=(?P<dpt>[0-9]+))?'
+severity = "warning"
+
+[rules.threshold]
+group_by = "src"
+count = 1
+window_secs = 60
+cooldown_secs = 300
