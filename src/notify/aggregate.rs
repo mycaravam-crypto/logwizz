@@ -749,7 +749,7 @@ mod tests {
         s.add(&d);
         assert!(
             s.to_telegram_html(false)
-                .contains("\n\n<b>1×</b> <code>usermod · add 'deploy' to group 'sudo'</code>\n"),
+                .contains("<b>Source:</b> <code>usermod · add 'deploy' to group 'sudo'</code>"),
             "{}",
             s.to_telegram_html(false)
         );
