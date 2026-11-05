@@ -75,11 +75,19 @@ Detection example:
 🟡 Logwizz security alert
 Event: ssh_probe
 Severity: warning
-Host: web1
+Host: 🟪 web1
 Events: 3
 Source: 203.0.113.8
 Window (UTC): 2026-10-25 13:40 – 2026-10-25 13:41
 ```
+
+Host labels include a stable, pseudo-random-looking colored-square emoji. The
+marker comes from a deterministic hostname hash using a fixed palette (red,
+orange, green, blue, purple, brown). It does not change across restarts;
+unknown/multiple hosts use a neutral marker. Host color is only a visual cue:
+severity retains its separate icon, host text remains explicit, and different
+hosts may map to the same color. Telegram HTML does not support arbitrary
+text colors or backgrounds. This does not change webhook JSON or ntfy output.
 
 For multiple sources, up to five are listed with their counts. Full dates are
 shown at both ends of the UTC window, including windows crossing midnight.
