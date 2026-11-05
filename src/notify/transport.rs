@@ -298,7 +298,7 @@ mod tests {
         assert!(
             telegram
                 .request_action(&ban)
-                .contains("Fail2ban actionban reported")
+                .contains("Ban reported (not verified)")
         );
     }
 
@@ -357,7 +357,7 @@ mod tests {
         assert!(r.contains("url = \"https://api.telegram.org/bot123:ABC/sendMessage\"\n"));
         assert!(r.contains("data-urlencode = \"chat_id=-100123\"\n"));
         assert!(
-            r.contains("data-urlencode = \"text=🔵 <b>say \\\"hi\\\"\\\\</b>\\n"),
+            r.contains("data-urlencode = \"text=🔵 <b>Logwizz security alert</b>\\n"),
             "{r}"
         );
         assert!(r.contains("data-urlencode = \"parse_mode=HTML\"\n"));
