@@ -427,11 +427,11 @@ fn closed_windows_are_sent_without_stopping() {
     let text = form.iter().find_map(|f| f.strip_prefix("text=")).unwrap();
     assert!(form.contains(&"parse_mode=HTML"));
     assert!(
-        text.contains("\n<code>ssh</code> · warning · test-host\n\n"),
+        text.contains("\n<b>Event:</b> <code>ssh</code>\n<b>Severity:</b> warning\n<b>Host:</b> <code>test-host</code>\n"),
         "{text}"
     );
     assert!(
-        text.contains("\n<b>2×</b> from <code>192.0.2.1</code>\n"),
+        text.contains("\n<b>Events:</b> 2\n<b>Source:</b> <code>192.0.2.1</code>\n"),
         "{text}"
     );
     assert!(!text.contains("Partial"), "{text}");
