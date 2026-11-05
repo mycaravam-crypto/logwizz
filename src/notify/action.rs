@@ -222,11 +222,9 @@ mod tests {
                 .to_telegram_html()
                 .contains("<b>Event:</b> <code>fail2ban_action</code>")
         );
-        assert!(
-            report
-                .to_telegram_html()
-                .contains("<b>Host:</b> 🟪 <code>web1</code>")
-        );
+        let host_marker = super::super::host_badge(&report.host);
+        let expected_host = format!("<b>Host:</b> {host_marker} <code>web1  bad</code>");
+        assert!(report.to_telegram_html().contains(&expected_host));
         assert!(
             report
                 .to_telegram_html()
