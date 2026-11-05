@@ -63,22 +63,41 @@ Invalid settings stop the notifier with exit code 2 and a message that names the
 
 ## Telegram message format
 
-Telegram messages use HTML formatting: the rule's description as a headline
-with a severity marker (🔴 critical, 🟠 error, 🟡 warning, 🔵 notice), the rule,
-severity and host, the count with its sources (tap a source to copy it) and the
-window in UTC:
+Telegram messages use a fixed English-labelled template for detection summaries and
+Fail2ban action reports. All notifications start with `Logwizz security alert`,
+followed by event ID, severity, host, event count, source information, and UTC
+timing. Rule descriptions remain in structured events and webhook JSON, but are
+not used as Telegram headlines: custom descriptions may use any language.
+
+Detection example:
 
 ```text
-🟡 SSH connection without a valid client banner
-ssh_probe · warning · web1
-
-3× from 203.0.113.8
-🕐 2026-10-25 13:40–13:41 UTC
+🟡 Logwizz security alert
+Event: ssh_probe
+Severity: warning
+Host: 🟪 web1
+Events: 3
+Source: 203.0.113.8
+Window (UTC): 2026-10-25 13:40 – 2026-10-25 13:41
 ```
 
-With several sources, the five most frequent are listed one per line with
-their counts. ntfy receives the plain-text form shown under
-[Other transports](#other-transports).
+Host labels include a stable, pseudo-random-looking colored-square emoji. The
+marker comes from a deterministic hostname hash using a fixed palette (red,
+orange, green, blue, purple, brown). It does not change across restarts;
+unknown/multiple hosts use a neutral marker. Host color is only a visual cue:
+severity retains its separate icon, host text remains explicit, and different
+hosts may map to the same color. Telegram HTML does not support arbitrary
+text colors or backgrounds. This does not change webhook JSON or ntfy output.
+
+For multiple sources, up to five are listed with their counts. Full dates are
+shown at both ends of the UTC window, including windows crossing midnight.
+The existing Telegram HTML encoding escapes variable fields, and source
+addresses remain selectable as code-formatted text.
+
+A reported Fail2ban ban uses the same labels, with Jail, Ban duration,
+Status and Reported at (UTC) fields. A reported ban is explicitly marked
+`Ban reported (not verified)` unless the dedicated nftables verification
+path supplied evidence; a report is not proof of blocked packets.
 
 ## Optional rule allowlist
 

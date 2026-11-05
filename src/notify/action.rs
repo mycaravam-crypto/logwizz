@@ -108,29 +108,42 @@ impl BanReport {
         )
     }
 
+    /// Uses the same English, labelled Telegram layout as detection summaries.
     pub fn to_telegram_html(&self) -> String {
-        let time = if self.bantime_secs == -1 {
+        let duration = if self.bantime_secs == -1 {
             "permanent".to_owned()
         } else {
             format!("{} s", self.bantime_secs)
         };
-        let (headline, evidence) = if self.verified {
+        let (status, evidence) = if self.verified {
             (
-                "Fail2ban nftables ban verified",
+                "Firewall rule verified",
                 "nftables set and input drop/reject rule present at report time",
             )
         } else {
             (
-                "Fail2ban actionban reported",
+                "Ban reported (not verified)",
                 "Firewall enforcement not independently verified",
             )
         };
         format!(
-            "🛡 <b>{headline}</b>\n{} · {}\n<code>{}</code> · {}\n<i>{evidence}</i>",
-            escape(&self.jail),
+            "🟡 <b>Logwizz security alert</b>\n\
+             <b>Event:</b> <code>fail2ban_action</code>\n\
+             <b>Severity:</b> warning\n\
+             <b>Host:</b> {} <code>{}</code>\n\
+             <b>Events:</b> 1\n\
+             <b>Jail:</b> <code>{}</code>\n\
+             <b>Source:</b> <code>{}</code>\n\
+             <b>Ban duration:</b> {}\n\
+             <b>Status:</b> {status}\n\
+             <b>Reported at (UTC):</b> {}\n\
+             <i>{evidence}</i>",
+            super::host_badge(&self.host),
             escape(&self.host),
+            escape(&self.jail),
             escape(&self.ip),
-            time
+            duration,
+            crate::event::format_rfc3339_secs(self.time),
         )
     }
 
@@ -204,6 +217,19 @@ mod tests {
         );
         assert!(report.to_text().contains("nftables ban verified"));
         assert!(report.to_telegram_html().contains("input drop/reject rule"));
+        assert!(
+            report
+                .to_telegram_html()
+                .contains("<b>Event:</b> <code>fail2ban_action</code>")
+        );
+        let host_marker = super::super::host_badge(&report.host);
+        let expected_host = format!("<b>Host:</b> {host_marker} <code>web1  bad</code>");
+        assert!(report.to_telegram_html().contains(&expected_host));
+        assert!(
+            report
+                .to_telegram_html()
+                .contains("<b>Status:</b> Firewall rule verified")
+        );
         let saved = serde_json::to_value(&report).unwrap();
         let restored: BanReport = serde_json::from_value(saved).unwrap();
         assert_eq!(restored, report);

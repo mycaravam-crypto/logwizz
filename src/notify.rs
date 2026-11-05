@@ -35,6 +35,40 @@ use action::BanReport;
 use aggregate::{Aggregator, Detection, Key, NotAnEvent, Recorded, Summary};
 use transport::{Curl, Deliver, Kind};
 
+/// Stable, random-looking host marker for Telegram messages.
+/// Telegram Bot API HTML does not support arbitrary font/background colors.
+/// Using a fixed palette avoids unreadable colors and a host changing color
+/// across notifier restarts. This is visual identification, not authentication.
+fn host_badge(host: &str) -> &'static str {
+    const PALETTE: [&str; 6] = ["🟥", "🟧", "🟩", "🟦", "🟪", "🟫"];
+    if host.is_empty() || host == "unknown" || host == "multiple" {
+        return "🔳";
+    }
+    // FNV-1a (64-bit), deterministic across Rust processes and platforms.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in host.bytes() {
+        hash ^= u64::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    PALETTE[(hash % PALETTE.len() as u64) as usize]
+}
+
+#[cfg(test)]
+mod host_badge_tests {
+    use super::host_badge;
+
+    #[test]
+    fn stable_badge_per_host() {
+        assert_eq!(host_badge("webdbapilogdb"), "🟧");
+        assert_eq!(host_badge("web1"), "🟪");
+        assert_eq!(host_badge("WEB1"), host_badge("web1"));
+        assert_eq!(host_badge("web2"), "🟧");
+        assert_eq!(host_badge("multiple"), "🔳");
+        assert_eq!(host_badge("unknown"), "🔳");
+        assert_eq!(host_badge(""), "🔳");
+    }
+}
+
 const STATE_VERSION: u32 = 1;
 const STATE_FILE: &str = "state.json";
 /// Journal entries buffered between the reader thread and the main loop.
