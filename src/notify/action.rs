@@ -217,9 +217,21 @@ mod tests {
         );
         assert!(report.to_text().contains("nftables ban verified"));
         assert!(report.to_telegram_html().contains("input drop/reject rule"));
-        assert!(report.to_telegram_html().contains("<b>Event:</b> <code>fail2ban_action</code>"));
-        assert!(report.to_telegram_html().contains("<b>Host:</b> 🟪 <code>web1</code>"));
-        assert!(report.to_telegram_html().contains("<b>Status:</b> Firewall rule verified"));
+        assert!(
+            report
+                .to_telegram_html()
+                .contains("<b>Event:</b> <code>fail2ban_action</code>")
+        );
+        assert!(
+            report
+                .to_telegram_html()
+                .contains("<b>Host:</b> 🟪 <code>web1</code>")
+        );
+        assert!(
+            report
+                .to_telegram_html()
+                .contains("<b>Status:</b> Firewall rule verified")
+        );
         let saved = serde_json::to_value(&report).unwrap();
         let restored: BanReport = serde_json::from_value(saved).unwrap();
         assert_eq!(restored, report);
