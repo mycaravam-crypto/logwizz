@@ -763,33 +763,35 @@ mod tests {
         d.description = "Probe <script> & co".into();
         let mut s = Summary::new(&d, t, 60);
         s.add(&d);
-        assert_eq!(
-            s.to_telegram_html(false),
-            "🟡 <b>Probe &lt;script&gt; &amp; co</b>\n<code>ssh_probe</code> · warning · web1\n\n\
-             <b>1×</b> from <code>203.0.113.8</code>\n🕐 2026-10-25 13:40–13:41 UTC"
-        );
+        let msg = s.to_telegram_html(false);
+        assert!(msg.contains("<b>Logwizz security alert</b>"), "{msg}");
+        assert!(msg.contains("<b>Event:</b> <code>ssh_probe</code>"), "{msg}");
+        assert!(msg.contains("<b>Severity:</b> warning"), "{msg}");
+        assert!(msg.contains("<b>Host:</b> <code>web1</code>"), "{msg}");
+        assert!(msg.contains("<b>Events:</b> 1"), "{msg}");
+        assert!(msg.contains("<b>Source:</b> <code>203.0.113.8</code>"), "{msg}");
+        assert!(msg.contains("<b>Window (UTC):</b> 2026-10-25 13:40 – 2026-10-25 13:41"), "{msg}");
+        assert!(!msg.contains("Probe <script>"), "free-form description must not be a headline");
+
         let other = det(t, "ssh_probe", Some("<b>"));
         for _ in 0..4 {
             s.add(&other);
         }
         let multi = s.to_telegram_html(true);
-        assert!(
-            multi.contains(
-                "<b>5×</b> from 2 sources\n<code>&lt;b&gt;</code>  4\n<code>203.0.113.8</code>  1"
-            ),
-            "{multi}"
-        );
-        assert!(
-            multi.ends_with("\n⚠️ <i>Partial window (shutdown or delayed delivery)</i>"),
-            "{multi}"
-        );
+        assert!(multi.contains("<b>Events:</b> 5"), "{multi}");
+        assert!(multi.contains("<b>Sources:</b> 2"), "{multi}");
+        assert!(multi.contains("<code>&lt;b&gt;</code> × 4"), "{multi}");
+        assert!(multi.ends_with("\n<i>Partial window (shutdown or delayed delivery)</i>"), "{multi}");
+
         let mut none = Summary::new(&det(t, "log_flood", None), t, 60);
         none.add(&det(t, "log_flood", None));
-        assert!(
-            none.to_telegram_html(false).contains("\n\n<b>1×</b>\n🕐"),
-            "{}",
-            none.to_telegram_html(false)
-        );
+        assert!(none.to_telegram_html(false).contains("<b>Source:</b> not available"));
+
+        // Full dates are mandatory when an aggregation window crosses midnight.
+        let mut midnight = Summary::new(&det(86_370, "x", None), 86_340, 120);
+        midnight.add(&det(86_370, "x", None));
+        let output = midnight.to_telegram_html(false);
+        assert!(output.contains("1970-01-01 23:59 – 1970-01-02 00:01"), "{output}");
     }
 
     #[test]
