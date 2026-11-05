@@ -383,10 +383,11 @@ impl Summary {
             "{icon} <b>Logwizz security alert</b>\n\
              <b>Event:</b> <code>{}</code>\n\
              <b>Severity:</b> {}\n\
-             <b>Host:</b> <code>{}</code>\n\
+             <b>Host:</b> {} <code>{}</code>\n\
              <b>Events:</b> {}\n",
             html(&self.rule),
             self.severity,
+            super::host_badge(&self.host),
             html(&self.host),
             self.count,
         );
@@ -767,7 +768,7 @@ mod tests {
         assert!(msg.contains("<b>Logwizz security alert</b>"), "{msg}");
         assert!(msg.contains("<b>Event:</b> <code>ssh_probe</code>"), "{msg}");
         assert!(msg.contains("<b>Severity:</b> warning"), "{msg}");
-        assert!(msg.contains("<b>Host:</b> <code>web1</code>"), "{msg}");
+        assert!(msg.contains("<b>Host:</b> 🟪 <code>web1</code>"), "{msg}");
         assert!(msg.contains("<b>Events:</b> 1"), "{msg}");
         assert!(msg.contains("<b>Source:</b> <code>203.0.113.8</code>"), "{msg}");
         assert!(msg.contains("<b>Window (UTC):</b> 2026-10-25 13:40 – 2026-10-25 13:41"), "{msg}");
