@@ -368,8 +368,9 @@ impl Summary {
         s
     }
 
-    /// The summary as Telegram HTML (`parse_mode=HTML`): headline, rule line,
-    /// counts with tap-to-copy sources, and a short UTC window.
+    /// Telegram rendering uses fixed English labels and rule identifiers.
+    /// Rule descriptions are user-provided and may use any language, so they
+    /// remain in the structured event but are not used as Telegram headlines.
     pub fn to_telegram_html(&self, partial: bool) -> String {
         let icon = match self.severity {
             Severity::Critical => "🔴",
@@ -378,59 +379,48 @@ impl Summary {
             Severity::Notice => "🔵",
             Severity::Info | Severity::Debug => "⚪",
         };
-        let headline = if self.description.is_empty() {
-            &self.rule
-        } else {
-            &self.description
-        };
         let mut s = format!(
-            "{icon} <b>{}</b>\n<code>{}</code> · {} · {}\n\n",
-            html(headline),
+            "{icon} <b>Logwizz security alert</b>\n\
+             <b>Event:</b> <code>{}</code>\n\
+             <b>Severity:</b> {}\n\
+             <b>Host:</b> <code>{}</code>\n\
+             <b>Events:</b> {}\n",
             html(&self.rule),
             self.severity,
             html(&self.host),
+            self.count,
         );
-        if let Some(src) = self.single_source() {
-            let from = if self.addressed { " from" } else { "" };
-            s.push_str(&format!(
-                "<b>{}×</b>{from} <code>{}</code>",
-                self.count,
-                html(src)
-            ));
+        if let Some(source) = self.single_source() {
+            s.push_str(&format!("<b>Source:</b> <code>{}</code>\n", html(source)));
         } else if self.sources.is_empty() {
-            s.push_str(&format!("<b>{}×</b>", self.count));
+            s.push_str("<b>Source:</b> not available\n");
         } else {
             let top = self.top_sources();
             let approx = if self.sources_overflowed { "~" } else { "" };
-            let n = self.sources.len();
-            let noun = match (self.addressed, n == 1) {
-                (true, true) => " from 1 source".to_string(),
-                (true, false) => format!(" from {approx}{n} sources"),
-                (false, _) => String::new(),
-            };
-            s.push_str(&format!("<b>{}×</b>{noun}", self.count));
-            for t in &top {
-                s.push_str(&format!("\n<code>{}</code>  {}", html(&t.source), t.count));
+            s.push_str(&format!("<b>Sources:</b> {approx}{}\n", self.sources.len()));
+            for source in &top {
+                s.push_str(&format!(
+                    "<code>{}</code> × {}\n",
+                    html(&source.source),
+                    source.count
+                ));
             }
             if self.sources_overflowed {
-                s.push_str("\n… and more (approximate counts)");
+                s.push_str("… and more (approximate counts)\n");
             } else if self.sources.len() > top.len() {
-                s.push_str(&format!("\n… and {} more", self.sources.len() - top.len()));
+                s.push_str(&format!("… and {} more\n", self.sources.len() - top.len()));
             }
         }
-        // "2026-10-25T13:20:00Z" -> "2026-10-25 13:20–13:21 UTC"
-        let (start, end) = (
-            format_rfc3339_secs(self.bucket),
-            format_rfc3339_secs(self.window_end()),
-        );
+        // Include both full dates: a UTC window may cross midnight.
+        let start = format_rfc3339_secs(self.bucket);
+        let end = format_rfc3339_secs(self.window_end());
         s.push_str(&format!(
-            "\n🕐 {} {}–{} UTC",
-            &start[..10],
-            &start[11..16],
-            &end[11..16]
+            "<b>Window (UTC):</b> {} – {}",
+            start[..16].replace('T', " "),
+            end[..16].replace('T', " ")
         ));
         if partial {
-            s.push_str("\n⚠️ <i>Partial window (shutdown or delayed delivery)</i>");
+            s.push_str("\n<i>Partial window (shutdown or delayed delivery)</i>");
         }
         s
     }
