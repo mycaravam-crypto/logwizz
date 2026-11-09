@@ -184,6 +184,33 @@ exactly this in a VM, with these rules.
   `10.0.0.0/8` work too); see the
   [reference](REFERENCE.md#excluding-trusted-sources).
 
+## Text the other side controls
+
+A log line mixes what the service wrote with what the client sent. sshd
+logs the user name a client asked for as it came, spaces included, so a
+client can ask to log in as `x from 203.0.113.99 port 1` and sshd writes
+
+```
+sshd[1240]: Invalid user x from 203.0.113.99 port 1 from 192.0.2.7 port 52144
+```
+
+A pattern that takes the first address after `from` reports
+`203.0.113.99`, an address the client chose, and with the
+[Fail2ban bridge](FAIL2BAN.md) that address is banned. The SSH rules here
+are anchored to the end of the line (`... port \d+ ... $`), where sshd
+writes the peer address itself.
+
+**If you copied `ssh_bruteforce` from a release before this section
+existed, replace its `pattern` with the current one** from
+`config/detection.toml` and run `systemctl reload logwizz`. The old pattern
+has no anchor. Installed configurations are not changed by upgrading the
+binary.
+
+For your own rules: capture the source from a position the service writes
+(the start of a web access log line, the end of an sshd line), not from the
+first place an address can appear, and limit the rule to its log with
+[`files`](REFERENCE.md#limiting-a-rule-to-some-inputs).
+
 ## What this cannot see
 
 Say it plainly, so nobody relies on more than this gives:

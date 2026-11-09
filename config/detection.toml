@@ -124,7 +124,11 @@ match_type = "regex"
 # With PasswordAuthentication no, attempts on a real user (root) log no
 # "Failed" line, only how the connection ended. Invalid users are counted by
 # "Invalid user" alone, not again when their connection ends.
-pattern = 'sshd(?:-session)?\[\d+\]: (?:(?:Failed (?:password|publickey)|Invalid user) .*?from |(?:Connection (?:closed|reset) by|Disconnected from) authenticating user \S+ )(?P<src>[0-9A-Fa-f.:]+) port \d+'
+# Anchored to the end of the line: a user name is the client's text and may
+# itself read "x from 192.0.2.1 port 1". Only the address sshd appends
+# after it is the source. A failed certificate login has a longer ending
+# and is counted by its "authenticating user" line instead.
+pattern = 'sshd(?:-session)?\[\d+\]: (?:(?:Failed (?:password|publickey) for|Invalid user) .*? from |(?:Connection (?:closed|reset) by|Disconnected from) authenticating user \S+ )(?P<src>[0-9A-Fa-f.:]+) port \d+(?: ssh2(?:: \S+ \S+)?)?(?: \[preauth\])?\s*$'
 severity = "error"
 # Your own scanners or jump hosts: addresses or networks never reported.
 #[rules.exclude]

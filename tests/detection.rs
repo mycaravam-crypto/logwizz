@@ -131,19 +131,21 @@ fn rules_match_real_log_lines() {
             "a 203.0.113.99 port 2",
         ),
         ("sshd[1]: Invalid user  from 192.0.2.7 port 52144", ""),
+        (
+            "sshd[1]: Invalid user x from 203.0.113.99 port 1 ssh2: A B from 192.0.2.7 port 52144",
+            "x from 203.0.113.99 port 1 ssh2: A B",
+        ),
+        (
+            "sshd[1]: Failed password for invalid user y from 203.0.113.99 port 1 [preauth] from 192.0.2.7 port 52144 ssh2",
+            "y from 203.0.113.99 port 1 [preauth]",
+        ),
     ] {
-        let hit = hits(&cfg, line)
-            .into_iter()
-            .find(|h| h.starts_with("ssh_user_enumeration"))
-            .unwrap_or_else(|| panic!("no match: {line}"));
         assert_eq!(
-            hit,
-            format!("ssh_user_enumeration user={user} src=192.0.2.7")
-        );
-        assert!(
-            !hits(&cfg, line)
-                .iter()
-                .any(|h| h.starts_with("ssh_distributed")),
+            hits(&cfg, line),
+            [
+                "ssh_bruteforce src=192.0.2.7".to_string(),
+                format!("ssh_user_enumeration user={user} src=192.0.2.7")
+            ],
             "{line}"
         );
     }
