@@ -271,6 +271,7 @@ matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIE
 | `severity` | required for `emit` | `debug`, `info`, `notice`, `warning`, `error`, `critical`. Not allowed for `ignore` rules. |
 | `action` | `"emit"` | `emit`: a match produces an event. `ignore`: a match produces nothing, and no later rule sees the line (counted in `lines_ignored`). |
 | `exclude` | unset | Table of capture group → values whose matches are discarded. See [Excluding trusted sources](#excluding-trusted-sources). |
+| `exclude_file` | unset | Table of capture group → file listing more addresses and networks to exclude. See [Excluding trusted sources](#excluding-trusted-sources). |
 | `after` | unset | Count a match only after another rule reported the same source. See [Sequence rules](#sequence-rules). |
 | `files` | unset: every input | List of inputs the rule is evaluated for. See [Limiting a rule to some inputs](#limiting-a-rule-to-some-inputs). |
 
@@ -439,8 +440,37 @@ window_secs = 60
   the line: `exclude` is not an `ignore`.
 - At most 1024 values per rule. Not allowed on `ignore` rules.
 
-Values are per rule; repeat the list in each rule that should skip the
-source. For firewall-based detectors, excluding the address in the firewall
+A `[rules.exclude_file]` table reads more addresses and networks for a
+capture group from a file, so that several rules, and the
+[Fail2ban bridge](FAIL2BAN.md#one-list-of-trusted-networks), can share one
+list:
+
+```toml
+[rules.exclude_file]
+src = "/etc/logwizz/trusted-networks.list"
+```
+
+- The file has one IP address or CIDR network per line; `#` starts a
+  comment and blank lines are skipped. Only addresses and networks: other
+  exact text stays in `exclude`.
+- Its entries are added to the group's `exclude` values, and count towards
+  the 1024 values per rule.
+- The file is read when the configuration is loaded and again on reload
+  (`systemctl reload logwizz`); editing the file alone changes nothing
+  until then. Changing the list resets that rule's threshold counts, like
+  any change to the rule.
+- The configuration is refused if the file is missing, unreadable, larger
+  than 64 KiB, world-writable, or has a line that is not an address or
+  network. At start the service then does not start; on reload the running
+  configuration is kept. A list read in part would report what it was meant
+  to skip.
+- The path must be absolute and readable by the service user (mode `0644`
+  works with the packaged unit).
+- Versions before this key was added refuse a configuration that uses it.
+  Upgrade the binary first.
+
+Inline values are per rule; repeat them, or use one `exclude_file`, in each
+rule that should skip the source. For firewall-based detectors, excluding the address in the firewall
 rules instead also keeps it out of the kernel log.
 
 #### Limiting a rule to some inputs

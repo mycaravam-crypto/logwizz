@@ -124,6 +124,61 @@ class SettingsTests(unittest.TestCase):
     def test_dry_run(self):
         self.assertTrue(BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"}).dry_run)
 
+    def ignore_file(self, content):
+        tmp = tempfile.NamedTemporaryFile("wb", suffix=".list", delete=False)
+        self.addCleanup(Path(tmp.name).unlink)
+        with tmp:
+            tmp.write(content)
+        return tmp.name
+
+    def test_ignore_file_adds_to_the_ignore_list(self):
+        path = self.ignore_file(
+            b"# management\n185.220.101.0/24   # office\n\n  2a01:4f8::/32\n185.220.103.9\n")
+        s = BRIDGE.Settings({"BRIDGE_IGNORE_FILE": path})
+        self.assertEqual(len(s.ignore), 3)
+        self.assertIsNone(fmt(event("port_scan", V4), s))
+        self.assertIsNone(fmt(event("port_scan", V6), s))
+        self.assertIsNone(fmt(event("port_scan", "185.220.103.9"), s))
+        self.assertIsNotNone(fmt(event("port_scan", "185.220.102.7"), s))
+        # Both sources apply.
+        s = BRIDGE.Settings({"BRIDGE_IGNORE": "185.220.102.0/24", "BRIDGE_IGNORE_FILE": path})
+        self.assertEqual(len(s.ignore), 4)
+        self.assertIsNone(fmt(event("port_scan", "185.220.102.7"), s))
+        self.assertIsNone(fmt(event("port_scan", V4), s))
+
+    def test_empty_ignore_file_is_valid(self):
+        s = BRIDGE.Settings({"BRIDGE_IGNORE_FILE": self.ignore_file(b"# nothing yet\n")})
+        self.assertEqual(s.ignore, ())
+
+    def test_ignore_file_problems_fail_closed(self):
+        big = b"10.0.0.0/8\n" * (BRIDGE.MAX_IGNORE_FILE_BYTES // 11 + 1)
+        for value, message in [
+            ("/nonexistent/logwizz-ignore.list", "No such file"),
+            ("relative.list", "absolute path"),
+            ("", "absolute path"),
+            (self.ignore_file(b"10.0.0.0/8\nexample.com\n"), "line 2"),
+            (self.ignore_file(b"10.0.0.0/33\n"), "line 1"),
+            (self.ignore_file(b"10.0.0.1, 10.0.0.2\n"), "line 1"),
+            (self.ignore_file(b"\xff\xfe"), "not UTF-8"),
+            (self.ignore_file(big), "larger than"),
+        ]:
+            with self.assertRaises(ValueError, msg=value) as caught:
+                BRIDGE.Settings({"BRIDGE_IGNORE_FILE": value})
+            self.assertIn(message, str(caught.exception))
+
+    def test_unreadable_ignore_file_stops_before_the_journal(self):
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            popen = stack.enter_context(patch.object(BRIDGE.subprocess, "Popen"))
+            stack.enter_context(patch.dict(BRIDGE.os.environ, {
+                "BRIDGE_IGNORE_FILE": "/nonexistent/logwizz-ignore.list",
+            }, clear=True))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            code = BRIDGE.main()
+        self.assertEqual(code, 2)
+        popen.assert_not_called()
+        self.assertIn("BRIDGE_IGNORE_FILE", stderr.getvalue())
+
 
 class FilterTests(unittest.TestCase):
     def test_generic_filter_matches_every_bridge_line(self):
@@ -135,6 +190,33 @@ class FilterTests(unittest.TestCase):
             m = pattern.match(line)
             self.assertIsNotNone(m, line)
             self.assertEqual(m.group("host"), line.rsplit("=", 1)[1])
+
+    def test_recidive_filter_matches_only_bans_of_the_logwizz_jail(self):
+        conf = (SCRIPT.parent / "filter.d" / "logwizz-recidive.conf").read_text()
+        failregex = re.search(r"^failregex = (.*)$", conf, re.M).group(1)
+        pattern = re.compile(failregex.replace("<HOST>", r"(?P<host>\S+)"))
+        # Fail2ban removes the timestamp before it applies the expression.
+        prefix = " fail2ban.actions        [46533]: "
+        for jail, text, host in [
+            ("logwizz", f"Ban {V4}", V4),
+            ("logwizz", f"Ban {V6}", V6),
+            ("sshd", f"Ban {V4}", None),
+            ("logwizz-recidive", f"Ban {V4}", None),
+            ("logwizz", f"Unban {V4}", None),
+            ("logwizz", f"Restore Ban {V4}", None),
+            ("logwizz", f"Increase Ban {V4} (2 # 2h -> 2026-10-25 03:08:50)", None),
+        ]:
+            line = f"{prefix}NOTICE  [{jail}] {text}"
+            m = pattern.match(line)
+            self.assertEqual(m.group("host") if m else None, host, line)
+        self.assertIsNone(pattern.match(f"{prefix}WARNING [logwizz] {V4} already banned"))
+        self.assertIsNone(pattern.match(f" fail2ban.filter [1]: INFO [logwizz] Found {V4}"))
+
+    def test_shipped_jails_are_disabled(self):
+        for name in ("logwizz.local", "logwizz-recidive.local"):
+            conf = (SCRIPT.parent / "jail.d" / name).read_text()
+            self.assertRegex(conf, r"(?m)^enabled\s*=\s*false$", name)
+            self.assertNotRegex(conf, r"(?m)^enabled\s*=\s*true", name)
 
 
 

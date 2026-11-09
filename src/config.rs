@@ -47,6 +47,8 @@ pub const MAX_THRESHOLD_GROUPS: usize = 1 << 20;
 pub const MAX_THRESHOLD_COUNT: u32 = 10_000;
 /// Cap on the `exclude` values of one rule.
 pub const MAX_EXCLUDE_VALUES: usize = 1024;
+/// An `exclude_file` larger than this is refused, not read in part.
+pub const MAX_EXCLUDE_FILE_BYTES: u64 = 64 * 1024;
 /// Cap on the rules one `[rules.after]` table names.
 pub const MAX_AFTER_RULES: usize = 16;
 /// Cap on the distinct-value state one threshold rule may hold.
@@ -240,6 +242,9 @@ struct RawRule {
     /// Capture group name -> values whose matches are discarded.
     #[serde(default)]
     exclude: BTreeMap<String, Vec<String>>,
+    /// Capture group name -> file listing more addresses and networks.
+    #[serde(default)]
+    exclude_file: BTreeMap<String, PathBuf>,
     after: Option<RawAfter>,
     /// Inputs the rule is evaluated for; unset: all.
     files: Option<Vec<String>>,
@@ -870,7 +875,7 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 Some(t) => Some(check_threshold(t, r.action, &matcher, &limits)?),
                 None => None,
             };
-            let exclude = check_exclude(&r.exclude, r.action, &matcher)?;
+            let exclude = check_exclude(&r.exclude, &r.exclude_file, r.action, &matcher)?;
             let after = match &r.after {
                 Some(a) => Some(check_after(a, &r.id, r.action, &matcher)?),
                 None => None,
@@ -1226,23 +1231,77 @@ fn check_after_references(rules: &[Rule], all_ids: &HashSet<String>, problems: &
     }
 }
 
+/// The addresses and networks listed in an `exclude_file`: one per line,
+/// `#` starts a comment. The whole file must be valid: a list read in part
+/// would report, and possibly ban, what it was meant to protect.
+fn read_exclude_file(path: &Path) -> Result<Vec<ExcludeValue>, String> {
+    check_path(path)?;
+    let io_err = |e: std::io::Error| e.to_string();
+    let file = File::open(path).map_err(io_err)?;
+    // Whoever can write the list decides which sources go unreported.
+    if file.metadata().map_err(io_err)?.mode() & 0o002 != 0 {
+        return Err("file is world-writable".to_string());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_EXCLUDE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_err)?;
+    if bytes.len() as u64 > MAX_EXCLUDE_FILE_BYTES {
+        return Err(format!("larger than {MAX_EXCLUDE_FILE_BYTES} bytes"));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "not UTF-8 text".to_string())?;
+    let mut values = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let entry = line.split('#').next().unwrap_or_default().trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let net = IpNet::parse(entry).map_err(|msg| format!("line {}: {msg}", i + 1))?;
+        values.push(ExcludeValue::Net(net));
+    }
+    Ok(values)
+}
+
 fn check_exclude(
     raw: &BTreeMap<String, Vec<String>>,
+    files: &BTreeMap<String, PathBuf>,
     action: Action,
     matcher: &Matcher,
 ) -> Result<Vec<Exclusion>, String> {
-    if raw.is_empty() {
+    if raw.is_empty() && files.is_empty() {
         return Ok(Vec::new());
     }
     if action == Action::Ignore {
         return Err("an ignore rule emits nothing, so it takes no exclude".to_string());
     }
-    let total: usize = raw.values().map(Vec::len).sum();
+    let mut exclusions = check_exclude_values(raw, matcher)?;
+    for (name, path) in files {
+        let label = format!("exclude_file.{name} ({})", path.display());
+        let group = matcher
+            .group_index(name)
+            .ok_or_else(|| format!("{label}: the pattern has no capture group named `{name}`"))?;
+        let listed = read_exclude_file(path).map_err(|msg| format!("{label}: {msg}"))?;
+        match exclusions.iter_mut().find(|e| e.group == group) {
+            Some(e) => e.values.extend(listed),
+            None => exclusions.push(Exclusion {
+                group,
+                values: listed,
+            }),
+        }
+    }
+    let total: usize = exclusions.iter().map(|e| e.values.len()).sum();
     if total > MAX_EXCLUDE_VALUES {
         return Err(format!(
             "exclude: too many values: {total} (maximum {MAX_EXCLUDE_VALUES})"
         ));
     }
+    Ok(exclusions)
+}
+
+fn check_exclude_values(
+    raw: &BTreeMap<String, Vec<String>>,
+    matcher: &Matcher,
+) -> Result<Vec<Exclusion>, String> {
     raw.iter()
         .map(|(name, values)| {
             let group = matcher.group_index(name).ok_or_else(|| {
@@ -1338,6 +1397,7 @@ fn compile(match_type: MatchType, pattern: &str) -> Result<Matcher, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     const MINIMAL: &str = r#"
         [[files]]
@@ -2008,6 +2068,122 @@ mod tests {
         let a = parse_str(&scoped("\"/var/log/auth.log\"")).unwrap();
         let b = parse_str(&scoped("\"/var/log/nginx/*.log\"")).unwrap();
         assert!(a.rules[0].same_definition(&a.rules[0]));
+        assert!(!a.rules[0].same_definition(&b.rules[0]));
+    }
+
+    fn exclude_file_config(path: &Path, inline: &str) -> String {
+        format!(
+            "[[files]]\npath = \"/var/log/auth.log\"\n[[rules]]\nid = \"r\"\n\
+             match_type = \"regex\"\npattern = 'from (?P<src>\\S+)'\nseverity = \"info\"\n\
+             {inline}[rules.exclude_file]\nsrc = {:?}\n",
+            path.display().to_string()
+        )
+    }
+
+    fn excluded(cfg: &Config, src: &str) -> bool {
+        let rule = &cfg.rules[0];
+        let line = format!("from {src}");
+        rule.excludes(&rule.matcher.fields(line.as_bytes()))
+    }
+
+    #[test]
+    fn exclude_file_lists_addresses_and_networks() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("trusted.list");
+        fs::write(
+            &list,
+            "# management\n198.51.100.0/24   # office\n\n  2001:db8:10::/48\n192.0.2.10\n",
+        )
+        .unwrap();
+        let cfg = parse_str(&exclude_file_config(&list, "")).unwrap();
+        for src in [
+            "198.51.100.7",
+            "::ffff:198.51.100.7",
+            "2001:db8:10::1",
+            "192.0.2.10",
+        ] {
+            assert!(excluded(&cfg, src), "{src}");
+        }
+        for src in [
+            "198.51.101.7",
+            "192.0.2.11",
+            "2001:db8:11::1",
+            "not-an-address",
+        ] {
+            assert!(!excluded(&cfg, src), "{src}");
+        }
+        // Inline values and the file apply together.
+        let inline = "[rules.exclude]\nsrc = [\"203.0.113.5\", \"scanner\"]\n";
+        let cfg = parse_str(&exclude_file_config(&list, inline)).unwrap();
+        assert_eq!(cfg.rules[0].exclude.len(), 1, "one exclusion per group");
+        for src in ["203.0.113.5", "scanner", "198.51.100.7"] {
+            assert!(excluded(&cfg, src), "{src}");
+        }
+        // An empty list is valid and excludes nothing.
+        fs::write(&list, "# nothing yet\n").unwrap();
+        let cfg = parse_str(&exclude_file_config(&list, "")).unwrap();
+        assert!(!excluded(&cfg, "198.51.100.7"));
+    }
+
+    #[test]
+    fn exclude_file_problems_refuse_the_configuration() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("trusted.list");
+        let p = |content: Option<&[u8]>| {
+            match content {
+                Some(c) => fs::write(&list, c).unwrap(),
+                None => {
+                    let _ = fs::remove_file(&list);
+                }
+            }
+            problems(&exclude_file_config(&list, "")).join("; ")
+        };
+        assert!(p(None).contains("No such file"));
+        assert!(p(Some(b"10.0.0.0/8\nexample.com\n")).contains("line 2"));
+        assert!(p(Some(b"10.0.0.0/33\n")).contains("line 1"));
+        assert!(p(Some(b"10.0.0.1, 10.0.0.2\n")).contains("line 1"));
+        assert!(p(Some(b"\xff\xfe")).contains("not UTF-8"));
+        let big = b"10.0.0.0/8\n".repeat(MAX_EXCLUDE_FILE_BYTES as usize / 11 + 1);
+        assert!(p(Some(&big)).contains("larger than"));
+        let many = "192.0.2.1\n".repeat(MAX_EXCLUDE_VALUES + 1);
+        assert!(p(Some(many.as_bytes())).contains("too many values"));
+        fs::write(&list, "10.0.0.0/8\n").unwrap();
+        fs::set_permissions(&list, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(
+            problems(&exclude_file_config(&list, ""))
+                .join("; ")
+                .contains("world-writable")
+        );
+        fs::set_permissions(&list, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // The capture must exist, the path must be absolute, ignore rules take none.
+        let text = exclude_file_config(&list, "").replace("src = \"/", "dst = \"/");
+        assert!(
+            problems(&text)
+                .join("; ")
+                .contains("no capture group named `dst`")
+        );
+        let text = exclude_file_config(Path::new("trusted.list"), "");
+        assert!(problems(&text).join("; ").contains("path must be absolute"));
+        let text = format!(
+            "{MINIMAL}\n[[rules]]\nid = \"i\"\nmatch_type = \"regex\"\npattern = '(?P<src>x)'\n\
+             action = \"ignore\"\n[rules.exclude_file]\nsrc = {:?}\n",
+            list.display().to_string()
+        );
+        assert!(problems(&text).join("; ").contains("takes no exclude"));
+    }
+
+    #[test]
+    fn exclude_file_content_is_part_of_the_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("trusted.list");
+        fs::write(&list, "10.0.0.0/8\n").unwrap();
+        let a = parse_str(&exclude_file_config(&list, "")).unwrap();
+        let same = parse_str(&exclude_file_config(&list, "")).unwrap();
+        assert!(a.rules[0].same_definition(&same.rules[0]));
+        fs::write(&list, "10.0.0.0/8\n192.0.2.10\n").unwrap();
+        let b = parse_str(&exclude_file_config(&list, "")).unwrap();
         assert!(!a.rules[0].same_definition(&b.rules[0]));
     }
 }

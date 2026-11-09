@@ -70,6 +70,7 @@ the defaults.
 |---|---|---|
 | `BRIDGE_RULES` | the list above | Comma-separated rule IDs whose events may lead to a ban. |
 | `BRIDGE_IGNORE` | empty | Comma-separated addresses and networks never written, e.g. `192.0.2.10,10.0.0.0/8`. |
+| `BRIDGE_IGNORE_FILE` | unset | Absolute path of a file with more such addresses and networks, one per line; `#` starts a comment. Added to `BRIDGE_IGNORE`. See [One list of trusted networks](#one-list-of-trusted-networks). |
 | `BRIDGE_DRY_RUN` | `0` | `1`: log each line it would write to the bridge's journal, and write nothing. The example file sets it. |
 | `BRIDGE_JOURNAL_MODE` | `namespace` | Where events are read from: `namespace` (the `logwizz` journal namespace), `legacy` (the main journal) or `auto`. See [Hosts without journal namespaces](#hosts-without-journal-namespaces). |
 
@@ -98,6 +99,55 @@ sudo systemctl enable --now logwizz-fail2ban-bridge.service
 sudo fail2ban-client reload
 sudo fail2ban-client status logwizz
 ```
+
+### One list of trusted networks
+
+Trusted addresses are otherwise kept in three places: each rule's
+`[rules.exclude]`, `BRIDGE_IGNORE` and Fail2ban's `ignoreip`. A network
+missing from one of them is the usual way to ban yourself. Keep them in one
+file, `/etc/logwizz/trusted-networks.list` (mode `0644`):
+
+```text
+# management VPN
+198.51.100.0/24
+# monitoring host
+192.0.2.10
+2001:db8:10::/48
+```
+
+and name it in `/etc/logwizz/fail2ban-bridge.env`:
+
+```sh
+BRIDGE_IGNORE_FILE=/etc/logwizz/trusted-networks.list
+```
+
+The bridge reads the file when it starts, so restart it after a change.
+It runs as an unprivileged user and must be able to read the file; the
+list is not a secret on the host. If the file is missing, unreadable,
+larger than 1 MiB or has a line that is not an address or network, the
+bridge stops with the reason and the line number instead of running
+without the list.
+
+Fail2ban has no setting that reads `ignoreip` from a file. Generate it from
+the same list whenever the list changes:
+
+```sh
+list=$(sed 's/#.*//' /etc/logwizz/trusted-networks.list | xargs)
+printf '[logwizz]\nignoreip = 127.0.0.1/8 ::1 %s\n' "$list" \
+  | sudo tee /etc/fail2ban/jail.d/logwizz-ignore.local
+sudo fail2ban-client reload
+```
+
+To also keep those sources out of Logwizz's reports, name the same file in
+the rules' [`exclude_file`](REFERENCE.md#excluding-trusted-sources):
+
+```toml
+[rules.exclude_file]
+src = "/etc/logwizz/trusted-networks.list"
+```
+
+and run `systemctl reload logwizz` after a change. This needs a Logwizz
+binary that knows the key; older ones refuse the configuration.
 
 ### Hosts without journal namespaces
 
@@ -148,6 +198,58 @@ After enabling the jail, verify it with `fail2ban-client status logwizz`.
 Test on a disposable host or with a controlled test event before relying on
 automatic blocking. The first version is a narrow integration, not a
 replacement for reviewing your detection thresholds.
+
+### Repeat offenders
+
+The `logwizz` jail bans for an hour, and a source that returns after each
+ban gets the same hour again. There are two ways to make repeated bans
+longer. Use one of them.
+
+**Fail2ban 0.11 or later** (Debian 11 and later, Ubuntu 22.04 and later):
+let the jail lengthen its own bans. Add to the `[logwizz]` section of
+`/etc/fail2ban/jail.d/logwizz.local`:
+
+```ini
+bantime.increment = true
+bantime.factor    = 1
+bantime.maxtime   = 1w
+```
+
+Each further ban of the same address is then longer than the last (1 h,
+2 h, 4 h, … up to a week), from Fail2ban's own ban history.
+
+**Any version, including 0.10** (Debian 10): a second jail that watches
+Fail2ban's log for bans by the `logwizz` jail. Install the two files, both
+shipped disabled:
+
+```sh
+sudo install -D -m 0644 packaging/fail2ban/filter.d/logwizz-recidive.conf \
+  /etc/fail2ban/filter.d/logwizz-recidive.conf
+sudo install -D -m 0644 packaging/fail2ban/jail.d/logwizz-recidive.local \
+  /etc/fail2ban/jail.d/logwizz-recidive.local
+```
+
+Review the file, set `enabled = true`, then:
+
+```sh
+sudo fail2ban-regex /var/log/fail2ban.log /etc/fail2ban/filter.d/logwizz-recidive.conf
+sudo fail2ban-client reload
+sudo fail2ban-client status logwizz-recidive
+```
+
+With its defaults, an address the `logwizz` jail banned three times within
+a day is banned on all ports for a week. Bans by other jails, unbans and
+bans restored after a Fail2ban restart do not count, and neither do this
+jail's own bans.
+
+A week-long ban of the wrong address is a week-long problem. Before
+enabling either, put your management addresses in `ignoreip` (see
+[One list of trusted networks](#one-list-of-trusted-networks)), and keep a
+way in that does not depend on the banned address, such as a console.
+`fail2ban-client set logwizz-recidive unbanip <address>` lifts a ban.
+
+The filter is checked with `fail2ban-regex` from Fail2ban 1.0.2 against
+sample log lines; a ban by this jail on a live host has not been verified.
 
 ### Ban notifications
 
