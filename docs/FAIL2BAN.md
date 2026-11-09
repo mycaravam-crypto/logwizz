@@ -24,6 +24,12 @@ explicit allowlist of rules with a valid source IP. By default these are:
 can lead to a ban without a Fail2ban filter of its own: the one generic
 `logwizz` filter matches every line the bridge writes.
 
+A listed rule's `src` decides who is banned, so limit such rules to the log
+they were written for with the rule's
+[`files`](REFERENCE.md#limiting-a-rule-to-some-inputs) key: otherwise text
+written into another monitored log (a request line, a user agent) can
+match the rule with a chosen address.
+
 Events without a `fields.src` address, malformed JSON, unlisted rules and
 invalid IP addresses are ignored. So are addresses that are not globally
 routable (loopback, private, link-local, shared/CGNAT, documentation,

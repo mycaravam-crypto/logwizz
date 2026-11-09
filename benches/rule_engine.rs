@@ -68,7 +68,7 @@ fn bench_match(c: &mut Criterion) {
                 b.iter(|| {
                     let mut hits = 0;
                     for l in &lines {
-                        e.for_each_match(black_box(l), |_| hits += 1);
+                        e.for_each_match(Path::new("/x"), black_box(l), |_| hits += 1);
                     }
                     hits
                 })
@@ -113,7 +113,7 @@ fn bench_pipeline(c: &mut Criterion) {
                 let mut tf = TailedFile::new(path.clone(), StartupMode::Beginning, opts);
                 let mut hits = 0u64;
                 tf.poll(std::time::Instant::now(), &mut buf, &m, &mut |line| {
-                    e.for_each_match(line.bytes, |_| hits += 1);
+                    e.for_each_match(Path::new("/x"), line.bytes, |_| hits += 1);
                 });
                 assert_eq!(m.snapshot().lines_processed, total_lines);
                 hits

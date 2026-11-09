@@ -1,6 +1,7 @@
 //! Rule matching.
 
 use std::fmt;
+use std::path::Path;
 
 use memchr::memmem;
 use regex::bytes::Regex;
@@ -119,12 +120,13 @@ impl Engine {
         &self.rules
     }
 
-    /// Calls `f` with the index of each emitting rule matching `line`, up
-    /// to the first matching `ignore` rule. Returns `true` if one matched.
+    /// Calls `f` with the index of each emitting rule matching `line`, read
+    /// from `file`, up to the first matching `ignore` rule. Returns `true`
+    /// if one matched. Rules scoped to other inputs (`files`) are skipped.
     #[inline]
-    pub fn for_each_match(&self, line: &[u8], mut f: impl FnMut(usize)) -> bool {
+    pub fn for_each_match(&self, file: &Path, line: &[u8], mut f: impl FnMut(usize)) -> bool {
         for (i, rule) in self.rules.iter().enumerate() {
-            if rule.matcher.is_match(line) {
+            if rule.applies_to(file) && rule.matcher.is_match(line) {
                 if rule.action == Action::Ignore {
                     return true;
                 }
@@ -139,7 +141,6 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::config;
-    use std::path::Path;
 
     fn engine(rules: &str) -> Engine {
         let text = format!("[[files]]\npath = \"/x\"\n{rules}");
@@ -154,7 +155,9 @@ mod tests {
 
     fn matches<'a>(e: &'a Engine, line: &[u8]) -> Vec<&'a str> {
         let mut out = Vec::new();
-        e.for_each_match(line, |i| out.push(e.rules()[i].id.as_str()));
+        e.for_each_match(Path::new("/x"), line, |i| {
+            out.push(e.rules()[i].id.as_str())
+        });
         out
     }
 
@@ -263,9 +266,11 @@ mod tests {
         ));
         // An earlier emitting rule still fires; nothing after the ignore does.
         let mut ids = Vec::new();
-        assert!(e.for_each_match(b"CRON job", |i| ids.push(e.rules()[i].id.as_str())));
+        assert!(e.for_each_match(Path::new("/x"), b"CRON job", |i| {
+            ids.push(e.rules()[i].id.as_str())
+        }));
         assert_eq!(ids, ["early"]);
-        assert!(e.for_each_match(b"ntpd sync", |_| panic!("ignored")));
+        assert!(e.for_each_match(Path::new("/x"), b"ntpd sync", |_| panic!("ignored")));
         // The catch-all reports what no ignore rule knows.
         assert_eq!(matches(&e, b"sshd: something new"), ["unknown"]);
     }
@@ -278,5 +283,41 @@ mod tests {
             rule("re", "regex", "err(or)?"),
         ));
         assert_eq!(matches(&e, b"\xff\xfe error \xc3"), ["lit", "re"]);
+    }
+
+    #[test]
+    fn scoped_rules_only_see_their_inputs() {
+        let files =
+            "[[files]]\npath = \"/var/log/auth.log\"\n[[files]]\npath = \"/var/log/web.log\"\n";
+        let scoped = |id: &str, extra: &str| {
+            format!(
+                "[[rules]]\nid = \"{id}\"\nmatch_type = \"literal\"\npattern = 'Failed'\n{extra}\n"
+            )
+        };
+        let text = format!(
+            "{files}{}{}{}{}",
+            scoped(
+                "auth",
+                "severity = \"info\"\nfiles = [\"/var/log/auth.log\"]"
+            ),
+            scoped(
+                "web_noise",
+                "action = \"ignore\"\nfiles = [\"/var/log/web.log\"]"
+            ),
+            scoped("any", "severity = \"info\""),
+            scoped("web", "severity = \"info\"\nfiles = [\"/var/log/web.log\"]"),
+        );
+        let e = Engine::new(config::parse(&text, Path::new("t")).unwrap().rules);
+        let run = |file: &str| {
+            let mut ids = Vec::new();
+            let ignored = e.for_each_match(Path::new(file), b"Failed password", |i| {
+                ids.push(e.rules()[i].id.as_str())
+            });
+            (ids, ignored)
+        };
+        // The ignore rule scoped to web.log does not hide auth.log lines.
+        assert_eq!(run("/var/log/auth.log"), (vec!["auth", "any"], false));
+        // A line forged into web.log never reaches the auth rule.
+        assert_eq!(run("/var/log/web.log"), (vec![], true));
     }
 }

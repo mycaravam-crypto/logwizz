@@ -272,6 +272,7 @@ matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIE
 | `action` | `"emit"` | `emit`: a match produces an event. `ignore`: a match produces nothing, and no later rule sees the line (counted in `lines_ignored`). |
 | `exclude` | unset | Table of capture group → values whose matches are discarded. See [Excluding trusted sources](#excluding-trusted-sources). |
 | `after` | unset | Count a match only after another rule reported the same source. See [Sequence rules](#sequence-rules). |
+| `files` | unset: every input | List of inputs the rule is evaluated for. See [Limiting a rule to some inputs](#limiting-a-rule-to-some-inputs). |
 
 Rules are compiled once at startup. Every enabled rule is evaluated against
 every line in configuration order, and each matching rule produces its own
@@ -441,6 +442,45 @@ window_secs = 60
 Values are per rule; repeat the list in each rule that should skip the
 source. For firewall-based detectors, excluding the address in the firewall
 rules instead also keeps it out of the kernel log.
+
+#### Limiting a rule to some inputs
+
+Without `files`, a rule sees the lines of every input. Log lines are
+written by whoever causes them: a request line in a web access log, or a
+command in a sudo entry, can contain text that looks like another log's
+message, with a source address of the writer's choosing. `files` limits a
+rule to the inputs it was written for:
+
+```toml
+[[rules]]
+id = "ssh_bruteforce"
+match_type = "regex"
+pattern = 'Failed password for .* from (?P<src>\S+)'
+severity = "warning"
+files = ["/var/log/auth.log"]
+```
+
+- An entry is the path of a `[[files]]` entry, a file followed through a
+  `[[files]] glob`, a path with `*` or `?` in its final component
+  (`"/var/log/nginx/*.log"`), or `"journal"` for the `[journal]` source. A
+  line is in scope if the input it was read from (the event's `file`)
+  matches any entry. At most 64 entries.
+- Every entry must match an input declared in the configuration, enabled or
+  not; otherwise the configuration is refused, so a mistyped path cannot
+  switch a rule off unnoticed. For an entry with wildcards, an input glob in
+  the same directory is enough. Removing an input therefore requires
+  removing it from the rules that name it.
+- An `ignore` rule with `files` ends evaluation only for lines of its
+  inputs.
+- Scope the rules whose captures are acted on, such as those listed in the
+  [Fail2ban bridge](FAIL2BAN.md)'s `BRIDGE_RULES`. If one file receives
+  several services' messages (`/var/log/syslog`, the journal), anchor the
+  pattern to the program name as well: `files` separates inputs, not
+  programs within one input.
+- Versions before this key was added refuse a configuration that uses it
+  (unknown keys are errors). Upgrade the binary on a host before adding
+  `files` to its configuration; `logwizz --check-config` tells you whether
+  the installed version accepts the file.
 
 #### Sequence rules
 
@@ -874,6 +914,9 @@ The `logwizz-notify` binary aggregates detection events by rule and event-time w
 - Runs unprivileged. Needs read access to the configured files and search
   access to their directories, nothing else.
 - Never executes anything from the configuration. Patterns are data.
+- Log content is untrusted. A rule sees every input unless it sets
+  [`files`](#limiting-a-rule-to-some-inputs); set it for rules whose
+  captures lead to an action.
 - Regexes use the Rust `regex` crate, which guarantees linear-time matching
   (no catastrophic backtracking), with a compiled-size limit per pattern.
 - Bounded resources: configuration size (1 MiB), line length, per-file

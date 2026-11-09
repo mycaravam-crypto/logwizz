@@ -694,3 +694,34 @@ fn reload_keeps_glob_offsets_and_switches_globs() {
     d.no_event();
     assert!(d.stop().success());
 }
+
+#[test]
+fn scoped_rule_ignores_lines_from_other_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    let web = dir.path().join("web.log");
+    write_new(&auth, "");
+    write_new(&web, "");
+    let rule = format!(
+        "[[rules]]\nid = \"scoped\"\nmatch_type = \"regex\"\n\
+         pattern = 'Accepted for (?P<src>\\S+)'\nseverity = \"notice\"\nfiles = [{:?}]\n",
+        auth.display().to_string()
+    );
+    let mut d = Daemon::start(dir.path(), &config("", &[&auth, &web], &rule));
+    thread::sleep(Duration::from_millis(300));
+    // The same text in the other input, such as a crafted request line.
+    append(&web, "GET /?Accepted for 203.0.113.9 HTTP/1.1\n");
+    d.no_event();
+    append(&auth, "sshd: Accepted for 198.51.100.4\n");
+    let ev = d.event();
+    assert_eq!(ev["rule"], "scoped");
+    assert_eq!(ev["file"], auth.display().to_string());
+    assert_eq!(ev["fields"]["src"], "198.51.100.4");
+    // Unscoped rules still see both inputs.
+    append(&web, "Failed password in web.log\n");
+    let ev = d.event();
+    assert_eq!(ev["rule"], "ssh_failed_login");
+    assert_eq!(ev["file"], web.display().to_string());
+    d.no_event();
+    assert!(d.stop().success());
+}

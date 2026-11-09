@@ -36,6 +36,8 @@ pub const MAX_QUEUE_BYTES: usize = 1 << 30;
 pub const MAX_FILES: usize = 1024;
 pub const MAX_GLOB_FILES: usize = 4096;
 pub const MAX_RULES: usize = 1024;
+/// Maximum entries in a rule's `files`.
+const MAX_SCOPE_ENTRIES: usize = 64;
 pub const MAX_PATTERN_BYTES: usize = 4096;
 pub const MAX_RULE_ID_BYTES: usize = 64;
 pub const MIN_EXCERPT_BYTES: usize = 16;
@@ -239,6 +241,8 @@ struct RawRule {
     #[serde(default)]
     exclude: BTreeMap<String, Vec<String>>,
     after: Option<RawAfter>,
+    /// Inputs the rule is evaluated for; unset: all.
+    files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -339,6 +343,38 @@ pub struct After {
 pub struct Exclusion {
     pub group: usize,
     pub values: Vec<ExcludeValue>,
+}
+
+/// A validated rule `files` list: the inputs a rule is evaluated for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    entries: Vec<ScopeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopeEntry {
+    /// The systemd journal ([`JOURNAL_SOURCE`]).
+    Journal,
+    /// One file.
+    Path(PathBuf),
+    /// Files in `dir` whose name matches `pattern`.
+    Glob { dir: PathBuf, pattern: Pattern },
+}
+
+impl Scope {
+    /// Whether lines read from `file` (an event's `file`) are in scope.
+    pub fn contains(&self, file: &Path) -> bool {
+        self.entries.iter().any(|e| match e {
+            ScopeEntry::Journal => file.as_os_str() == JOURNAL_SOURCE,
+            ScopeEntry::Path(path) => path.as_os_str() == file.as_os_str(),
+            ScopeEntry::Glob { dir, pattern } => {
+                file.parent() == Some(dir.as_path())
+                    && file
+                        .file_name()
+                        .is_some_and(|name| pattern.matches(name.as_bytes()))
+            }
+        })
+    }
 }
 
 /// One `exclude` value: an IP address or network, or any other exact text.
@@ -463,6 +499,8 @@ pub struct Rule {
     pub exclude: Vec<Exclusion>,
     /// Set: matches count only after an event of another rule.
     pub after: Option<After>,
+    /// Set: the rule only sees lines from these inputs.
+    pub files: Option<Scope>,
     pub matcher: Matcher,
 }
 
@@ -478,6 +516,13 @@ impl Rule {
             && self.threshold == other.threshold
             && self.exclude == other.exclude
             && self.after == other.after
+            && self.files == other.files
+    }
+
+    /// Whether the rule is evaluated for lines read from `file`.
+    #[inline]
+    pub fn applies_to(&self, file: &Path) -> bool {
+        self.files.as_ref().is_none_or(|scope| scope.contains(file))
     }
 
     /// Whether a match with these capture values (from
@@ -602,6 +647,8 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
         rules: raw_rules,
         journal: raw_journal,
     } = raw;
+    // Declared inputs, enabled or not: a rule may be scoped to a disabled one.
+    let journal_declared = raw_journal.is_some();
     let journal = match raw_journal {
         Some(j) if j.enabled => match check_journal_matches(&j.matches) {
             Ok(()) => Some(Journal { matches: j.matches }),
@@ -717,6 +764,7 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
     let mut seen_globs = HashSet::new();
     let mut files = Vec::new();
     let mut globs = Vec::new();
+    let mut declared_globs = Vec::new();
     let mut disabled_files = 0;
     for (i, f) in raw_files.into_iter().enumerate() {
         match (f.path, f.glob) {
@@ -743,8 +791,14 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                     problems.push(format!("{label}: duplicate glob"));
                 }
                 match check_glob(&text, f.exclude.as_deref()) {
-                    Ok(glob) if f.enabled => globs.push(glob),
-                    Ok(_) => disabled_files += 1,
+                    Ok(glob) => {
+                        declared_globs.push(glob.clone());
+                        if f.enabled {
+                            globs.push(glob);
+                        } else {
+                            disabled_files += 1;
+                        }
+                    }
                     Err(msg) => problems.push(format!("{label}: {msg}")),
                 }
             }
@@ -821,10 +875,19 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 Some(a) => Some(check_after(a, &r.id, r.action, &matcher)?),
                 None => None,
             };
-            Ok((matcher, threshold, exclude, after))
+            let files = match &r.files {
+                Some(f) => Some(check_scope(
+                    f,
+                    &seen_paths,
+                    &declared_globs,
+                    journal_declared,
+                )?),
+                None => None,
+            };
+            Ok((matcher, threshold, exclude, after, files))
         });
         match compiled {
-            Ok((matcher, threshold, exclude, after)) if r.enabled => rules.push(Rule {
+            Ok((matcher, threshold, exclude, after, files)) if r.enabled => rules.push(Rule {
                 id: r.id,
                 description: r.description,
                 match_type: r.match_type,
@@ -834,6 +897,7 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 threshold,
                 exclude,
                 after,
+                files,
                 matcher,
             }),
             Ok(_) => disabled_rules += 1,
@@ -935,6 +999,76 @@ fn check_glob(text: &str, exclude: Option<&str>) -> Result<Glob, String> {
         pattern,
         exclude,
     })
+}
+
+/// Validates a rule's `files`: [`JOURNAL_SOURCE`], a path, or a path with
+/// wildcards in its final component. Every entry must be able to match a
+/// declared input, so that a typo does not silently switch a rule off.
+fn check_scope(
+    entries: &[String],
+    paths: &HashSet<PathBuf>,
+    globs: &[Glob],
+    journal: bool,
+) -> Result<Scope, String> {
+    if entries.is_empty() {
+        return Err("files: must not be empty; leave it out to match every input".to_string());
+    }
+    if entries.len() > MAX_SCOPE_ENTRIES {
+        return Err(format!("files: more than {MAX_SCOPE_ENTRIES} entries"));
+    }
+    let unknown = |text: &str| format!("files: '{text}' matches no [[files]] entry or [journal]");
+    let mut out = Vec::with_capacity(entries.len());
+    for text in entries {
+        if text == JOURNAL_SOURCE {
+            if !journal {
+                return Err(format!(
+                    "files: '{JOURNAL_SOURCE}' needs a [journal] section"
+                ));
+            }
+            out.push(ScopeEntry::Journal);
+            continue;
+        }
+        let path = Path::new(text);
+        check_path(path).map_err(|msg| format!("files: '{text}': {msg}"))?;
+        // check_path guarantees both parts exist.
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(format!("files: '{text}': path must name a file"));
+        };
+        if dir
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .any(|&b| b == b'*' || b == b'?')
+        {
+            return Err(format!(
+                "files: '{text}': wildcards are allowed in the final path component only"
+            ));
+        }
+        let pattern = Pattern::new(&name.to_string_lossy())
+            .map_err(|msg| format!("files: '{text}': {msg}"))?;
+        if pattern.has_wildcard() {
+            // Which names two wildcard patterns share is not decided here: an
+            // input glob in the same directory is enough.
+            let known = globs.iter().any(|g| g.dir == dir)
+                || paths.iter().any(|p| {
+                    p.parent() == Some(dir)
+                        && p.file_name().is_some_and(|n| pattern.matches(n.as_bytes()))
+                });
+            if !known {
+                return Err(unknown(text));
+            }
+            out.push(ScopeEntry::Glob {
+                dir: dir.to_path_buf(),
+                pattern,
+            });
+        } else {
+            if !paths.contains(path) && !globs.iter().any(|g| g.matches_path(path)) {
+                return Err(unknown(text));
+            }
+            out.push(ScopeEntry::Path(path.to_path_buf()));
+        }
+    }
+    Ok(Scope { entries: out })
 }
 
 fn check_rule_id(id: &str) -> Result<(), String> {
@@ -1774,5 +1908,106 @@ mod tests {
         assert!(!cfg.rules[0].matcher.is_match(b"out of memory"));
         assert!(cfg.rules[1].matcher.is_match(b"KERNEL PANIC - not syncing"));
         assert!(cfg.rules[1].matcher.is_match(b"\xff\xfe Kernel Panic"));
+    }
+
+    const SCOPED_INPUTS: &str = r#"
+        [[files]]
+        path = "/var/log/auth.log"
+
+        [[files]]
+        path = "/var/log/nginx/off.log"
+        enabled = false
+
+        [[files]]
+        glob = "/var/log/nginx/*.log"
+    "#;
+
+    fn scoped(files: &str) -> String {
+        format!(
+            "{SCOPED_INPUTS}\n[[rules]]\nid = \"r\"\nmatch_type = \"literal\"\n\
+             pattern = \"x\"\nseverity = \"info\"\nfiles = [{files}]\n"
+        )
+    }
+
+    #[test]
+    fn rule_without_files_applies_to_every_input() {
+        let cfg = parse_str(MINIMAL).unwrap();
+        assert_eq!(cfg.rules[0].files, None);
+        for file in ["/var/log/syslog", "/anything/else", JOURNAL_SOURCE] {
+            assert!(cfg.rules[0].applies_to(Path::new(file)), "{file}");
+        }
+    }
+
+    #[test]
+    fn rule_files_scope_paths_globs_and_journal() {
+        let cfg = parse_str(&scoped("\"/var/log/auth.log\"")).unwrap();
+        let r = &cfg.rules[0];
+        assert!(r.applies_to(Path::new("/var/log/auth.log")));
+        assert!(!r.applies_to(Path::new("/var/log/auth.log.1")));
+        assert!(!r.applies_to(Path::new("/var/log/nginx/access.log")));
+        assert!(!r.applies_to(Path::new(JOURNAL_SOURCE)));
+
+        // A single file followed through an input glob, and a wildcard.
+        let cfg = parse_str(&scoped(
+            "\"/var/log/nginx/access.log\", \"/var/log/nginx/err*.log\"",
+        ))
+        .unwrap();
+        let r = &cfg.rules[0];
+        assert!(r.applies_to(Path::new("/var/log/nginx/access.log")));
+        assert!(r.applies_to(Path::new("/var/log/nginx/error.log")));
+        assert!(!r.applies_to(Path::new("/var/log/nginx/other.log")));
+        assert!(!r.applies_to(Path::new("/srv/nginx/error.log")));
+        assert!(!r.applies_to(Path::new("/var/log/auth.log")));
+
+        let cfg = parse_str(&format!(
+            "[journal]\n{}",
+            scoped("\"journal\", \"/var/log/auth.log\"")
+        ))
+        .unwrap();
+        let r = &cfg.rules[0];
+        assert!(r.applies_to(Path::new(JOURNAL_SOURCE)));
+        assert!(r.applies_to(Path::new("/var/log/auth.log")));
+        assert!(!r.applies_to(Path::new("/var/log/journal")));
+    }
+
+    #[test]
+    fn rule_files_may_name_disabled_inputs() {
+        // Scoping to a disabled input is valid: the rule waits for it.
+        parse_str(&scoped("\"/var/log/nginx/off.log\"")).unwrap();
+        let text = format!(
+            "[journal]\nenabled = false\n{}",
+            scoped("\"journal\", \"/var/log/auth.log\"")
+        );
+        parse_str(&text).unwrap();
+    }
+
+    #[test]
+    fn rule_files_are_validated() {
+        let p = |files: &str| problems(&scoped(files)).join("; ");
+        assert!(p("").contains("files: must not be empty"));
+        assert!(p("\"/var/log/typo.log\"").contains("matches no [[files]] entry"));
+        assert!(p("\"/srv/*.log\"").contains("matches no [[files]] entry"));
+        assert!(p("\"journal\"").contains("needs a [journal] section"));
+        assert!(p("\"auth.log\"").contains("path must be absolute"));
+        assert!(p("\"/var/*/auth.log\"").contains("final path component only"));
+        assert!(p("\"/var/log/[a]uth.log\"").contains("is not supported"));
+        assert!(p("\"/var/log/../log/auth.log\"").contains("'..'"));
+        let many = vec!["\"/var/log/auth.log\""; MAX_SCOPE_ENTRIES + 1].join(", ");
+        assert!(p(&many).contains("more than"));
+        // A disabled rule's scope is checked too.
+        let text = format!("{}enabled = false\n{MINIMAL}", scoped("\"/nope\""));
+        assert!(
+            problems(&text)
+                .join("; ")
+                .contains("matches no [[files]] entry")
+        );
+    }
+
+    #[test]
+    fn rule_files_are_part_of_the_definition() {
+        let a = parse_str(&scoped("\"/var/log/auth.log\"")).unwrap();
+        let b = parse_str(&scoped("\"/var/log/nginx/*.log\"")).unwrap();
+        assert!(a.rules[0].same_definition(&a.rules[0]));
+        assert!(!a.rules[0].same_definition(&b.rules[0]));
     }
 }
