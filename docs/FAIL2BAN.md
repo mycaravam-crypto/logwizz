@@ -138,8 +138,16 @@ printf '[logwizz]\nignoreip = 127.0.0.1/8 ::1 %s\n' "$list" \
 sudo fail2ban-client reload
 ```
 
-Rule `exclude` tables in the Logwizz configuration are still separate: they
-decide what is reported, not only what is banned.
+To also keep those sources out of Logwizz's reports, name the same file in
+the rules' [`exclude_file`](REFERENCE.md#excluding-trusted-sources):
+
+```toml
+[rules.exclude_file]
+src = "/etc/logwizz/trusted-networks.list"
+```
+
+and run `systemctl reload logwizz` after a change. This needs a Logwizz
+binary that knows the key; older ones refuse the configuration.
 
 ### Hosts without journal namespaces
 

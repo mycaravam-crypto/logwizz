@@ -725,3 +725,46 @@ fn scoped_rule_ignores_lines_from_other_inputs() {
     d.no_event();
     assert!(d.stop().success());
 }
+
+#[test]
+fn exclude_file_is_read_at_start_and_again_on_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    let list = dir.path().join("trusted.list");
+    write_new(&auth, "");
+    fs::write(&list, "# management\n192.0.2.0/24\n").unwrap();
+    let rule = format!(
+        "[[rules]]\nid = \"ssh_from\"\nmatch_type = \"regex\"\n\
+         pattern = 'Accepted password .* from (?P<src>\\S+)'\nseverity = \"notice\"\n\
+         [rules.exclude_file]\nsrc = {:?}\n",
+        list.display().to_string()
+    );
+    let cfg = config("", &[&auth], &rule);
+    let mut d = Daemon::start(dir.path(), &cfg);
+    thread::sleep(Duration::from_millis(300));
+    append(
+        &auth,
+        "Accepted password for a from 192.0.2.7\nAccepted password for b from 198.51.100.7\n",
+    );
+    assert_eq!(d.event()["fields"]["src"], "198.51.100.7");
+    d.no_event();
+
+    // The list changes; the configuration file does not.
+    fs::write(&list, "192.0.2.0/24\n198.51.100.0/24\n").unwrap();
+    d.reload(dir.path(), &cfg, "configuration reloaded");
+    append(
+        &auth,
+        "Accepted password for b from 198.51.100.7\nAccepted password for c from 203.0.113.7\n",
+    );
+    assert_eq!(d.event()["fields"]["src"], "203.0.113.7");
+    d.no_event();
+
+    // A broken list keeps the running configuration, like any invalid reload.
+    fs::write(&list, "192.0.2.0/24\nnot-a-network\n").unwrap();
+    d.signal(libc::SIGHUP);
+    let err = d.wait_stderr("exclude_file.src");
+    assert!(err.contains("line 2"), "{err}");
+    append(&auth, "Accepted password for b from 198.51.100.7\n");
+    d.no_event();
+    assert!(d.stop().success());
+}
