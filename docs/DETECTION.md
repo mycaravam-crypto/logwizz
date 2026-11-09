@@ -12,6 +12,8 @@ makes scans visible, and the rules in
 | `subnet_scan` | 50+ closed ports within an hour from addresses of one /24 (IPv6 /64), such as a scanner spread over several addresses | the firewall rules below |
 | `tcp_flag_scan` | TCP NULL, FIN and Xmas scans (nmap `-sN`, `-sF`, `-sX`) | the firewall rules below |
 | `ssh_bruteforce` | 10+ failed or invalid-user SSH logins from one source within a minute, including key-only hosts that log no `Failed` line | `auth.log` |
+| `ssh_user_enumeration` | One source failing to log in as 10+ different SSH user names within an hour (password spraying, user-name guessing below `ssh_bruteforce`'s rate) | `auth.log` |
+| `ssh_distributed_bruteforce` | 20+ sources failing to log in to one existing account within an hour (a botnet, each address below `ssh_bruteforce`'s count) | `auth.log` |
 | `ssh_probe` | A connection to sshd that never sends an SSH banner (nmap `-sV`, banner grabbers) | `auth.log` |
 | `sudo_auth_failure` | A failed sudo password or a user not in sudoers | `auth.log` |
 | `account_change` | A user, group or password created, changed or deleted | `auth.log` |
@@ -23,6 +25,8 @@ makes scans visible, and the rules in
 
 Each detector reports a source once and then stays silent for that source
 for its cooldown (10 minutes to an hour), so one scan is one notification.
+`ssh_distributed_bruteforce` reports an account, not a source, and then
+stays silent for that account for six hours.
 Send them to your phone with [logwizz-notify](NOTIFICATIONS.md).
 
 ## 1. Make the firewall log scans
@@ -164,6 +168,14 @@ exactly this in a VM, with these rules.
 - **`log_flood`:** set `count` to a few times your normal peak lines per
   minute. Put it after `ignore` rules for known noise (see the README,
   *Reporting unknown lines*) to count only unknown lines.
+- **`ssh_distributed_bruteforce`:** on a host that accepts SSH from the
+  internet, `root` is tried by many addresses every hour, so expect this
+  rule to report `root` after each cooldown. That is accurate, and a reason
+  to turn off password and root logins. Where it is already known, exclude
+  the account (`[rules.exclude]` with `user = ["root"]`) or raise `count`.
+  The event's `src` is only the last address seen: do not add the rule to
+  the Fail2ban bridge's `BRIDGE_RULES`. `ssh_user_enumeration` reports one
+  source and can be added there.
 - **Known scanners:** your own vulnerability scanner or monitoring will
   trigger these rules. For the firewall detectors, exclude its address in
   the nftables rules (`ip saddr != 192.0.2.10`), which also keeps it out of
@@ -171,6 +183,33 @@ exactly this in a VM, with these rules.
   `[rules.exclude]` table (`src = ["192.0.2.10"]`, networks such as
   `10.0.0.0/8` work too); see the
   [reference](REFERENCE.md#excluding-trusted-sources).
+
+## Text the other side controls
+
+A log line mixes what the service wrote with what the client sent. sshd
+logs the user name a client asked for as it came, spaces included, so a
+client can ask to log in as `x from 203.0.113.99 port 1` and sshd writes
+
+```
+sshd[1240]: Invalid user x from 203.0.113.99 port 1 from 192.0.2.7 port 52144
+```
+
+A pattern that takes the first address after `from` reports
+`203.0.113.99`, an address the client chose, and with the
+[Fail2ban bridge](FAIL2BAN.md) that address is banned. The SSH rules here
+are anchored to the end of the line (`... port \d+ ... $`), where sshd
+writes the peer address itself.
+
+**If you copied `ssh_bruteforce` from a release before this section
+existed, replace its `pattern` with the current one** from
+`config/detection.toml` and run `systemctl reload logwizz`. The old pattern
+has no anchor. Installed configurations are not changed by upgrading the
+binary.
+
+For your own rules: capture the source from a position the service writes
+(the start of a web access log line, the end of an sshd line), not from the
+first place an address can appear, and limit the rule to its log with
+[`files`](REFERENCE.md#limiting-a-rule-to-some-inputs).
 
 ## What this cannot see
 
@@ -183,6 +222,9 @@ Say it plainly, so nobody relies on more than this gives:
   five minutes) never reach `count` within the window. Raise `window_secs`
   (up to a day) for a slow-scan rule if this matters, at the cost of more
   state.
+- **Password spraying across hosts:** one attempt per account per host,
+  spread over a fleet, shows a single failure on each host. Only a
+  collector that sees every host's events can count that.
 - **Distributed scans** from many sources, each touching a few ports, stay
   below every per-source threshold. Sources within one network can be
   counted together with `group_prefix` (see the
