@@ -142,8 +142,11 @@ mod tests {
     use super::*;
     use crate::config;
 
+    /// The input the unscoped tests read their lines from.
+    const INPUT: &str = "/x";
+
     fn engine(rules: &str) -> Engine {
-        let text = format!("[[files]]\npath = \"/x\"\n{rules}");
+        let text = format!("[[files]]\npath = \"{INPUT}\"\n{rules}");
         Engine::new(config::parse(&text, Path::new("t")).unwrap().rules)
     }
 
@@ -155,7 +158,7 @@ mod tests {
 
     fn matches<'a>(e: &'a Engine, line: &[u8]) -> Vec<&'a str> {
         let mut out = Vec::new();
-        e.for_each_match(Path::new("/x"), line, |i| {
+        e.for_each_match(Path::new(INPUT), line, |i| {
             out.push(e.rules()[i].id.as_str())
         });
         out
@@ -266,11 +269,11 @@ mod tests {
         ));
         // An earlier emitting rule still fires; nothing after the ignore does.
         let mut ids = Vec::new();
-        assert!(e.for_each_match(Path::new("/x"), b"CRON job", |i| {
+        assert!(e.for_each_match(Path::new(INPUT), b"CRON job", |i| {
             ids.push(e.rules()[i].id.as_str())
         }));
         assert_eq!(ids, ["early"]);
-        assert!(e.for_each_match(Path::new("/x"), b"ntpd sync", |_| panic!("ignored")));
+        assert!(e.for_each_match(Path::new(INPUT), b"ntpd sync", |_| panic!("ignored")));
         // The catch-all reports what no ignore rule knows.
         assert_eq!(matches(&e, b"sshd: something new"), ["unknown"]);
     }

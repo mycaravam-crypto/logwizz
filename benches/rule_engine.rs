@@ -38,6 +38,9 @@ const LINES: &[&str] = &[
     "Oct 24 08:15:37 host dbus-daemon[700]: [system] Successfully activated service 'org.x'",
 ];
 
+/// The input the benchmark lines are attributed to; no rule is scoped.
+const INPUT: &str = "/x";
+
 fn engine(n: usize, kind: &str) -> Engine {
     let mut text = String::from("[[files]]\npath = \"/x\"\n");
     for i in 0..n {
@@ -68,7 +71,7 @@ fn bench_match(c: &mut Criterion) {
                 b.iter(|| {
                     let mut hits = 0;
                     for l in &lines {
-                        e.for_each_match(Path::new("/x"), black_box(l), |_| hits += 1);
+                        e.for_each_match(Path::new(INPUT), black_box(l), |_| hits += 1);
                     }
                     hits
                 })
@@ -113,7 +116,7 @@ fn bench_pipeline(c: &mut Criterion) {
                 let mut tf = TailedFile::new(path.clone(), StartupMode::Beginning, opts);
                 let mut hits = 0u64;
                 tf.poll(std::time::Instant::now(), &mut buf, &m, &mut |line| {
-                    e.for_each_match(Path::new("/x"), line.bytes, |_| hits += 1);
+                    e.for_each_match(Path::new(INPUT), line.bytes, |_| hits += 1);
                 });
                 assert_eq!(m.snapshot().lines_processed, total_lines);
                 hits
