@@ -69,17 +69,83 @@ fn rules_match_real_log_lines() {
     let null = "Oct 25 10:00:01 web1 kernel: logwizz-badflags: IN=eth0 OUT= SRC=203.0.113.66 \
                 DST=198.51.100.1 LEN=40 PROTO=TCP SPT=61000 DPT=22 WINDOW=1024 RES=0x00 URGP=0";
     assert_eq!(hits(&cfg, null), ["tcp_flag_scan src=203.0.113.66"]);
-    for line in [
-        "Oct 25 10:00:02 web1 sshd[1240]: Failed password for invalid user admin from 192.0.2.7 port 52144 ssh2",
-        "Oct 25 10:00:02 web1 sshd-session[1240]: Failed password for root from 192.0.2.7 port 52144 ssh2",
-        "Oct 25 10:00:02 web1 sshd[1240]: Invalid user oracle from 192.0.2.7 port 52144",
-        "2026-10-25T10:00:02.123+00:00 web1 sshd[1240]: Failed publickey for git from 192.0.2.7 port 52144 ssh2: ED25519 SHA256:x",
+    // (line, user, whether sshd reports the account as existing)
+    for (line, user, exists) in [
+        (
+            "Oct 25 10:00:02 web1 sshd[1240]: Failed password for invalid user admin from 192.0.2.7 port 52144 ssh2",
+            "admin",
+            false,
+        ),
+        (
+            "Oct 25 10:00:02 web1 sshd-session[1240]: Failed password for root from 192.0.2.7 port 52144 ssh2",
+            "root",
+            true,
+        ),
+        (
+            "Oct 25 10:00:02 web1 sshd[1240]: Invalid user oracle from 192.0.2.7 port 52144",
+            "oracle",
+            false,
+        ),
+        (
+            "2026-10-25T10:00:02.123+00:00 web1 sshd[1240]: Failed publickey for git from 192.0.2.7 port 52144 ssh2: ED25519 SHA256:x",
+            "git",
+            true,
+        ),
         // PasswordAuthentication no: a real user's attempt only logs how it ended.
-        "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Connection closed by authenticating user root 192.0.2.7 port 34280 [preauth]",
-        "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Disconnected from authenticating user root 192.0.2.7 port 34280 [preauth]",
-        "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Connection reset by authenticating user root 192.0.2.7 port 34280 [preauth]",
+        (
+            "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Connection closed by authenticating user root 192.0.2.7 port 34280 [preauth]",
+            "root",
+            true,
+        ),
+        (
+            "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Disconnected from authenticating user root 192.0.2.7 port 34280 [preauth]",
+            "root",
+            true,
+        ),
+        (
+            "2026-10-25T14:14:25.245120+01:00 web1 sshd-session[55948]: Connection reset by authenticating user root 192.0.2.7 port 34280 [preauth]",
+            "root",
+            true,
+        ),
     ] {
-        assert_eq!(hits(&cfg, line), ["ssh_bruteforce src=192.0.2.7"], "{line}");
+        let mut expected = vec![
+            "ssh_bruteforce src=192.0.2.7".to_string(),
+            format!("ssh_user_enumeration user={user} src=192.0.2.7"),
+        ];
+        if exists {
+            expected.push(format!(
+                "ssh_distributed_bruteforce user={user} src=192.0.2.7"
+            ));
+        }
+        assert_eq!(hits(&cfg, line), expected, "{line}");
+    }
+    // A user name is the client's text. The address sshd appends at the end
+    // of the line is the source, whatever the name contains.
+    for (line, user) in [
+        (
+            "sshd[1]: Invalid user x from 203.0.113.99 port 1 from 192.0.2.7 port 52144",
+            "x from 203.0.113.99 port 1",
+        ),
+        (
+            "sshd[1]: Failed password for invalid user a 203.0.113.99 port 2 from 192.0.2.7 port 52144 ssh2",
+            "a 203.0.113.99 port 2",
+        ),
+        ("sshd[1]: Invalid user  from 192.0.2.7 port 52144", ""),
+    ] {
+        let hit = hits(&cfg, line)
+            .into_iter()
+            .find(|h| h.starts_with("ssh_user_enumeration"))
+            .unwrap_or_else(|| panic!("no match: {line}"));
+        assert_eq!(
+            hit,
+            format!("ssh_user_enumeration user={user} src=192.0.2.7")
+        );
+        assert!(
+            !hits(&cfg, line)
+                .iter()
+                .any(|h| h.starts_with("ssh_distributed")),
+            "{line}"
+        );
     }
     for line in [
         "Oct 25 10:00:03 web1 sshd[1250]: banner exchange: Connection from 192.0.2.8 port 40000: invalid format",
@@ -267,6 +333,14 @@ fn every_detector_fires_at_its_count_and_then_cools_down() {
             "sshd[1]: Failed password for root from 192.0.2.4 port {n} ssh2",
         ),
         (
+            "ssh_user_enumeration",
+            "sshd[1]: Invalid user u{n} from 192.0.2.8 port 40000",
+        ),
+        (
+            "ssh_distributed_bruteforce",
+            "sshd[1]: Failed password for deploy from 198.51.100.{n} port 40000 ssh2",
+        ),
+        (
             "ssh_probe",
             "sshd[1]: banner exchange: Connection from 192.0.2.5 port {n}: invalid format",
         ),
@@ -301,4 +375,62 @@ fn every_detector_fires_at_its_count_and_then_cools_down() {
             );
         }
     }
+}
+
+/// Feeds `lines` to rule `id` at one instant and returns how often it fired.
+fn fired(cfg: &Config, id: &str, lines: impl Iterator<Item = String>) -> usize {
+    let m = Arc::new(Metrics::default());
+    let mut th = Thresholds::new(cfg.rules.len(), cfg.limits.threshold_max_groups, m);
+    let i = cfg.rules.iter().position(|r| r.id == id).unwrap();
+    let rule = &cfg.rules[i];
+    let t = rule.threshold.as_ref().unwrap();
+    let now = Instant::now();
+    lines
+        .filter(|line| {
+            assert!(rule.matcher.is_match(line.as_bytes()), "{id}: {line}");
+            let fields = rule.matcher.fields(line.as_bytes());
+            th.observe(i, id, t, Path::new("/var/log/auth.log"), &fields, now)
+                .is_some()
+        })
+        .count()
+}
+
+#[test]
+fn spraying_counts_names_and_sources_not_attempts() {
+    let cfg = detection();
+    // Hammering one account from one address is ssh_bruteforce's business.
+    let same = |n: u32| format!("sshd[1]: Failed password for root from 192.0.2.7 port {n} ssh2");
+    assert_eq!(fired(&cfg, "ssh_user_enumeration", (0..500).map(same)), 0);
+    assert_eq!(
+        fired(&cfg, "ssh_distributed_bruteforce", (0..500).map(same)),
+        0
+    );
+
+    // One address, a new name each time: reported once.
+    let names = |n: u32| format!("sshd[1]: Invalid user user{n} from 192.0.2.7 port 4000");
+    assert_eq!(fired(&cfg, "ssh_user_enumeration", (0..10).map(names)), 1);
+    assert_eq!(fired(&cfg, "ssh_user_enumeration", (0..9).map(names)), 0);
+
+    // One account, a new address each time: reported once, for the account.
+    let sources =
+        |n: u32| format!("sshd[1]: Failed password for deploy from 198.51.100.{n} port 4000 ssh2");
+    assert_eq!(
+        fired(&cfg, "ssh_distributed_bruteforce", (0..20).map(sources)),
+        1
+    );
+    assert_eq!(
+        fired(&cfg, "ssh_distributed_bruteforce", (0..19).map(sources)),
+        0
+    );
+    // Different accounts do not add up.
+    let spread = |n: u32| {
+        format!(
+            "sshd[1]: Failed password for svc{} from 198.51.100.{n} port 4000 ssh2",
+            n % 4
+        )
+    };
+    assert_eq!(
+        fired(&cfg, "ssh_distributed_bruteforce", (0..40).map(spread)),
+        0
+    );
 }

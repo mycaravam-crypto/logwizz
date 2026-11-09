@@ -137,6 +137,47 @@ window = "sliding"             # an attack paced across two fixed windows still 
 cooldown_secs = 600
 
 [[rules]]
+id = "ssh_user_enumeration"
+description = "One source tried many different SSH user names"
+match_type = "regex"
+# Password spraying and user-name guessing: a few attempts per name, which
+# stays below ssh_bruteforce's rate. The pattern is anchored to the end of
+# the line, where sshd writes the peer address itself: a crafted user name
+# ("x from 192.0.2.1 port 1") cannot stand in for the source.
+pattern = 'sshd(?:-session)?\[\d+\]: (?:Failed (?:password|publickey) for (?:invalid user )?|Invalid user |(?:Connection (?:closed|reset) by|Disconnected from) authenticating user )(?P<user>.*?) (?:from )?(?P<src>[0-9A-Fa-f.:]+) port \d+(?: ssh2(?:: \S+ \S+)?)?(?: \[preauth\])?\s*$'
+severity = "error"
+#[rules.exclude]
+#src = ["192.0.2.10", "10.0.0.0/8"]
+[rules.threshold]
+group_by = "src"
+distinct = "user"               # count different names, not attempts
+count = 10
+window_secs = 3600
+cooldown_secs = 3600
+
+[[rules]]
+id = "ssh_distributed_bruteforce"
+description = "Many sources tried to log in to one existing SSH account"
+match_type = "regex"
+# A botnet guessing one account, each address below ssh_bruteforce's count.
+# Only accounts that exist: sshd writes "invalid user" for the others, and
+# those lines do not match. The event's src is only the last address seen,
+# so do not add this rule to the Fail2ban bridge.
+pattern = 'sshd(?:-session)?\[\d+\]: (?:Failed (?:password|publickey) for |(?:Connection (?:closed|reset) by|Disconnected from) authenticating user )(?P<user>\S+) (?:from )?(?P<src>[0-9A-Fa-f.:]+) port \d+(?: ssh2(?:: \S+ \S+)?)?(?: \[preauth\])?\s*$'
+severity = "warning"
+# On a host that accepts SSH from the internet, root is tried by many
+# addresses every hour. If that is known and root cannot log in with a
+# password, leave root out:
+#[rules.exclude]
+#user = ["root"]
+[rules.threshold]
+group_by = "user"
+distinct = "src"                # count different addresses, not attempts
+count = 20
+window_secs = 3600
+cooldown_secs = 21600
+
+[[rules]]
 id = "ssh_probe"
 description = "SSH connection without a valid client banner (nmap -sV, masscan --banners, scanners)"
 match_type = "regex"
@@ -167,7 +208,7 @@ match_type = "regex"
 pattern = 'sshd(?:-session)?\[\d+\]: Accepted \S+ for (?P<login>\S+) from (?P<src>[0-9A-Fa-f.:]+) port \d+'
 severity = "critical"
 [rules.after]
-rules = ["port_scan", "fast_scan", "slow_scan", "tcp_flag_scan", "ssh_bruteforce", "ssh_probe", "scanner_user_agent"]
+rules = ["port_scan", "fast_scan", "slow_scan", "tcp_flag_scan", "ssh_bruteforce", "ssh_user_enumeration", "ssh_probe", "scanner_user_agent"]
 field = "src"
 within_secs = 3600
 
