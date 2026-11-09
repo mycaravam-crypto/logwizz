@@ -191,6 +191,33 @@ class FilterTests(unittest.TestCase):
             self.assertIsNotNone(m, line)
             self.assertEqual(m.group("host"), line.rsplit("=", 1)[1])
 
+    def test_recidive_filter_matches_only_bans_of_the_logwizz_jail(self):
+        conf = (SCRIPT.parent / "filter.d" / "logwizz-recidive.conf").read_text()
+        failregex = re.search(r"^failregex = (.*)$", conf, re.M).group(1)
+        pattern = re.compile(failregex.replace("<HOST>", r"(?P<host>\S+)"))
+        # Fail2ban removes the timestamp before it applies the expression.
+        prefix = " fail2ban.actions        [46533]: "
+        for jail, text, host in [
+            ("logwizz", f"Ban {V4}", V4),
+            ("logwizz", f"Ban {V6}", V6),
+            ("sshd", f"Ban {V4}", None),
+            ("logwizz-recidive", f"Ban {V4}", None),
+            ("logwizz", f"Unban {V4}", None),
+            ("logwizz", f"Restore Ban {V4}", None),
+            ("logwizz", f"Increase Ban {V4} (2 # 2h -> 2026-10-25 03:08:50)", None),
+        ]:
+            line = f"{prefix}NOTICE  [{jail}] {text}"
+            m = pattern.match(line)
+            self.assertEqual(m.group("host") if m else None, host, line)
+        self.assertIsNone(pattern.match(f"{prefix}WARNING [logwizz] {V4} already banned"))
+        self.assertIsNone(pattern.match(f" fail2ban.filter [1]: INFO [logwizz] Found {V4}"))
+
+    def test_shipped_jails_are_disabled(self):
+        for name in ("logwizz.local", "logwizz-recidive.local"):
+            conf = (SCRIPT.parent / "jail.d" / name).read_text()
+            self.assertRegex(conf, r"(?m)^enabled\s*=\s*false$", name)
+            self.assertNotRegex(conf, r"(?m)^enabled\s*=\s*true", name)
+
 
 
 NAMESPACE_CMD = ["journalctl", "--namespace=logwizz", "--unit=logwizz.service",

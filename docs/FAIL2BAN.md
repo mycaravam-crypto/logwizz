@@ -191,6 +191,58 @@ Test on a disposable host or with a controlled test event before relying on
 automatic blocking. The first version is a narrow integration, not a
 replacement for reviewing your detection thresholds.
 
+### Repeat offenders
+
+The `logwizz` jail bans for an hour, and a source that returns after each
+ban gets the same hour again. There are two ways to make repeated bans
+longer. Use one of them.
+
+**Fail2ban 0.11 or later** (Debian 11 and later, Ubuntu 22.04 and later):
+let the jail lengthen its own bans. Add to the `[logwizz]` section of
+`/etc/fail2ban/jail.d/logwizz.local`:
+
+```ini
+bantime.increment = true
+bantime.factor    = 1
+bantime.maxtime   = 1w
+```
+
+Each further ban of the same address is then longer than the last (1 h,
+2 h, 4 h, … up to a week), from Fail2ban's own ban history.
+
+**Any version, including 0.10** (Debian 10): a second jail that watches
+Fail2ban's log for bans by the `logwizz` jail. Install the two files, both
+shipped disabled:
+
+```sh
+sudo install -D -m 0644 packaging/fail2ban/filter.d/logwizz-recidive.conf \
+  /etc/fail2ban/filter.d/logwizz-recidive.conf
+sudo install -D -m 0644 packaging/fail2ban/jail.d/logwizz-recidive.local \
+  /etc/fail2ban/jail.d/logwizz-recidive.local
+```
+
+Review the file, set `enabled = true`, then:
+
+```sh
+sudo fail2ban-regex /var/log/fail2ban.log /etc/fail2ban/filter.d/logwizz-recidive.conf
+sudo fail2ban-client reload
+sudo fail2ban-client status logwizz-recidive
+```
+
+With its defaults, an address the `logwizz` jail banned three times within
+a day is banned on all ports for a week. Bans by other jails, unbans and
+bans restored after a Fail2ban restart do not count, and neither do this
+jail's own bans.
+
+A week-long ban of the wrong address is a week-long problem. Before
+enabling either, put your management addresses in `ignoreip` (see
+[One list of trusted networks](#one-list-of-trusted-networks)), and keep a
+way in that does not depend on the banned address, such as a console.
+`fail2ban-client set logwizz-recidive unbanip <address>` lifts a ban.
+
+The filter is checked with `fail2ban-regex` from Fail2ban 1.0.2 against
+sample log lines; a ban by this jail on a live host has not been verified.
+
 ### Ban notifications
 
 The supplied `config/detection.toml` monitors `/var/log/fail2ban.log` and has a

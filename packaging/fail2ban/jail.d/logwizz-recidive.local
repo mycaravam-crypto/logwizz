@@ -1,0 +1,21 @@
+# Optional: longer bans for sources the "logwizz" jail keeps banning.
+# Copy to /etc/fail2ban/jail.d/logwizz-recidive.local with
+# filter.d/logwizz-recidive.conf, and review before enabling.
+#
+# It reads Fail2ban's own log for "[logwizz] Ban <address>" and bans an
+# address for a week once the logwizz jail has banned it three times within
+# a day. Its own bans are logged under another jail name and do not count.
+#
+# Fail2ban 0.11 and later can do this inside the logwizz jail instead, with
+# bantime.increment; see docs/FAIL2BAN.md. Use one of the two, not both.
+[logwizz-recidive]
+enabled  = false
+filter   = logwizz-recidive
+logpath  = /var/log/fail2ban.log
+backend  = auto
+usedns   = no
+maxretry = 3
+findtime = 86400
+bantime  = 604800
+# All ports: a source that keeps coming back is not held to one service.
+banaction = %(banaction_allports)s
