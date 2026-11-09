@@ -1,0 +1,29 @@
+# Optional audit rules for the persistence rules in config/runtime.toml
+# (docs/RUNTIME-DETECTION.md, "Persistence"). A separate file: install it
+# only where you want these alerts, next to or without logwizz.rules.
+#
+#   install -m 0640 packaging/audit/logwizz-persistence.rules /etc/audit/rules.d/
+#   augenrules --load
+#
+# Keep exactly one -k per rule and keep the keys in step with the patterns
+# in config/runtime.toml.
+
+# Places that run code at boot, at login or on a schedule. Package
+# installation and `systemctl enable` write here too; see the guide.
+-w /etc/crontab -p wa -k logwizz_persistence_write
+-w /etc/cron.d/ -p wa -k logwizz_persistence_write
+-w /etc/cron.hourly/ -p wa -k logwizz_persistence_write
+-w /etc/cron.daily/ -p wa -k logwizz_persistence_write
+-w /etc/systemd/system/ -p wa -k logwizz_persistence_write
+-w /etc/profile.d/ -p wa -k logwizz_persistence_write
+# Loaded into every dynamically linked program.
+-w /etc/ld.so.preload -p wa -k logwizz_persistence_write
+# Users' crontabs. Uncomment the one your distribution has; a watch on a
+# missing directory fails to load.
+#-w /var/spool/cron/crontabs/ -p wa -k logwizz_persistence_write
+#-w /var/spool/cron/ -p wa -k logwizz_persistence_write
+
+# A kernel module is loaded. Drop the b32 rule on hosts without 32-bit
+# support.
+-a always,exit -F arch=b64 -S init_module,finit_module -k logwizz_module_load
+-a always,exit -F arch=b32 -S init_module,finit_module -k logwizz_module_load

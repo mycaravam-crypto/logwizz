@@ -344,6 +344,19 @@ if command -v auditctl >/dev/null || { apt-get update -q && apt-get install -qy 
   else res runtime_exec FAIL "no service_exec event $(unreadable)"; fi
   sh -c ': >> /etc/passwd'
   expect_event runtime_write '"rule":"sensitive_write"' sensitive_write /var/log/audit/audit.log
+  # Optional persistence rules: a separate file, loaded next to the first.
+  install -m 0640 "$P/logwizz-persistence.rules" /etc/audit/rules.d/logwizz-persistence.rules
+  if load=$(augenrules --load 2>&1) &&
+     auditctl -l | grep -q 'logwizz_persistence_write' &&
+     auditctl -l | grep -q 'logwizz_module_load' &&
+     auditctl -l | grep -q 'logwizz_sensitive_write'; then
+    res runtime_persistence_rules_loaded PASS "persistence and module keys active next to the packaged rules"
+  else
+    res runtime_persistence_rules_loaded FAIL "$(echo "$load" | tail -n 3 | tr '\n' ';')"
+  fi
+  : > /etc/cron.d/lwz-hostcheck
+  expect_event runtime_persistence '"rule":"persistence_write"' persistence_write /var/log/audit/audit.log
+  rm -f /etc/cron.d/lwz-hostcheck /etc/audit/rules.d/logwizz-persistence.rules
   rm /etc/audit/rules.d/logwizz.rules; augenrules --load >/dev/null
   expect_event runtime_rules_removed '"rule":"audit_disabled"' audit_disabled /var/log/audit/audit.log
   systemctl stop logwizz
