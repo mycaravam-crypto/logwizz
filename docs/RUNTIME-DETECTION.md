@@ -77,6 +77,48 @@ audit rules are not affected.
 `log_group` to a group the service has in its `SupplementaryGroups` and
 restart auditd. This has not been tested; see #53.
 
+## Persistence (optional)
+
+After getting in, an intruder usually arranges to come back: a cron job, a
+systemd unit, a login script, a preloaded library or a kernel module. A
+second, separate audit rule file covers these places:
+
+| Rule | Detects | Audit key |
+|---|---|---|
+| `persistence_write` | A write or attribute change to `/etc/crontab`, `/etc/cron.d/`, `cron.hourly/`, `cron.daily/`, `/etc/systemd/system/`, `/etc/profile.d/` or `/etc/ld.so.preload` | `logwizz_persistence_write` |
+| `module_load` | A kernel module is loaded (`init_module`, `finit_module`) | `logwizz_module_load` |
+
+```sh
+install -m 0640 packaging/audit/logwizz-persistence.rules /etc/audit/rules.d/
+augenrules --load
+auditctl -l | grep -E 'logwizz_(persistence_write|module_load)'
+```
+
+The two `[[rules]]` are in `config/runtime.toml`. Without the audit rule
+file their keys never appear in the log and they stay silent, so an
+existing installation changes only when both parts are added.
+
+Expect these alerts during normal maintenance, and read them with that in
+mind:
+
+- **Package installation and `systemctl enable`** write to the cron and
+  systemd directories. `exe` shows the program (`/usr/bin/dpkg`,
+  `/usr/bin/systemctl`) and `auid_name` who logged in. An alert with
+  `auid_name` `unset` outside a maintenance window, or with an unexpected
+  `exe`, is the one to look at.
+- **Kernel modules** are loaded at boot and when a device or a firewall
+  feature is first used, by `/usr/bin/kmod`. On a host whose set of modules
+  is settled, consider `sysctl kernel.modules_disabled=1` after boot: then
+  nothing can be loaded and any attempt fails.
+- The rule's `[rules.exclude]` can drop a program by `exe`, but an
+  excluded package manager also hides whatever is installed through it.
+
+Users' own crontabs (`/var/spool/cron/`) are commented out in the rule
+file, because the directory differs between distributions and a watch on a
+missing directory fails to load. `~/.ssh/authorized_keys` of users other
+than root is not covered: audit watches take fixed paths, one per home
+directory.
+
 ## Notifications and response
 
 The events reach `logwizz-notify` like any other event: they are grouped by
@@ -106,7 +148,7 @@ When an alert fires:
    belongs to (`systemctl status <ppid>`), then the deployed version of that
    service and its release and SBOM (see
    [release verification](RELEASE-VERIFICATION.md)).
-3. For `sensitive_write`: compare the file with your backup or configuration
+3. For `sensitive_write` and `persistence_write`: compare the file with your backup or configuration
    management. `auid` shows who logged in, even after `sudo`.
 
 ## Tuning
@@ -147,6 +189,9 @@ Say it plainly, so nobody relies on more than this gives:
   (`tests/host/run-vm.sh`) installs auditd and these rules on each, and checks
   that the packaged service reads `audit.log` without extra permissions,
   reports `service_exec` and `sensitive_write`, and reports `audit_disabled`
-  when the rules are removed as described above. `audit_lost` needs a full
+  when the rules are removed as described above. It also loads the optional
+  persistence rules and checks that a new file in `/etc/cron.d/` is reported
+  as `persistence_write`. `module_load` is only checked for its audit rule
+  being active, and against a sample line. `audit_lost` needs a full
   kernel backlog and is only tested against sample lines (`tests/runtime.rs`).
   RHEL-family hosts are not tested (#53).

@@ -37,6 +37,7 @@ install -m 0755 "$root/target/x86_64-unknown-linux-musl/release/logwizz-notify" 
 cp "$root/packaging/logwizz.service" "$root/packaging/logwizz-notify.service" \
   "$here/hostcheck.sh" "$here/logwizz.nft" "$root/docs/DETECTION.md" \
   "$root/config/runtime.toml" "$root/packaging/audit/logwizz.rules" \
+  "$root/packaging/audit/logwizz-persistence.rules" \
   "$here/fail2ban-e2e.sh" "$root/packaging/fail2ban/action.d/logwizz-report.py" payload/
 install -m 0644 "$root/packaging/fail2ban/filter.d/logwizz.conf" payload/logwizz-fail2ban-filter.conf
 # The host config already watches auth.log and syslog. On Ubuntu 24.04, rsyslog

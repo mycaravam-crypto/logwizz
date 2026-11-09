@@ -45,6 +45,27 @@ match_type = "regex"
 pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_sensitive_write"(?:\x1d.*? AUID="(?P<auid_name>[^"]*)" UID="(?P<uid_name>[^"]*)")?'
 severity = "warning"
 
+# The next two rules need packaging/audit/logwizz-persistence.rules. Without
+# those audit rules their keys never appear and the rules stay silent.
+[[rules]]
+id = "persistence_write"
+description = "A cron, systemd, profile or preload file was changed"
+match_type = "regex"
+pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_persistence_write"(?:\x1d.*? AUID="(?P<auid_name>[^"]*)" UID="(?P<uid_name>[^"]*)")?'
+severity = "warning"
+# Package installation writes to these directories as well. Excluding the
+# package manager hides anything installed through it, so prefer to expect
+# these alerts during maintenance:
+# [rules.exclude]
+# exe = ["/usr/bin/dpkg"]
+
+[[rules]]
+id = "module_load"
+description = "A kernel module was loaded"
+match_type = "regex"
+pattern = '^type=SYSCALL msg=audit\([\d.]+:(?P<serial>\d+)\): .* pid=(?P<pid>\d+) auid=(?P<auid>\d+) uid=(?P<uid>\d+) .* exe=(?:"(?P<exe>[^"]*)"|\S+) .*key="logwizz_module_load"(?:\x1d.*? AUID="(?P<auid_name>[^"]*)" UID="(?P<uid_name>[^"]*)")?'
+severity = "warning"
+
 # Blind spots made visible. Removing logwizz's audit rules or disabling audit
 # is itself logged.
 [[rules]]

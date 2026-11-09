@@ -87,7 +87,46 @@ fn rules_match_audit_records() {
         ["sensitive_write serial=4300 pid=2002 auid=1000 uid=0 exe=/usr/bin/bash"]
     );
 
+    // Persistence: the same record shape under the optional keys.
+    let cron = write.replace("logwizz_sensitive_write", "logwizz_persistence_write");
+    assert_eq!(
+        hits(&cfg, &cron),
+        ["persistence_write serial=4300 pid=2002 auid=1000 uid=0 exe=/usr/bin/bash"]
+    );
+    let cron_enriched =
+        format!("{cron}\u{1d}ARCH=x86_64 SYSCALL=openat AUID=\"alice\" UID=\"root\" GID=\"root\"");
+    assert_eq!(
+        hits(&cfg, &cron_enriched),
+        [
+            "persistence_write serial=4300 pid=2002 auid=1000 uid=0 exe=/usr/bin/bash \
+             auid_name=alice uid_name=root"
+        ]
+    );
+    let module = "type=SYSCALL msg=audit(1761400300.789:4500): arch=c000003e syscall=313 success=yes \
+                  exit=0 a0=3 a1=55d0c8a3b2a0 a2=0 a3=0 items=1 ppid=1001 pid=2100 \
+                  auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 \
+                  tty=(none) ses=4294967295 comm=\"modprobe\" exe=\"/usr/bin/kmod\" \
+                  subj=unconfined key=\"logwizz_module_load\"\u{1d}ARCH=x86_64 \
+                  SYSCALL=finit_module AUID=\"unset\" UID=\"root\" GID=\"root\"";
+    assert_eq!(
+        hits(&cfg, module),
+        [
+            "module_load serial=4500 pid=2100 auid=4294967295 uid=0 exe=/usr/bin/kmod \
+             auid_name=unset uid_name=root"
+        ]
+    );
+    // A key that only starts like one of ours belongs to someone else's rule.
+    assert!(
+        hits(
+            &cfg,
+            &cron.replace("persistence_write\"", "persistence_write_x\"")
+        )
+        .is_empty()
+    );
+
     for line in [
+        "type=CONFIG_CHANGE msg=audit(1761400200.000:4400): auid=1000 ses=3 subj=unconfined \
+         op=remove_rule key=\"logwizz_persistence_write\" list=4 res=1",
         "type=CONFIG_CHANGE msg=audit(1761400200.000:4400): auid=1000 ses=3 subj=unconfined \
          op=remove_rule key=\"logwizz_service_exec\" list=4 res=1",
         "type=CONFIG_CHANGE msg=audit(1761400200.000:4400): op=set audit_enabled=0 old=1 \
