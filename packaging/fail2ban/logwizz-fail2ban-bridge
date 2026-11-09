@@ -2,8 +2,8 @@
 """Forward selected Logwizz journal events to a Fail2ban-friendly log.
 
 This optional adapter is deliberately outside the Logwizz Rust daemon.
-It reads the dedicated systemd journal namespace and writes only validated,
-explicitly eligible source-IP events. Fail2ban, with one generic filter,
+It reads Logwizz's events from the systemd journal (the dedicated namespace
+by default) and writes only validated, explicitly eligible source-IP events. Fail2ban, with one generic filter,
 does the banning.
 
 Settings come from the environment (/etc/logwizz/fail2ban-bridge.env):
@@ -12,9 +12,17 @@ BRIDGE_RULES    comma-separated rule IDs that may lead to a ban
                 (default: DEFAULT_RULES)
 BRIDGE_IGNORE   comma-separated addresses or networks never written
 BRIDGE_DRY_RUN  1: log what would be written, write nothing
+BRIDGE_JOURNAL_MODE
+                namespace (default): the "logwizz" journal namespace
+                legacy: the main journal, for logwizz-legacy.service on
+                systemd older than 245 (Debian 10)
+                auto: the namespace if journalctl supports it, else legacy
 
 Invalid settings stop the bridge before it reads anything (fail closed).
 """
+# Annotations stay unevaluated, so the script also loads on Python 3.7 (Debian 10).
+from __future__ import annotations
+
 import contextlib
 import ipaddress
 import json
@@ -37,6 +45,7 @@ DEFAULT_RULES = frozenset({
 })
 # Logwizz rule IDs: ASCII letters, digits, '_', '-', '.' and ':'.
 RULE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+JOURNAL_MODES = ("namespace", "legacy", "auto")
 
 
 class Settings:
@@ -63,6 +72,9 @@ class Settings:
         if dry not in ("0", "1"):
             raise ValueError("BRIDGE_DRY_RUN must be 0 or 1")
         self.dry_run = dry == "1"
+        self.journal_mode = env.get("BRIDGE_JOURNAL_MODE", "namespace").strip()
+        if self.journal_mode not in JOURNAL_MODES:
+            raise ValueError("BRIDGE_JOURNAL_MODE must be namespace, legacy or auto")
 
 
 def bannable(address) -> bool:
@@ -95,36 +107,61 @@ def format_event(raw: str, settings: Settings) -> str | None:
     return f"logwizz rule={rule} src={address.compressed}"
 
 
+def namespace_supported() -> bool:
+    """Whether this journalctl knows --namespace (systemd >= 245)."""
+    done = subprocess.run(
+        ["journalctl", "--help"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, encoding="utf-8", errors="replace", check=True,
+    )
+    return "--namespace" in done.stdout
+
+
+def journal_command(mode: str) -> list[str]:
+    """The journalctl command that follows Logwizz's events from now on."""
+    if mode == "auto":
+        mode = "namespace" if namespace_supported() else "legacy"
+    cmd = ["journalctl"]
+    if mode == "namespace":
+        cmd.append("--namespace=logwizz")
+    # Legacy: the main journal. --unit matches the trusted _SYSTEMD_UNIT field,
+    # which journald sets itself, so other local users cannot forge these entries.
+    return cmd + ["--unit=logwizz.service", "--output=cat", "--follow", "--since=now"]
+
+
 def main() -> int:
     try:
         settings = Settings(os.environ)
     except ValueError as exc:
         print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
         return 2
+    try:
+        cmd = journal_command(settings.journal_mode)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
+        return 1
+    journal = "journal namespace" if "--namespace=logwizz" in cmd else "main journal"
     mode = "dry run, writing nothing" if settings.dry_run else f"writing {OUTPUT}"
     print(
         f"logwizz-fail2ban-bridge: rules={','.join(sorted(settings.rules))} "
-        f"ignored networks={len(settings.ignore)}; {mode}",
+        f"ignored networks={len(settings.ignore)}; reading the {journal}; {mode}",
         file=sys.stderr,
     )
     try:
         with contextlib.ExitStack() as stack:
-            return follow(settings, stack)
+            return follow(settings, stack, cmd)
     except OSError as exc:
         print(f"logwizz-fail2ban-bridge: {exc}", file=sys.stderr)
         return 1
 
 
-def follow(settings: Settings, stack: contextlib.ExitStack) -> int:
+def follow(settings: Settings, stack: contextlib.ExitStack, cmd=None) -> int:
+    if cmd is None:
+        cmd = journal_command(settings.journal_mode)
     out = None
     if not settings.dry_run:
         OUTPUT.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
         out = stack.enter_context(OUTPUT.open("a", encoding="utf-8"))
         OUTPUT.chmod(0o640)
-    cmd = [
-        "journalctl", "--namespace=logwizz", "--unit=logwizz.service",
-        "--output=cat", "--follow", "--since=now",
-    ]
     with subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=sys.stderr,
         text=True, encoding="utf-8", errors="replace", bufsize=1,

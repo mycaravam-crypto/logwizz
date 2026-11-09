@@ -89,6 +89,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(DEFAULTS.rules, BRIDGE.DEFAULT_RULES)
         self.assertEqual(DEFAULTS.ignore, ())
         self.assertFalse(DEFAULTS.dry_run)
+        self.assertEqual(DEFAULTS.journal_mode, "namespace")
 
     def test_rule_list_replaces_the_default(self):
         s = BRIDGE.Settings({"BRIDGE_RULES": " subnet_scan , port_scan,"})
@@ -113,6 +114,9 @@ class SettingsTests(unittest.TestCase):
             {"BRIDGE_IGNORE": "10.0.0.0/33"},
             {"BRIDGE_IGNORE": "example.com"},
             {"BRIDGE_DRY_RUN": "yes"},
+            {"BRIDGE_JOURNAL_MODE": ""},
+            {"BRIDGE_JOURNAL_MODE": "Legacy"},
+            {"BRIDGE_JOURNAL_MODE": "namespace;legacy"},
         ]:
             with self.assertRaises(ValueError, msg=env):
                 BRIDGE.Settings(env)
@@ -132,6 +136,69 @@ class FilterTests(unittest.TestCase):
             self.assertIsNotNone(m, line)
             self.assertEqual(m.group("host"), line.rsplit("=", 1)[1])
 
+
+
+NAMESPACE_CMD = ["journalctl", "--namespace=logwizz", "--unit=logwizz.service",
+                 "--output=cat", "--follow", "--since=now"]
+LEGACY_CMD = ["journalctl", "--unit=logwizz.service",
+              "--output=cat", "--follow", "--since=now"]
+
+
+class JournalModeTests(unittest.TestCase):
+    def test_default_and_namespace_do_not_probe_journalctl(self):
+        with patch.object(BRIDGE, "namespace_supported") as probe:
+            self.assertEqual(BRIDGE.journal_command(DEFAULTS.journal_mode), NAMESPACE_CMD)
+            self.assertEqual(BRIDGE.journal_command("namespace"), NAMESPACE_CMD)
+            self.assertEqual(BRIDGE.journal_command("legacy"), LEGACY_CMD)
+        probe.assert_not_called()
+
+    def test_auto_follows_journalctl_support(self):
+        with patch.object(BRIDGE, "namespace_supported", return_value=True):
+            self.assertEqual(BRIDGE.journal_command("auto"), NAMESPACE_CMD)
+        with patch.object(BRIDGE, "namespace_supported", return_value=False):
+            self.assertEqual(BRIDGE.journal_command("auto"), LEGACY_CMD)
+
+    def test_probe_reads_journalctl_help(self):
+        for text, expected in [("  --namespace=NAMESPACE  Show ...\n", True),
+                               ("  -u --unit=UNIT  Show ...\n", False)]:
+            done = BRIDGE.subprocess.CompletedProcess([], 0, stdout=text)
+            with patch.object(BRIDGE.subprocess, "run", return_value=done) as run:
+                self.assertEqual(BRIDGE.namespace_supported(), expected)
+            self.assertEqual(run.call_args.args[0], ["journalctl", "--help"])
+
+    def run_main(self, env, **patches):
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name, value in patches.items():
+                stack.enter_context(patch.object(BRIDGE, name, **value))
+            follow = stack.enter_context(patch.object(BRIDGE, "follow", return_value=0))
+            stack.enter_context(patch.dict(BRIDGE.os.environ, env, clear=True))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            code = BRIDGE.main()
+        return code, follow, stderr.getvalue()
+
+    def test_legacy_mode_reads_the_main_journal(self):
+        code, follow, err = self.run_main(
+            {"BRIDGE_DRY_RUN": "1", "BRIDGE_JOURNAL_MODE": "legacy"})
+        self.assertEqual(code, 0)
+        self.assertEqual(follow.call_args.args[2], LEGACY_CMD)
+        self.assertIn("reading the main journal", err)
+
+    def test_unset_mode_keeps_the_namespace(self):
+        code, follow, err = self.run_main({"BRIDGE_DRY_RUN": "1"})
+        self.assertEqual(code, 0)
+        self.assertEqual(follow.call_args.args[2], NAMESPACE_CMD)
+        self.assertIn("reading the journal namespace", err)
+
+    def test_failed_probe_stops_before_following(self):
+        for exc in (FileNotFoundError("journalctl missing"),
+                    BRIDGE.subprocess.CalledProcessError(1, "journalctl")):
+            code, follow, err = self.run_main(
+                {"BRIDGE_JOURNAL_MODE": "auto"},
+                namespace_supported={"side_effect": exc})
+            self.assertEqual(code, 1)
+            follow.assert_not_called()
+            self.assertIn("journalctl", err)
 
 
 class FollowProcessTests(unittest.TestCase):
@@ -163,11 +230,7 @@ class FollowProcessTests(unittest.TestCase):
              contextlib.redirect_stderr(stderr), contextlib.ExitStack() as stack:
             code = BRIDGE.follow(settings, stack)
         self.assertEqual(code, expected_code)
-        self.assertEqual(
-            calls,
-            [["journalctl", "--namespace=logwizz", "--unit=logwizz.service",
-              "--output=cat", "--follow", "--since=now"]],
-        )
+        self.assertEqual(calls, [NAMESPACE_CMD])
         return stderr.getvalue()
 
     def test_journalctl_failure_status_is_propagated(self):
