@@ -9,8 +9,8 @@ DynamicUser=yes
 SupplementaryGroups=systemd-journal
 LogsDirectory=logwizz
 LogsDirectoryMode=0750
-# Optional settings: BRIDGE_RULES, BRIDGE_IGNORE, BRIDGE_DRY_RUN,
-# BRIDGE_JOURNAL_MODE.
+# Optional settings: BRIDGE_RULES, BRIDGE_IGNORE, BRIDGE_IGNORE_FILE,
+# BRIDGE_DRY_RUN, BRIDGE_JOURNAL_MODE.
 EnvironmentFile=-/etc/logwizz/fail2ban-bridge.env
 ExecStart=/usr/local/libexec/logwizz-fail2ban-bridge
 Restart=on-failure

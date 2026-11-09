@@ -124,6 +124,61 @@ class SettingsTests(unittest.TestCase):
     def test_dry_run(self):
         self.assertTrue(BRIDGE.Settings({"BRIDGE_DRY_RUN": "1"}).dry_run)
 
+    def ignore_file(self, content):
+        tmp = tempfile.NamedTemporaryFile("wb", suffix=".list", delete=False)
+        self.addCleanup(Path(tmp.name).unlink)
+        with tmp:
+            tmp.write(content)
+        return tmp.name
+
+    def test_ignore_file_adds_to_the_ignore_list(self):
+        path = self.ignore_file(
+            b"# management\n185.220.101.0/24   # office\n\n  2a01:4f8::/32\n185.220.103.9\n")
+        s = BRIDGE.Settings({"BRIDGE_IGNORE_FILE": path})
+        self.assertEqual(len(s.ignore), 3)
+        self.assertIsNone(fmt(event("port_scan", V4), s))
+        self.assertIsNone(fmt(event("port_scan", V6), s))
+        self.assertIsNone(fmt(event("port_scan", "185.220.103.9"), s))
+        self.assertIsNotNone(fmt(event("port_scan", "185.220.102.7"), s))
+        # Both sources apply.
+        s = BRIDGE.Settings({"BRIDGE_IGNORE": "185.220.102.0/24", "BRIDGE_IGNORE_FILE": path})
+        self.assertEqual(len(s.ignore), 4)
+        self.assertIsNone(fmt(event("port_scan", "185.220.102.7"), s))
+        self.assertIsNone(fmt(event("port_scan", V4), s))
+
+    def test_empty_ignore_file_is_valid(self):
+        s = BRIDGE.Settings({"BRIDGE_IGNORE_FILE": self.ignore_file(b"# nothing yet\n")})
+        self.assertEqual(s.ignore, ())
+
+    def test_ignore_file_problems_fail_closed(self):
+        big = b"10.0.0.0/8\n" * (BRIDGE.MAX_IGNORE_FILE_BYTES // 11 + 1)
+        for value, message in [
+            ("/nonexistent/logwizz-ignore.list", "No such file"),
+            ("relative.list", "absolute path"),
+            ("", "absolute path"),
+            (self.ignore_file(b"10.0.0.0/8\nexample.com\n"), "line 2"),
+            (self.ignore_file(b"10.0.0.0/33\n"), "line 1"),
+            (self.ignore_file(b"10.0.0.1, 10.0.0.2\n"), "line 1"),
+            (self.ignore_file(b"\xff\xfe"), "not UTF-8"),
+            (self.ignore_file(big), "larger than"),
+        ]:
+            with self.assertRaises(ValueError, msg=value) as caught:
+                BRIDGE.Settings({"BRIDGE_IGNORE_FILE": value})
+            self.assertIn(message, str(caught.exception))
+
+    def test_unreadable_ignore_file_stops_before_the_journal(self):
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            popen = stack.enter_context(patch.object(BRIDGE.subprocess, "Popen"))
+            stack.enter_context(patch.dict(BRIDGE.os.environ, {
+                "BRIDGE_IGNORE_FILE": "/nonexistent/logwizz-ignore.list",
+            }, clear=True))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            code = BRIDGE.main()
+        self.assertEqual(code, 2)
+        popen.assert_not_called()
+        self.assertIn("BRIDGE_IGNORE_FILE", stderr.getvalue())
+
 
 class FilterTests(unittest.TestCase):
     def test_generic_filter_matches_every_bridge_line(self):

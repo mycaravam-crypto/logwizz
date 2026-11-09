@@ -11,6 +11,9 @@ Settings come from the environment (/etc/logwizz/fail2ban-bridge.env):
 BRIDGE_RULES    comma-separated rule IDs that may lead to a ban
                 (default: DEFAULT_RULES)
 BRIDGE_IGNORE   comma-separated addresses or networks never written
+BRIDGE_IGNORE_FILE
+                file with more such addresses or networks, one per line
+                ('#' starts a comment), added to BRIDGE_IGNORE
 BRIDGE_DRY_RUN  1: log what would be written, write nothing
 BRIDGE_JOURNAL_MODE
                 namespace (default): the "logwizz" journal namespace
@@ -46,6 +49,37 @@ DEFAULT_RULES = frozenset({
 # Logwizz rule IDs: ASCII letters, digits, '_', '-', '.' and ':'.
 RULE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 JOURNAL_MODES = ("namespace", "legacy", "auto")
+# An ignore file larger than this is refused rather than read in part.
+MAX_IGNORE_FILE_BYTES = 1 << 20
+
+
+def read_ignore_file(path: str) -> list:
+    """Networks listed in `path`. Raises ValueError if the file cannot be
+    read in full or any line is not an address or network: running with part
+    of an allowlist would ban what the administrator meant to protect."""
+    if not os.path.isabs(path):
+        raise ValueError("BRIDGE_IGNORE_FILE must be an absolute path")
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_IGNORE_FILE_BYTES + 1)
+    except OSError as exc:
+        raise ValueError(f"BRIDGE_IGNORE_FILE: {exc}") from None
+    if len(data) > MAX_IGNORE_FILE_BYTES:
+        raise ValueError(f"BRIDGE_IGNORE_FILE: larger than {MAX_IGNORE_FILE_BYTES} bytes")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("BRIDGE_IGNORE_FILE: not UTF-8 text") from None
+    networks = []
+    for number, line in enumerate(text.splitlines(), 1):
+        entry = line.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError as exc:
+            raise ValueError(f"BRIDGE_IGNORE_FILE line {number}: {exc}") from None
+    return networks
 
 
 class Settings:
@@ -68,6 +102,8 @@ class Settings:
             )
         except ValueError as exc:
             raise ValueError(f"BRIDGE_IGNORE: {exc}") from None
+        if "BRIDGE_IGNORE_FILE" in env:
+            self.ignore += tuple(read_ignore_file(env["BRIDGE_IGNORE_FILE"].strip()))
         dry = env.get("BRIDGE_DRY_RUN", "0").strip()
         if dry not in ("0", "1"):
             raise ValueError("BRIDGE_DRY_RUN must be 0 or 1")

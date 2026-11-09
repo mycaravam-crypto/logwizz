@@ -70,6 +70,7 @@ the defaults.
 |---|---|---|
 | `BRIDGE_RULES` | the list above | Comma-separated rule IDs whose events may lead to a ban. |
 | `BRIDGE_IGNORE` | empty | Comma-separated addresses and networks never written, e.g. `192.0.2.10,10.0.0.0/8`. |
+| `BRIDGE_IGNORE_FILE` | unset | Absolute path of a file with more such addresses and networks, one per line; `#` starts a comment. Added to `BRIDGE_IGNORE`. See [One list of trusted networks](#one-list-of-trusted-networks). |
 | `BRIDGE_DRY_RUN` | `0` | `1`: log each line it would write to the bridge's journal, and write nothing. The example file sets it. |
 | `BRIDGE_JOURNAL_MODE` | `namespace` | Where events are read from: `namespace` (the `logwizz` journal namespace), `legacy` (the main journal) or `auto`. See [Hosts without journal namespaces](#hosts-without-journal-namespaces). |
 
@@ -98,6 +99,47 @@ sudo systemctl enable --now logwizz-fail2ban-bridge.service
 sudo fail2ban-client reload
 sudo fail2ban-client status logwizz
 ```
+
+### One list of trusted networks
+
+Trusted addresses are otherwise kept in three places: each rule's
+`[rules.exclude]`, `BRIDGE_IGNORE` and Fail2ban's `ignoreip`. A network
+missing from one of them is the usual way to ban yourself. Keep them in one
+file, `/etc/logwizz/trusted-networks.list` (mode `0644`):
+
+```text
+# management VPN
+198.51.100.0/24
+# monitoring host
+192.0.2.10
+2001:db8:10::/48
+```
+
+and name it in `/etc/logwizz/fail2ban-bridge.env`:
+
+```sh
+BRIDGE_IGNORE_FILE=/etc/logwizz/trusted-networks.list
+```
+
+The bridge reads the file when it starts, so restart it after a change.
+It runs as an unprivileged user and must be able to read the file; the
+list is not a secret on the host. If the file is missing, unreadable,
+larger than 1 MiB or has a line that is not an address or network, the
+bridge stops with the reason and the line number instead of running
+without the list.
+
+Fail2ban has no setting that reads `ignoreip` from a file. Generate it from
+the same list whenever the list changes:
+
+```sh
+list=$(sed 's/#.*//' /etc/logwizz/trusted-networks.list | xargs)
+printf '[logwizz]\nignoreip = 127.0.0.1/8 ::1 %s\n' "$list" \
+  | sudo tee /etc/fail2ban/jail.d/logwizz-ignore.local
+sudo fail2ban-client reload
+```
+
+Rule `exclude` tables in the Logwizz configuration are still separate: they
+decide what is reported, not only what is banned.
 
 ### Hosts without journal namespaces
 
