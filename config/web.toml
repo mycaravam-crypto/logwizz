@@ -1,0 +1,90 @@
+# logwizz web attack detection: path traversal, probes for secrets and
+# backups, login guessing and content discovery, from a web access log.
+#
+# For the combined log format (nginx, Apache) and Caddy's JSON access log.
+# To add this to an existing configuration, copy the [[files]] and [[rules]]
+# blocks below into it. See docs/DETECTION.md, "Web attacks".
+#
+# Behind a reverse proxy, load balancer or CDN the first address in the log
+# is the proxy's, and every client counts as one source: log the real
+# client address in that position first, or do not use these rules there.
+# Do not add them to the Fail2ban bridge before that is settled.
+#
+# Each pattern reads the source from the start of the line (or Caddy's own
+# "remote_ip" key), which the server writes, never from the request.
+
+[general]
+state_file = "/var/lib/logwizz/offsets.json"
+
+[output]
+format = "json"
+syslog_prefix = true
+
+[[files]]
+path = "/var/log/nginx/access.log"   # or Apache's access log
+
+[[files]]
+path = "/var/log/caddy/access.log"   # JSON format
+enabled = false
+
+[[rules]]
+id = "web_path_traversal"
+description = "Requests trying to leave the web root"
+match_type = "regex"
+# "../" (also encoded) or a system file in the request path or query.
+pattern = '^(?:\{.*?"remote_ip":")?(?P<src>[^\s"]+)[\s"].*?(?:"[A-Z]{3,8} |"uri":")[^" ]*?(?i:\.\./|\.\.\\|\.\.%2f|\.\.%5c|%2e%2e|/etc/passwd|/proc/self/)'
+severity = "error"
+#[rules.exclude]
+#src = ["192.0.2.10", "10.0.0.0/8"]
+[rules.threshold]
+group_by = "src"
+count = 3
+window_secs = 600
+cooldown_secs = 3600
+
+[[rules]]
+id = "web_sensitive_probe"
+description = "Requests for secrets, repository data or backups"
+match_type = "regex"
+# In the path only, not the query string. /.well-known/ does not match.
+pattern = '^(?:\{.*?"remote_ip":")?(?P<src>[^\s"]+)[\s"].*?(?:"[A-Z]{3,8} |"uri":")[^" ?]*?(?i:/\.env(?:\.[\w.-]+)?|/\.git/[\w./-]*|/\.svn/[\w./-]*|/\.aws/[\w./-]*|/\.ssh/[\w./-]*|/\.DS_Store|/\.htpasswd|/wp-config\.php[.~][\w.~-]*|/phpinfo\.php|/[\w.-]+\.sql(?:\.gz|\.zip|\.bz2)?)(?:[?" ]|$)'
+severity = "warning"
+#[rules.exclude]
+#src = ["192.0.2.10", "10.0.0.0/8"]
+[rules.threshold]
+group_by = "src"
+count = 3
+window_secs = 600
+cooldown_secs = 3600
+
+[[rules]]
+id = "web_login_bruteforce"
+description = "Many login or XML-RPC posts from one source (WordPress)"
+match_type = "regex"
+pattern = '^(?:\{.*?"remote_ip":")?(?P<src>[^\s"]+)[\s"].*?(?:"POST |"method":"POST",.*?"uri":")[^" ?]*?(?i:/wp-login\.php|/xmlrpc\.php)(?:[?" ]|$)'
+severity = "error"
+#[rules.exclude]
+#src = ["192.0.2.10", "10.0.0.0/8"]
+[rules.threshold]
+group_by = "src"
+count = 20
+window_secs = 300
+window = "sliding"
+cooldown_secs = 3600
+
+[[rules]]
+id = "web_error_burst"
+description = "Many client-error responses to one source (content discovery)"
+match_type = "regex"
+# Status 400, 401, 403 or 404. Not 429: that is your own rate limit working.
+pattern = '^(?:\{.*?"remote_ip":")?(?P<src>[^\s"]+)[\s"](?:[^"]*"[^"]*" |.*"status":)40[0134]\b'
+severity = "warning"
+#[rules.exclude]
+#src = ["192.0.2.10", "10.0.0.0/8"]
+[rules.threshold]
+group_by = "src"
+# A page with many missing assets can send dozens of 404s to one visitor.
+# Fix those links, or raise this until normal visits stay below it.
+count = 40
+window_secs = 60
+cooldown_secs = 3600

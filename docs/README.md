@@ -22,7 +22,7 @@ Use this page to find the right level of detail.
 ## Configuration and deployment
 
 - [Example configuration](../config/logwizz.example.toml)
-- [Detection rules](../config/detection.toml), [runtime detection rules](../config/runtime.toml) and [audit rules](../packaging/audit/logwizz.rules)
+- [Detection rules](../config/detection.toml), [web attack rules](../config/web.toml), [runtime detection rules](../config/runtime.toml) and [audit rules](../packaging/audit/logwizz.rules)
 - [Systemd service](../packaging/logwizz.service)
 - [Fail2ban integration files](../packaging/fail2ban/)
 - [Notification service and example environment](../packaging/logwizz-notify.service), [environment template](../packaging/notify.env.example)

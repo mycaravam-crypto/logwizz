@@ -184,6 +184,38 @@ exactly this in a VM, with these rules.
   `10.0.0.0/8` work too); see the
   [reference](REFERENCE.md#excluding-trusted-sources).
 
+## Web attacks
+
+[`config/web.toml`](../config/web.toml) is a separate, optional profile for
+a web access log in the combined format (nginx, Apache) or Caddy's JSON
+format. Copy its `[[files]]` and `[[rules]]` blocks into your configuration
+and reload.
+
+| Rule | Detects | Reports a source after |
+|---|---|---|
+| `web_path_traversal` | `../` (also encoded) or `/etc/passwd`, `/proc/self/` in a request | 3 requests in 10 minutes |
+| `web_sensitive_probe` | Requests for `.env`, `.git/`, `.aws/`, `.ssh/`, `.htpasswd`, `wp-config.php` backups, `phpinfo.php`, SQL dumps | 3 requests in 10 minutes |
+| `web_login_bruteforce` | POSTs to `wp-login.php` or `xmlrpc.php` | 20 in 5 minutes |
+| `web_error_burst` | Responses with status 400, 401, 403 or 404 (content discovery such as dirb, gobuster, ffuf) | 40 in a minute |
+
+Each rule then stays silent for that source for an hour. The events carry
+only `src`; request paths stay on the host.
+
+- **Reverse proxies and CDNs:** if the server is behind one, the first
+  address in the log is the proxy's and all clients count as one source.
+  Log the real client address in that position (nginx `realip`, Apache
+  `mod_remoteip`, Caddy `trusted_proxies`) before using these rules, and
+  before adding any of them to the Fail2ban bridge's `BRIDGE_RULES`.
+- **`web_error_burst`** also fires for a visitor of a page with dozens of
+  missing assets, and for a client behind a shared address. Fix the links
+  or raise `count`. Status 429 is not counted.
+- **`web_sensitive_probe`** matches by path. If the site really serves such
+  a path (a published `.sql` download), remove that alternative from the
+  pattern.
+- These rules see the request line the server logged. A request body, a
+  header other than the logged ones, and anything a WAF in front already
+  rejected are not in the access log.
+
 ## Text the other side controls
 
 A log line mixes what the service wrote with what the client sent. sshd
