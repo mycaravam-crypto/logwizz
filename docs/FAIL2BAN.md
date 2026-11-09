@@ -65,6 +65,7 @@ the defaults.
 | `BRIDGE_RULES` | the list above | Comma-separated rule IDs whose events may lead to a ban. |
 | `BRIDGE_IGNORE` | empty | Comma-separated addresses and networks never written, e.g. `192.0.2.10,10.0.0.0/8`. |
 | `BRIDGE_DRY_RUN` | `0` | `1`: log each line it would write to the bridge's journal, and write nothing. The example file sets it. |
+| `BRIDGE_JOURNAL_MODE` | `namespace` | Where events are read from: `namespace` (the `logwizz` journal namespace), `legacy` (the main journal) or `auto`. See [Hosts without journal namespaces](#hosts-without-journal-namespaces). |
 
 An invalid value stops the bridge before it reads any event, with the
 reason in `journalctl -u logwizz-fail2ban-bridge`. Its startup message
@@ -91,6 +92,29 @@ sudo systemctl enable --now logwizz-fail2ban-bridge.service
 sudo fail2ban-client reload
 sudo fail2ban-client status logwizz
 ```
+
+### Hosts without journal namespaces
+
+systemd older than 245 (Debian 10) has no journal namespaces. There,
+`packaging/logwizz-legacy.service` sends Logwizz's events to the main
+journal, and the default `namespace` mode reads nothing. Set
+
+```sh
+BRIDGE_JOURNAL_MODE=legacy
+```
+
+in `/etc/logwizz/fail2ban-bridge.env` and restart the bridge. It then
+follows `logwizz.service` in the main journal; journald itself records which
+unit wrote an entry, so other local users cannot inject events. `auto`
+uses the namespace when the installed `journalctl` supports it and the main
+journal otherwise. Use it only where Logwizz runs with the unit that matches
+the host: on a newer system that still runs the legacy unit, `auto` picks
+the namespace and reads nothing, so set `legacy` there. The startup message
+names the journal in use.
+
+The validation, rule list and output format are the same in every mode.
+The bridge's unit tests cover the mode selection; a ban on a live Debian 10
+host has not been verified.
 
 ## Validate before enabling
 
