@@ -205,7 +205,7 @@ impl Pipeline {
         // Windows count in log time where the source records it, so that
         // catching up on a backlog does not look like a burst.
         let now = line.time.map_or_else(Instant::now, instant_of);
-        let ignored = engine.for_each_match(line.bytes, |rule| {
+        let ignored = engine.for_each_match(file, line.bytes, |rule| {
             metrics::inc(&metrics.rule_matches);
             let r = &engine.rules()[rule];
             let fields = r.matcher.fields(line.bytes);
