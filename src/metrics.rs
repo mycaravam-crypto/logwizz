@@ -64,6 +64,8 @@ counters! {
     rule_matches,
     /// Matches discarded by a rule's `exclude` values.
     matches_excluded,
+    /// Matches discarded by a rule's `types`: a capture was not of its type.
+    matches_mistyped,
     /// Matches of `after` rules with no recent event of a named rule for
     /// the same value.
     after_unmatched,

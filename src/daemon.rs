@@ -214,6 +214,7 @@ impl Pipeline {
             let threshold = match detector.judge(rule, r, file, &fields, now) {
                 Verdict::Event(threshold) => threshold,
                 Verdict::Excluded => return metrics::inc(&metrics.matches_excluded),
+                Verdict::Mistyped => return metrics::inc(&metrics.matches_mistyped),
                 Verdict::Unsequenced => return metrics::inc(&metrics.after_unmatched),
                 Verdict::Absorbed => return metrics::inc(&metrics.threshold_absorbed),
             };

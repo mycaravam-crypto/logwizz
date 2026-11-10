@@ -275,6 +275,7 @@ matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIE
 | `action` | `"emit"` | `emit`: a match produces an event. `ignore`: a match produces nothing, and no later rule sees the line (counted in `lines_ignored`). |
 | `exclude` | unset | Table of capture group → values whose matches are discarded. See [Excluding trusted sources](#excluding-trusted-sources). |
 | `exclude_file` | unset | Table of capture group → file listing more addresses and networks to exclude. See [Excluding trusted sources](#excluding-trusted-sources). |
+| `types` | unset | Table of capture group → what its value must be (`"ip"`); other matches are discarded. See [Typed captures](#typed-captures). |
 | `after` | unset | Count a match only after another rule reported the same source. See [Sequence rules](#sequence-rules). |
 | `files` | unset: every input | List of inputs the rule is evaluated for. See [Limiting a rule to some inputs](#limiting-a-rule-to-some-inputs). |
 
@@ -475,6 +476,45 @@ src = "/etc/logwizz/trusted-networks.list"
 Inline values are per rule; repeat them, or use one `exclude_file`, in each
 rule that should skip the source. For firewall-based detectors, excluding the address in the firewall
 rules instead also keeps it out of the kernel log.
+
+#### Typed captures
+
+A pattern cannot always keep text the other side chose out of a capture
+group. sshd logs the user name a client asked for as it came, so a client
+asking for the user `x from root` produces
+`Failed password for invalid user x from root from 192.0.2.7`, and a
+pattern that is not anchored carefully captures `root` as the source. A
+`[rules.types]` table states what a capture must be:
+
+```toml
+[[rules]]
+id = "ssh_bruteforce"
+match_type = "regex"
+pattern = 'Failed password for .* from (?P<src>\S+) port \d+'
+severity = "warning"
+[rules.types]
+src = "ip"
+```
+
+- Each key names a capture group of the pattern. The only type is `"ip"`:
+  an IPv4 or IPv6 address in its usual text form. `192.0.2.7:22`,
+  `fe80::1%eth0` (a zone) and host names are not addresses.
+- A match in which a typed group took part with any other value is
+  discarded: no event, nothing counted towards a threshold or remembered
+  for a [sequence rule](#sequence-rules). It is counted in
+  `matches_mistyped`. A group that did not take part is not checked.
+- Types are checked before `exclude`. Later rules still see the line.
+- Do not type a capture that legitimately holds host names, for example
+  the source in sshd lines when `UseDNS yes` is set: those matches would
+  be dropped.
+- Not allowed on `ignore` rules. Versions before this key was added refuse
+  a configuration that uses it. Upgrade the binary first.
+
+This only keeps values that are not addresses out of a rule's groups,
+events and bans. It does not stop a client that writes a well-formed
+address of its choosing into the line: only a pattern anchored to where the
+service writes the peer address does (see
+[Text the other side controls](./DETECTION.md#text-the-other-side-controls)).
 
 #### Limiting a rule to some inputs
 
@@ -765,7 +805,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, on
 stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 after_unmatched=0 after_evictions=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 matches_mistyped=0 after_unmatched=0 after_evictions=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -783,6 +823,7 @@ retry.
 | `lines_ignored` | Lines that matched an `ignore` rule. |
 | `rule_matches` | (line, rule) matches of emitting rules, before exclusions, thresholds, rate limiting and deduplication. |
 | `matches_excluded` | Matches discarded by a rule's `exclude` values. |
+| `matches_mistyped` | Matches discarded by a rule's [`types`](#typed-captures): a capture was not of its type. |
 | `after_unmatched` | Matches of [sequence rules](#sequence-rules) without a recent event of a named rule for the same value. |
 | `after_evictions` | Values dropped because a sequence memory was full. |
 | `threshold_absorbed` | Matches of threshold rules that did not reach their threshold, fell into its cooldown, or lacked the grouping capture. |
@@ -800,7 +841,7 @@ retry.
 | `glob_matches_refused` | Files matching a glob that were not followed because of `max_glob_files`. Each file is counted once while it stays refused. |
 | `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
-`rule_matches` = `matches_excluded` + `after_unmatched` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
+`rule_matches` = `matches_excluded` + `matches_mistyped` + `after_unmatched` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
 `events_rate_limited` + `events_deduplicated`.
 
 A second line follows each statistics line, with two counters per rule in
@@ -856,11 +897,11 @@ $ logwizz -c /etc/logwizz/logwizz.toml --test auth-sample.log --as /var/log/auth
 sample: auth-sample.log, read as /var/log/auth.log
 lines: 9 read, 0 truncated, 1 ignored, 1 matched no rule
 
-rule          matches   excluded   no_prior   absorbed     events
-failed              6          1          -          -          5
-bruteforce          6          -          -          5          1
-login               2          -          1          -          1
-cron                1          -          -          -          -  (ignore)
+rule          matches   mistyped   excluded   no_prior   absorbed     events
+failed              6          -          1          -          -          5
+bruteforce          6          -          -          -          5          1
+login               2          -          -          1          -          1
+cron                1          -          -          -          -          -  (ignore)
 
 first match:
 failed      line 1: user=root src=192.0.2.7
@@ -874,6 +915,7 @@ bruteforce  line 4: 192.0.2.7, count 3
 | Column | Meaning |
 |---|---|
 | `matches` | Lines the rule matched. For an `ignore` rule: lines it ended. |
+| `mistyped` | Matches discarded by [`types`](#typed-captures). |
 | `excluded` | Matches discarded by `exclude` or `exclude_file`. |
 | `no_prior` | Matches of a [sequence rule](#sequence-rules) without an earlier event of a named rule. |
 | `absorbed` | Matches a threshold counted without reaching it, or during its cooldown. |

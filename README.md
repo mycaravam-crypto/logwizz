@@ -64,6 +64,7 @@ logwizz emits a structured event for the matching rule. Use `config/logwizz.exam
 - Detects scans spanning multiple source addresses within one subnet and includes bounded samples of probed ports.
 - Uses journal entry timestamps for detection windows when catching up; file inputs use read time.
 - Excludes trusted sources (addresses, networks or exact values) per rule.
+- Can require a captured value to be an IP address, so text a client chose is not reported as a source.
 - Handles common log rotation, truncation, deletion and recreation cases.
 - Bounds line sizes, queues and detection state to keep resource use predictable.
 - Emits JSON Lines or human-readable events to stdout or stderr.

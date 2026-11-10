@@ -245,6 +245,9 @@ struct RawRule {
     /// Capture group name -> file listing more addresses and networks.
     #[serde(default)]
     exclude_file: BTreeMap<String, PathBuf>,
+    /// Capture group name -> what its value must be.
+    #[serde(default)]
+    types: BTreeMap<String, FieldType>,
     after: Option<RawAfter>,
     /// Inputs the rule is evaluated for; unset: all.
     files: Option<Vec<String>>,
@@ -382,6 +385,24 @@ impl Scope {
     }
 }
 
+/// What a capture's value must be for a match to count (`[rules.types]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldType {
+    /// An IPv4 or IPv6 address, as `std::net::IpAddr` parses it.
+    Ip,
+}
+
+impl FieldType {
+    fn accepts(self, value: &[u8]) -> bool {
+        match self {
+            FieldType::Ip => {
+                std::str::from_utf8(value).is_ok_and(|text| text.parse::<IpAddr>().is_ok())
+            }
+        }
+    }
+}
+
 /// One `exclude` value: an IP address or network, or any other exact text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExcludeValue {
@@ -502,6 +523,9 @@ pub struct Rule {
     pub threshold: Option<Threshold>,
     /// Matches with these capture values are discarded before thresholds.
     pub exclude: Vec<Exclusion>,
+    /// Matches where one of these captures (group index) is not of its
+    /// type are discarded before exclusions.
+    pub types: Vec<(usize, FieldType)>,
     /// Set: matches count only after an event of another rule.
     pub after: Option<After>,
     /// Set: the rule only sees lines from these inputs.
@@ -520,6 +544,7 @@ impl Rule {
             && self.action == other.action
             && self.threshold == other.threshold
             && self.exclude == other.exclude
+            && self.types == other.types
             && self.after == other.after
             && self.files == other.files
     }
@@ -528,6 +553,18 @@ impl Rule {
     #[inline]
     pub fn applies_to(&self, file: &Path) -> bool {
         self.files.as_ref().is_none_or(|scope| scope.contains(file))
+    }
+
+    /// Whether a match with these capture values (from
+    /// [`Matcher::fields`]) is discarded by `types`: a typed capture took
+    /// part in the match and its value is not of that type.
+    pub fn mistyped(&self, fields: &[(usize, Box<[u8]>)]) -> bool {
+        self.types.iter().any(|(group, ty)| {
+            fields
+                .iter()
+                .find(|(g, _)| g == group)
+                .is_some_and(|(_, value)| !ty.accepts(value))
+        })
     }
 
     /// Whether a match with these capture values (from
@@ -876,6 +913,7 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 None => None,
             };
             let exclude = check_exclude(&r.exclude, &r.exclude_file, r.action, &matcher)?;
+            let types = check_types(&r.types, r.action, &matcher)?;
             let after = match &r.after {
                 Some(a) => Some(check_after(a, &r.id, r.action, &matcher)?),
                 None => None,
@@ -889,22 +927,25 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 )?),
                 None => None,
             };
-            Ok((matcher, threshold, exclude, after, files))
+            Ok((matcher, threshold, exclude, types, after, files))
         });
         match compiled {
-            Ok((matcher, threshold, exclude, after, files)) if r.enabled => rules.push(Rule {
-                id: r.id,
-                description: r.description,
-                match_type: r.match_type,
-                pattern: r.pattern,
-                severity,
-                action: r.action,
-                threshold,
-                exclude,
-                after,
-                files,
-                matcher,
-            }),
+            Ok((matcher, threshold, exclude, types, after, files)) if r.enabled => {
+                rules.push(Rule {
+                    id: r.id,
+                    description: r.description,
+                    match_type: r.match_type,
+                    pattern: r.pattern,
+                    severity,
+                    action: r.action,
+                    threshold,
+                    exclude,
+                    types,
+                    after,
+                    files,
+                    matcher,
+                })
+            }
             Ok(_) => disabled_rules += 1,
             Err(msg) => problems.push(format!("{label}: {msg}")),
         }
@@ -1298,6 +1339,24 @@ fn check_exclude(
     Ok(exclusions)
 }
 
+fn check_types(
+    raw: &BTreeMap<String, FieldType>,
+    action: Action,
+    matcher: &Matcher,
+) -> Result<Vec<(usize, FieldType)>, String> {
+    if !raw.is_empty() && action == Action::Ignore {
+        return Err("an ignore rule emits nothing, so it takes no types".to_string());
+    }
+    raw.iter()
+        .map(|(name, ty)| {
+            let group = matcher.group_index(name).ok_or_else(|| {
+                format!("types.{name}: the pattern has no capture group named `{name}`")
+            })?;
+            Ok((group, *ty))
+        })
+        .collect()
+}
+
 fn check_exclude_values(
     raw: &BTreeMap<String, Vec<String>>,
     matcher: &Matcher,
@@ -1679,6 +1738,53 @@ mod tests {
             t.rules[0].threshold.as_ref().unwrap().window_type,
             WindowType::Sliding
         );
+    }
+
+    #[test]
+    fn typed_captures() {
+        let rule = |pattern: &str, extra: &str| {
+            format!(
+                "[[files]]\npath = \"/var/log/auth.log\"\n[[rules]]\nid = \"ssh\"\n\
+                 match_type = \"regex\"\npattern = '{pattern}'\n{extra}\n"
+            )
+        };
+        let pattern = r"from (?P<src>\S+)(?: via (?P<relay>\S+))?";
+        let cfg = parse_str(&rule(
+            pattern,
+            "severity = \"warning\"\n[rules.types]\nsrc = \"ip\"\nrelay = \"ip\"",
+        ))
+        .unwrap();
+        let r = &cfg.rules[0];
+        let mistyped = |line: &str| r.mistyped(&r.matcher.fields(line.as_bytes()));
+        assert!(!mistyped("from 192.0.2.10"));
+        assert!(!mistyped("from 2001:db8::1 via ::ffff:10.0.0.1"));
+        assert!(mistyped("from root"), "text the client chose");
+        assert!(mistyped("from 192.0.2.10:22"));
+        assert!(mistyped("from 192.0.2.300"));
+        assert!(
+            mistyped("from fe80::1%eth0"),
+            "a zone is not part of an address"
+        );
+        assert!(mistyped("from host.example.com"));
+        assert!(mistyped("from 192.0.2.10 via proxy"));
+        assert!(mistyped("from \u{ff}"));
+        // A group that took no part in the match is not checked.
+        assert!(!mistyped("from 192.0.2.10 direct"));
+
+        let err =
+            |pattern: &str, extra: &str| parse_str(&rule(pattern, extra)).unwrap_err().to_string();
+        let e = err(pattern, "severity = \"info\"\n[rules.types]\nuser = \"ip\"");
+        assert!(
+            e.contains("types.user: the pattern has no capture group"),
+            "{e}"
+        );
+        let e = err(
+            pattern,
+            "severity = \"info\"\n[rules.types]\nsrc = \"port\"",
+        );
+        assert!(e.contains("unknown variant"), "{e}");
+        let e = err(pattern, "action = \"ignore\"\n[rules.types]\nsrc = \"ip\"");
+        assert!(e.contains("takes no types"), "{e}");
     }
 
     #[test]

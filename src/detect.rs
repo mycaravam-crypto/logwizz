@@ -15,6 +15,8 @@ use crate::threshold::{Fired, Thresholds};
 /// The outcome of one match of an emitting rule.
 #[derive(Debug)]
 pub enum Verdict {
+    /// Discarded by the rule's `types`: a capture is not what it must be.
+    Mistyped,
     /// Discarded by the rule's `exclude`.
     Excluded,
     /// An `after` rule without a recent event of a named rule.
@@ -60,6 +62,9 @@ impl Detector {
         fields: &[(usize, Box<[u8]>)],
         now: Instant,
     ) -> Verdict {
+        if r.mistyped(fields) {
+            return Verdict::Mistyped;
+        }
         if r.excludes(fields) {
             return Verdict::Excluded;
         }

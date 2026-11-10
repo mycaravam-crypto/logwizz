@@ -21,6 +21,8 @@ severity = "warning"
 files = ["/var/log/auth.log"]
 [rules.exclude]
 src = ["10.0.0.0/8"]
+[rules.types]
+src = "ip"
 
 [[rules]]
 id = "bruteforce"
@@ -66,6 +68,7 @@ sshd: Failed password for root from 192.0.2.7 port 5\n\
 sshd: Failed password for \u{1b}[31m from 10.1.2.3 port 6\n\
 sshd: Accepted publickey for root from 192.0.2.7 port 7\n\
 CRON[9]: Failed password for nobody from 192.0.2.9\n\
+sshd: Failed password for x from y from 192.0.2.7 port 8\n\
 kernel: unrelated\n";
 
 fn report(input: &str) -> (config::Config, Report) {
@@ -88,12 +91,21 @@ fn counts_follow_the_daemons_pipeline() {
             report.ignored,
             report.unmatched
         ),
-        (9, 0, 1, 1)
+        (10, 0, 1, 1)
     );
 
     let failed = rule(&cfg, &report, "failed");
     // The CRON line: an earlier rule still sees a line a later one ignores.
-    assert_eq!((failed.matches, failed.excluded, failed.events), (6, 1, 5));
+    // "x from y": the client's user name put text where the address goes.
+    assert_eq!(
+        (
+            failed.matches,
+            failed.mistyped,
+            failed.excluded,
+            failed.events
+        ),
+        (7, 1, 1, 5)
+    );
     let (line, fields) = failed.first.as_ref().unwrap();
     assert_eq!(*line, 1);
     assert_eq!(
@@ -106,7 +118,7 @@ fn counts_follow_the_daemons_pipeline() {
 
     // One report for the source, then its cooldown; the others never reach 3.
     let brute = rule(&cfg, &report, "bruteforce");
-    assert_eq!((brute.matches, brute.absorbed, brute.events), (6, 5, 1));
+    assert_eq!((brute.matches, brute.absorbed, brute.events), (7, 6, 1));
     assert_eq!(brute.reports, [(4, Some("192.0.2.7".to_string()), 3)]);
 
     // The login before the report does not count, the one after it does.
@@ -121,7 +133,7 @@ fn counts_follow_the_daemons_pipeline() {
 fn scoped_rules_follow_the_named_input() {
     let (cfg, report) = report("/var/log/web.log");
     assert_eq!(rule(&cfg, &report, "failed").matches, 0);
-    assert_eq!(rule(&cfg, &report, "bruteforce").matches, 6);
+    assert_eq!(rule(&cfg, &report, "bruteforce").matches, 7);
 
     let mut out = Vec::new();
     report
@@ -172,15 +184,21 @@ fn command_prints_the_report_and_touches_nothing_else() {
         text.starts_with("sample: -, read as /var/log/auth.log\n"),
         "{text}"
     );
-    assert!(text.contains("lines: 9 read, 0 truncated, 1 ignored, 1 matched no rule\n"));
+    assert!(text.contains("lines: 10 read, 0 truncated, 1 ignored, 1 matched no rule\n"));
     let row = |id: &str| -> Vec<String> {
         let line = text.lines().find(|l| l.starts_with(id)).unwrap();
         line.split_whitespace().map(str::to_string).collect()
     };
-    assert_eq!(row("failed"), ["failed", "6", "1", "-", "-", "5"]);
-    assert_eq!(row("bruteforce"), ["bruteforce", "6", "-", "-", "5", "1"]);
-    assert_eq!(row("login"), ["login", "2", "-", "1", "-", "1"]);
-    assert_eq!(row("cron"), ["cron", "1", "-", "-", "-", "-", "(ignore)"]);
+    assert_eq!(row("failed"), ["failed", "7", "1", "1", "-", "-", "5"]);
+    assert_eq!(
+        row("bruteforce"),
+        ["bruteforce", "7", "-", "-", "-", "6", "1"]
+    );
+    assert_eq!(row("login"), ["login", "2", "-", "-", "1", "-", "1"]);
+    assert_eq!(
+        row("cron"),
+        ["cron", "1", "-", "-", "-", "-", "-", "(ignore)"]
+    );
     assert!(
         text.contains("bruteforce  line 4: 192.0.2.7, count 3\n"),
         "{text}"
