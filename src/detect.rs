@@ -137,9 +137,12 @@ impl Detector {
             return Verdict::Excluded;
         }
         if let Some(q) = self.quiet.get_mut(rule).and_then(Option::as_mut) {
-            // Counted from when the line was read, not from its log time:
-            // an old entry read late (journal catch-up) still shows that
-            // lines arrive, and must not report a silence again.
+            // `now` is the line's log time where the source has one (the
+            // journal), which can lie far in the past while catching up.
+            // A silence counts from when the line was read instead: an
+            // old entry read late still shows that lines arrive, and must
+            // not report a silence again right away. (`max(now)` only
+            // matters to tests, which pass times in the future.)
             q.last_seen = q.last_seen.max(now).max(Instant::now());
             q.reported = false;
             return Verdict::Seen;
@@ -219,6 +222,22 @@ after_secs = 60
         seen(&mut d, 650);
         assert!(d.silent(&cfg.rules, at(700)).is_empty());
         assert_eq!(d.silent(&cfg.rules, at(711)), [1]);
+    }
+
+    #[test]
+    fn old_log_times_count_from_when_the_line_was_read() {
+        let cfg = config::parse(RULES, Path::new("t")).unwrap();
+        let mut d = Detector::new(&cfg, Arc::new(Metrics::default()));
+        let created = Instant::now();
+        std::thread::sleep(Duration::from_millis(1200));
+        // A journal entry logged before the detector existed, read now.
+        let file = Path::new("/var/log/audit.log");
+        let verdict = d.judge(1, &cfg.rules[1], file, &[], created);
+        assert!(matches!(verdict, Verdict::Seen));
+        // 60 s after the entry's log time, but less since it was read.
+        let after = |ms: u64| created + Duration::from_millis(ms);
+        assert!(d.silent(&cfg.rules, after(60_500)).is_empty());
+        assert_eq!(d.silent(&cfg.rules, after(120_000)), [1]);
     }
 
     #[test]
