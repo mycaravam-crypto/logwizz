@@ -31,7 +31,7 @@ use crate::dispatcher::{Admit, Dispatcher, Limiter, Meta, Tables};
 use crate::engine::Engine;
 use crate::error::RuntimeError;
 use crate::event::{Event, excerpt};
-use crate::metrics::{self, Metrics};
+use crate::metrics::{self, Metrics, RuleCounters, RuleStats};
 use crate::monitor::{Monitor, Stopped};
 use crate::reader::Line;
 use crate::state::{self, Checkpoint, StateWriter};
@@ -45,6 +45,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     let metrics = Arc::new(Metrics::default());
     let shutdown = Arc::new(AtomicBool::new(false));
     let reload = Arc::new(AtomicBool::new(false));
+    let rule_stats = Arc::new(RuleStats::new(&cfg.rules));
     let mut monitor = Monitor::new(&cfg, Arc::clone(&metrics), true);
     let mut journal_cursor = None;
     if let Some(path) = &cfg.general.state_file {
@@ -63,11 +64,16 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
         Arc::clone(&reload),
         waker.clone(),
         Arc::clone(&metrics),
+        Arc::clone(&rule_stats),
     )
     .map_err(RuntimeError::Startup)?;
     let stats_interval = Arc::new(AtomicU64::new(cfg.general.stats_interval_secs));
-    spawn_stats_thread(Arc::clone(&stats_interval), Arc::clone(&metrics))
-        .map_err(RuntimeError::Startup)?;
+    spawn_stats_thread(
+        Arc::clone(&stats_interval),
+        Arc::clone(&metrics),
+        Arc::clone(&rule_stats),
+    )
+    .map_err(RuntimeError::Startup)?;
 
     let meta = Meta::current();
     let tables = Arc::new(Tables {
@@ -107,6 +113,8 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
         detector: Detector::new(&cfg, Arc::clone(&metrics)),
         dispatcher,
         metrics: Arc::clone(&metrics),
+        rule_counts: rule_stats.table(),
+        rule_stats: Arc::clone(&rule_stats),
         meta,
         max_excerpt: cfg.output.max_excerpt_bytes,
     };
@@ -163,6 +171,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
         w.record(final_checkpoint);
         w.finish();
     }
+    info!(rules = %rule_stats, "rule counts");
     info!(stats = %metrics.snapshot(), "logwizz stopped");
     result.map_err(RuntimeError::Output)
 }
@@ -175,6 +184,9 @@ struct Pipeline {
     detector: Detector,
     dispatcher: Dispatcher,
     metrics: Arc<Metrics>,
+    /// The current table of `rule_stats`, indexed like the engine's rules.
+    rule_counts: Arc<[RuleCounters]>,
+    rule_stats: Arc<RuleStats>,
     meta: Meta,
     max_excerpt: Option<usize>,
 }
@@ -187,6 +199,7 @@ impl Pipeline {
             detector,
             dispatcher,
             metrics,
+            rule_counts,
             max_excerpt,
             ..
         } = self;
@@ -195,6 +208,7 @@ impl Pipeline {
         let now = line.time.map_or_else(Instant::now, instant_of);
         let ignored = engine.for_each_match(file, line.bytes, |rule| {
             metrics::inc(&metrics.rule_matches);
+            metrics::inc(&rule_counts[rule].matches);
             let r = &engine.rules()[rule];
             let fields = r.matcher.fields(line.bytes);
             let threshold = match detector.judge(rule, r, file, &fields, now) {
@@ -206,6 +220,7 @@ impl Pipeline {
             if threshold.is_some() {
                 metrics::inc(&metrics.threshold_fired);
             }
+            metrics::inc(&rule_counts[rule].events);
             match limiter.admit(rule, &r.id, line.bytes, now) {
                 Admit::Yes => {}
                 Admit::RateLimited => {
@@ -228,7 +243,8 @@ impl Pipeline {
                 threshold,
             });
         });
-        if ignored.is_some() {
+        if let Some(rule) = ignored {
+            metrics::inc(&rule_counts[rule].matches);
             metrics::inc(&metrics.lines_ignored);
         }
     }
@@ -275,6 +291,7 @@ fn apply_reload(
         .collect();
     pipeline.limiter.reconfigure(&new.limits, &kept);
     pipeline.detector.reconfigure(&new, &kept);
+    pipeline.rule_counts = pipeline.rule_stats.replace(&new.rules, &kept);
     pipeline.engine = Engine::new(new.rules.clone());
     pipeline.max_excerpt = new.output.max_excerpt_bytes;
     pipeline.dispatcher.set_policy(&new.output);
@@ -330,6 +347,11 @@ fn keep_restart_only(running: &Config, mut new: Config) -> Config {
     new
 }
 
+fn log_statistics(metrics: &Metrics, rule_stats: &RuleStats) {
+    info!(stats = %metrics.snapshot(), "statistics");
+    info!(rules = %rule_stats, "rule counts");
+}
+
 /// Signals handled by the signal thread.
 const HANDLED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGUSR1, libc::SIGHUP];
 
@@ -376,6 +398,7 @@ fn spawn_signal_thread(
     reload: Arc<AtomicBool>,
     waker: Waker,
     metrics: Arc<Metrics>,
+    rule_stats: Arc<RuleStats>,
 ) -> io::Result<()> {
     thread::Builder::new()
         .name("signals".into())
@@ -396,7 +419,7 @@ fn spawn_signal_thread(
                         shutdown.store(true, Ordering::Relaxed);
                         waker.wake();
                     }
-                    libc::SIGUSR1 => info!(stats = %metrics.snapshot(), "statistics"),
+                    libc::SIGUSR1 => log_statistics(&metrics, &rule_stats),
                     libc::SIGHUP => {
                         info!("configuration reload requested");
                         reload.store(true, Ordering::Relaxed);
@@ -411,7 +434,11 @@ fn spawn_signal_thread(
 
 /// Logs statistics every `interval` seconds (0 = never). The interval is
 /// re-read every second, so a reload takes effect without a restart.
-fn spawn_stats_thread(interval: Arc<AtomicU64>, metrics: Arc<Metrics>) -> io::Result<()> {
+fn spawn_stats_thread(
+    interval: Arc<AtomicU64>,
+    metrics: Arc<Metrics>,
+    rule_stats: Arc<RuleStats>,
+) -> io::Result<()> {
     thread::Builder::new().name("stats".into()).spawn(move || {
         let mut waited = 0u64;
         loop {
@@ -419,7 +446,7 @@ fn spawn_stats_thread(interval: Arc<AtomicU64>, metrics: Arc<Metrics>) -> io::Re
             waited += 1;
             let every = interval.load(Ordering::Relaxed);
             if every > 0 && waited >= every {
-                info!(stats = %metrics.snapshot(), "statistics");
+                log_statistics(&metrics, &rule_stats);
                 waited = 0;
             }
         }

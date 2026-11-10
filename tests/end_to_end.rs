@@ -302,6 +302,9 @@ fn sigusr1_logs_statistics_and_limits_are_counted() {
     ] {
         assert!(stats.contains(expected), "{expected} missing: {stats}");
     }
+    // Per rule: matches, and events before the limits.
+    let rules = d.wait_stderr("rule counts");
+    assert!(rules.contains("ssh_failed_login=4/4"), "{rules}");
     assert!(d.stop().success());
 }
 

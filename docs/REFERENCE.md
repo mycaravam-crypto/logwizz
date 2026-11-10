@@ -761,8 +761,8 @@ they were matched with.
 
 ### Statistics
 
-Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
-line on stderr:
+Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, on
+stderr:
 
 ```
 INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 after_unmatched=0 after_evictions=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
@@ -802,6 +802,21 @@ retry.
 
 `rule_matches` = `matches_excluded` + `after_unmatched` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
 `events_rate_limited` + `events_deduplicated`.
+
+A second line follows each statistics line, with two counters per rule in
+configuration order, as `id=matches/events`:
+
+```
+INFO rule counts rules=ssh_failed_login=37/35 ssh_bruteforce=37/1 cron=412/- kernel_error=0/0
+```
+
+`matches` are the lines the rule matched (for an `ignore` rule: the lines it
+ended, shown as `id=matches/-`). `events` are the matches that passed the
+rule's exclusions, sequence and threshold, before `[limits]`. A rule that
+stays at `0/0` on a busy log is worth a look: its pattern may no longer fit
+the log format ([`--test`](#testing-rules) shows what it matches). After a
+[configuration reload](#configuration-reload), rules whose definition is
+unchanged keep their counts and the others start at zero.
 
 ### Memory use
 
@@ -1080,7 +1095,7 @@ Layout:
 | `src/testrun.rs` | `--test`: a sample log through the rules once |
 | `src/notify.rs`, `src/notify/` | `logwizz-notify`: journal input, state file, aggregation, curl delivery |
 | `src/bin/logwizz-notify.rs` | The notifier's entry point |
-| `src/metrics.rs` | Atomic counters |
+| `src/metrics.rs` | Atomic counters, global and per rule |
 | `tests/` | Config, reader, rotation, monitoring loop, end-to-end, notifier and load tests |
 | `benches/` | Criterion benchmarks |
 
