@@ -40,6 +40,9 @@ const REFUSED_WARN_INTERVAL: Duration = Duration::from_secs(60);
 /// The second argument is the journal cursor, if the journal is read.
 pub type OnCheckpoint<'a> = dyn FnMut(Vec<(Arc<Path>, FileState)>, Option<Arc<str>>) + 'a;
 
+/// How often [`Monitor::run_with`] calls its `tick`.
+pub const TICK: Duration = Duration::from_secs(1);
+
 /// Receives every line, together with the path of the file it came from.
 pub type OnLine<'a> = dyn FnMut(&Arc<Path>, Line<'_>) + 'a;
 
@@ -439,24 +442,27 @@ impl Monitor {
     /// Unread data stays in the files, so pausing loses nothing unless a
     /// file is rotated away and fully removed meanwhile.
     pub fn run(&mut self, shutdown: &AtomicBool, on_line: &mut OnLine<'_>) {
-        self.run_with(shutdown, None, on_line, None);
+        self.run_with(shutdown, None, on_line, None, None);
     }
 
     /// Like [`Monitor::run`], additionally passing [`Monitor::checkpoint`]
     /// to `on_checkpoint` every `interval` (between polls, so every line
     /// before a checkpoint has been passed to `on_line`), and returning
     /// [`Stopped::Reload`] between polls once `reload` is set (the flag is
-    /// cleared).
+    /// cleared). `tick` is called every [`TICK`] between polls, also while
+    /// no input changes.
     pub fn run_with(
         &mut self,
         shutdown: &AtomicBool,
         reload: Option<&AtomicBool>,
         on_line: &mut OnLine<'_>,
         mut checkpoints: Option<(Duration, &mut OnCheckpoint<'_>)>,
+        mut tick: Option<&mut dyn FnMut()>,
     ) -> Stopped {
         let reload_requested = || reload.is_some_and(|r| r.swap(false, Ordering::Relaxed));
         let mut next_reconcile = Instant::now();
         let mut next_checkpoint = Instant::now();
+        let mut next_tick = Instant::now() + TICK;
         let mut busy = false;
         loop {
             if shutdown.load(Ordering::Relaxed) {
@@ -473,11 +479,21 @@ impl Monitor {
                     next_checkpoint = now + *interval;
                 }
             }
+            if let Some(f) = &mut tick {
+                let now = Instant::now();
+                if now >= next_tick {
+                    f();
+                    next_tick = now + TICK;
+                }
+            }
             if !busy {
-                let deadline = match checkpoints {
+                let mut deadline = match checkpoints {
                     Some(_) => next_reconcile.min(next_checkpoint),
                     None => next_reconcile,
                 };
+                if tick.is_some() {
+                    deadline = deadline.min(next_tick);
+                }
                 let timeout = deadline.saturating_duration_since(Instant::now());
                 match self.wake_rx.recv_timeout(timeout) {
                     Ok(()) | Err(RecvTimeoutError::Timeout) => {}

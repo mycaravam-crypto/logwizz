@@ -66,6 +66,10 @@ counters! {
     matches_excluded,
     /// Matches discarded by a rule's `types`: a capture was not of its type.
     matches_mistyped,
+    /// Matches of silence rules: the expected line appeared.
+    silence_matches,
+    /// Silences reported (each one is an event that no match produced).
+    silences_reported,
     /// Matches of `after` rules with no recent event of a named rule for
     /// the same value.
     after_unmatched,

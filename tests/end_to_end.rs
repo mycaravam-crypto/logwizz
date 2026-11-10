@@ -388,6 +388,54 @@ Failed password for a from 198.51.100.7 port 4
 }
 
 #[test]
+fn silence_rule_reports_when_the_expected_line_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    write_new(&auth, "");
+    let rule = r#"
+[[rules]]
+id = "heartbeat_missing"
+description = "No heartbeat line"
+match_type = "literal"
+pattern = "heartbeat"
+severity = "critical"
+[rules.silence]
+after_secs = 10
+"#;
+    let mut d = Daemon::start(dir.path(), &config("", &[&auth], rule));
+    thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    // A match is not an event; it only restarts the wait.
+    append(&auth, "heartbeat 1\n");
+    assert!(d.stdout.recv_timeout(Duration::from_secs(8)).is_err());
+    let line = d
+        .stdout
+        .recv_timeout(Duration::from_secs(6))
+        .expect("no silence event");
+    assert!(started.elapsed() >= Duration::from_secs(10), "{line}");
+    let ev: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ev["rule"], "heartbeat_missing");
+    assert_eq!(ev["severity"], "critical");
+    assert_eq!(ev["silence"]["after_secs"], 10);
+    assert_eq!(ev["line"], "");
+    assert_eq!(ev["file"], "");
+    // Reported once, not on every check.
+    assert!(d.stdout.recv_timeout(Duration::from_secs(2)).is_err());
+    d.signal(libc::SIGUSR1);
+    let stats = d.wait_stderr("statistics");
+    for expected in [
+        "silence_matches=1",
+        "silences_reported=1",
+        "events_emitted=1",
+    ] {
+        assert!(stats.contains(expected), "{expected} missing: {stats}");
+    }
+    let rules = d.wait_stderr("rule counts");
+    assert!(rules.contains("heartbeat_missing=1/1"), "{rules}");
+    assert!(d.stop().success());
+}
+
+#[test]
 fn after_rule_reports_only_logins_from_earlier_scanners() {
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.log");

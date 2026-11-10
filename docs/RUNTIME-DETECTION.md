@@ -174,7 +174,10 @@ Say it plainly, so nobody relies on more than this gives:
 - **Root can turn it off.** Removing the rules or disabling audit is
   reported (`audit_disabled`). Stopping auditd, killing it, or editing
   `audit.log` is not. If that matters, lock the rules until the next reboot
-  with `-e 2` and forward the log off the host.
+  with `-e 2` and forward the log off the host. On a host where audit records
+  normally arrive regularly, a
+  [silence rule](REFERENCE.md#silence-rules) on the audit log reports that
+  they stopped; it cannot tell a stopped auditd from a quiet host.
 - **Lost records.** When the kernel's backlog is full or the rate limit is
   reached, records are dropped. `audit_lost` reports this from the kernel
   message, and `auditctl -s` shows the counter. The counter covers all audit

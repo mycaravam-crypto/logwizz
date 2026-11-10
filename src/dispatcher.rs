@@ -125,6 +125,14 @@ struct JsonEvent<'a> {
     fields: Fields<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     threshold: Option<JsonThreshold<'a>>,
+    /// Set for the event of a silence rule: no line matched for this long.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    silence: Option<JsonSilence>,
+}
+
+#[derive(Serialize)]
+struct JsonSilence {
+    after_secs: u64,
 }
 
 #[derive(Serialize)]
@@ -196,6 +204,8 @@ pub fn format_event(
             .map(|v| String::from_utf8_lossy(v))
             .collect(),
     });
+    // A silence rule emits nothing else: its event reports the silence.
+    let silence = rule.silence.map(|after| after.as_secs());
     if syslog_prefix {
         write!(out, "<{}>", rule.severity.syslog_priority())?;
     }
@@ -215,18 +225,25 @@ pub fn format_event(
                 truncated: ev.truncated,
                 fields,
                 threshold,
+                silence: silence.map(|after_secs| JsonSilence { after_secs }),
             };
             serde_json::to_writer(&mut *out, &je)?;
         }
         OutputFormat::Human => {
             write!(
                 out,
-                "{ts} {:<8} [{}] {}: ",
+                "{ts} {:<8} [{}] ",
                 rule.severity.as_str().to_ascii_uppercase(),
                 rule.id,
-                escape(&file)
             )?;
-            out.extend_from_slice(escape(&line).as_bytes());
+            match silence {
+                // No file and no line: nothing was read.
+                Some(secs) => write!(out, "no matching line for {secs}s")?,
+                None => {
+                    write!(out, "{}: ", escape(&file))?;
+                    out.extend_from_slice(escape(&line).as_bytes());
+                }
+            }
             if ev.truncated {
                 out.extend_from_slice(b" [truncated]");
             }
@@ -785,6 +802,54 @@ mod tests {
         let mut out = Vec::new();
         format_event(format, prefix, &tables(), ev, &mut String::new(), &mut out).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn silence_events_in_both_formats() {
+        let cfg = config::parse(
+            r#"
+            [[files]]
+            path = "/var/log/audit.log"
+            [[rules]]
+            id = "auditd_silent"
+            match_type = "literal"
+            pattern = "type=SYSCALL"
+            severity = "critical"
+            [rules.silence]
+            after_secs = 600
+            "#,
+            Path::new("t"),
+        )
+        .unwrap();
+        let ev = Event {
+            file: Arc::from(Path::new("")),
+            ..event(b"", false)
+        };
+        let t = Tables {
+            rules: cfg.rules,
+            meta: Meta {
+                host: "box".into(),
+                pid: 42,
+            },
+        };
+        let render = |format| {
+            let mut out = Vec::new();
+            format_event(format, true, &t, &ev, &mut String::new(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let json = render(OutputFormat::Json);
+        let v: serde_json::Value = serde_json::from_str(json.strip_prefix("<2>").unwrap()).unwrap();
+        assert_eq!(v["rule"], "auditd_silent");
+        assert_eq!(v["silence"], serde_json::json!({"after_secs": 600}));
+        assert_eq!((&v["file"], &v["line"]), (&"".into(), &"".into()));
+        let human = render(OutputFormat::Human);
+        assert!(
+            human.ends_with(" CRITICAL [auditd_silent] no matching line for 600s\n"),
+            "{human}"
+        );
+        // Other events carry no "silence" key.
+        let plain = render_with(OutputFormat::Json, false, &event(b"Failed", false));
+        assert!(!plain.contains("silence"), "{plain}");
     }
 
     #[test]
