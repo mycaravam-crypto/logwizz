@@ -84,9 +84,7 @@ pub fn run(cfg: &Config, sample: &mut dyn BufRead, input: &Path) -> io::Result<R
                 Verdict::Absorbed => stats.absorbed += 1,
                 Verdict::Event(fired) => {
                     stats.events += 1;
-                    if let Some(f) = fired
-                        && stats.reports.len() < MAX_REPORTS
-                    {
+                    if let Some(f) = fired.filter(|_| stats.reports.len() < MAX_REPORTS) {
                         let group = f.group.as_deref().map(text);
                         stats.reports.push((number, group, f.count));
                     }
