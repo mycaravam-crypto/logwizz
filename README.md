@@ -67,6 +67,7 @@ logwizz emits a structured event for the matching rule. Use `config/logwizz.exam
 - Handles common log rotation, truncation, deletion and recreation cases.
 - Bounds line sizes, queues and detection state to keep resource use predictable.
 - Emits JSON Lines or human-readable events to stdout or stderr.
+- Tests rules against a saved log sample (`--test`) and reports per-rule matches without starting the daemon.
 - Supports configuration validation, persisted input offsets, glob patterns, and SIGHUP reloads without restarting the daemon.
 
 ## Optional response and platforms

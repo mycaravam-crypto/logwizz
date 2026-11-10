@@ -1,4 +1,6 @@
-use std::io::IsTerminal;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, IsTerminal};
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -7,6 +9,7 @@ use tracing_subscriber::filter::LevelFilter;
 use logwizz::cli::Cli;
 use logwizz::config::{self, DiagnosticLevel};
 use logwizz::daemon;
+use logwizz::testrun;
 
 /// Exit code for runtime failures (e.g. the output became unwritable).
 const EXIT_RUNTIME: u8 = 1;
@@ -36,6 +39,17 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if let Some(sample) = &cli.test {
+        let input = cli.input.as_deref().unwrap_or(sample);
+        return match test(&cfg, sample, input) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("logwizz: {}: {e}", sample.display());
+                ExitCode::from(EXIT_RUNTIME)
+            }
+        };
+    }
+
     let level = match cfg.general.diagnostics {
         DiagnosticLevel::Error => LevelFilter::ERROR,
         DiagnosticLevel::Warn => LevelFilter::WARN,
@@ -57,4 +71,16 @@ fn main() -> ExitCode {
             ExitCode::from(EXIT_RUNTIME)
         }
     }
+}
+
+/// `--test`: reports what the rules make of `sample`, read as `input`.
+fn test(cfg: &config::Config, sample: &Path, input: &Path) -> io::Result<()> {
+    let mut reader: Box<dyn BufRead> = if sample.as_os_str() == "-" {
+        Box::new(io::stdin().lock())
+    } else {
+        Box::new(BufReader::new(File::open(sample)?))
+    };
+    let report = testrun::run(cfg, &mut reader, input)?;
+    let name = sample.display().to_string();
+    report.write(&mut io::stdout().lock(), &cfg.rules, &name, input)
 }

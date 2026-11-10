@@ -270,7 +270,7 @@ fn needs_escape(c: char) -> bool {
         )
 }
 
-fn escape(s: &str) -> Cow<'_, str> {
+pub(crate) fn escape(s: &str) -> Cow<'_, str> {
     if !s.chars().any(needs_escape) {
         return Cow::Borrowed(s);
     }

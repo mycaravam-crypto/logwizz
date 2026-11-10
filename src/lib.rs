@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod detect;
 pub mod dispatcher;
 pub mod engine;
 pub mod error;
@@ -18,5 +19,6 @@ pub mod notify;
 pub mod reader;
 pub mod sequence;
 pub mod state;
+pub mod testrun;
 pub mod threshold;
 pub mod watcher;

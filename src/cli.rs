@@ -17,4 +17,14 @@ pub struct Cli {
     /// Validate the configuration and exit without starting the monitor.
     #[arg(long)]
     pub check_config: bool,
+
+    /// Run a sample log ("-": standard input) through the rules once, print
+    /// what each rule matched and exit. Nothing is watched or saved.
+    #[arg(long, value_name = "FILE", conflicts_with = "check_config")]
+    pub test: Option<PathBuf>,
+
+    /// With --test: the configured input the sample stands for, as rules
+    /// name it in `files` (a path, or "journal"). Default: the sample's path.
+    #[arg(long = "as", value_name = "INPUT", requires = "test")]
+    pub input: Option<PathBuf>,
 }

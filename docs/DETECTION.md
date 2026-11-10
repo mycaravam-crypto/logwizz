@@ -134,7 +134,15 @@ existing rules, copy the `[[rules]]` blocks you want into your configuration ins
 
 ## 3. Test it
 
-From another machine (scanning your own host from itself also works, the
+To check the rules against log lines you already have, without generating
+traffic, run a sample through them
+([Testing rules](./REFERENCE.md#testing-rules)):
+
+```sh
+logwizz --test /var/log/auth.log.1 --as /var/log/auth.log
+```
+
+For a live test, from another machine (scanning your own host from itself also works, the
 packets then arrive on `lo`):
 
 ```sh

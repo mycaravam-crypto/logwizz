@@ -26,6 +26,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
 
 use crate::config::{self, Config, Destination};
+use crate::detect::{Detector, Verdict};
 use crate::dispatcher::{Admit, Dispatcher, Limiter, Meta, Tables};
 use crate::engine::Engine;
 use crate::error::RuntimeError;
@@ -33,9 +34,7 @@ use crate::event::{Event, excerpt};
 use crate::metrics::{self, Metrics};
 use crate::monitor::{Monitor, Stopped};
 use crate::reader::Line;
-use crate::sequence::Recent;
 use crate::state::{self, Checkpoint, StateWriter};
-use crate::threshold::Thresholds;
 use crate::watcher::Waker;
 
 /// Runs the daemon until a termination signal or an output failure.
@@ -105,16 +104,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     let mut pipeline = Pipeline {
         engine: Engine::new(cfg.rules.clone()),
         limiter: Limiter::new(&cfg.limits, cfg.rules.len()),
-        thresholds: Thresholds::new(
-            cfg.rules.len(),
-            cfg.limits.threshold_max_groups,
-            Arc::clone(&metrics),
-        ),
-        recent: Recent::new(
-            &cfg.rules,
-            cfg.limits.threshold_max_groups,
-            Arc::clone(&metrics),
-        ),
+        detector: Detector::new(&cfg, Arc::clone(&metrics)),
         dispatcher,
         metrics: Arc::clone(&metrics),
         meta,
@@ -182,8 +172,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
 struct Pipeline {
     engine: Engine,
     limiter: Limiter,
-    thresholds: Thresholds,
-    recent: Recent,
+    detector: Detector,
     dispatcher: Dispatcher,
     metrics: Arc<Metrics>,
     meta: Meta,
@@ -195,8 +184,7 @@ impl Pipeline {
         let Pipeline {
             engine,
             limiter,
-            thresholds,
-            recent,
+            detector,
             dispatcher,
             metrics,
             max_excerpt,
@@ -209,35 +197,15 @@ impl Pipeline {
             metrics::inc(&metrics.rule_matches);
             let r = &engine.rules()[rule];
             let fields = r.matcher.fields(line.bytes);
-            if r.excludes(&fields) {
-                metrics::inc(&metrics.matches_excluded);
-                return;
-            }
-            if let Some(after) = &r.after {
-                let follows = fields
-                    .iter()
-                    .find(|(g, _)| *g == after.group)
-                    .is_some_and(|(_, v)| recent.follows(after, v, now));
-                if !follows {
-                    metrics::inc(&metrics.after_unmatched);
-                    return;
-                }
-            }
-            let threshold = match &r.threshold {
-                None => None,
-                Some(t) => match thresholds.observe(rule, &r.id, t, file, &fields, now) {
-                    Some(fired) => {
-                        metrics::inc(&metrics.threshold_fired);
-                        Some(Box::new(fired))
-                    }
-                    None => {
-                        metrics::inc(&metrics.threshold_absorbed);
-                        return;
-                    }
-                },
+            let threshold = match detector.judge(rule, r, file, &fields, now) {
+                Verdict::Event(threshold) => threshold,
+                Verdict::Excluded => return metrics::inc(&metrics.matches_excluded),
+                Verdict::Unsequenced => return metrics::inc(&metrics.after_unmatched),
+                Verdict::Absorbed => return metrics::inc(&metrics.threshold_absorbed),
             };
-            // Before limiting: a rate-limited event still happened.
-            recent.record(r, &fields, now);
+            if threshold.is_some() {
+                metrics::inc(&metrics.threshold_fired);
+            }
             match limiter.admit(rule, &r.id, line.bytes, now) {
                 Admit::Yes => {}
                 Admit::RateLimited => {
@@ -260,7 +228,7 @@ impl Pipeline {
                 threshold,
             });
         });
-        if ignored {
+        if ignored.is_some() {
             metrics::inc(&metrics.lines_ignored);
         }
     }
@@ -306,12 +274,7 @@ fn apply_reload(
         .map(|r| running.rules.iter().position(|old| old.same_definition(r)))
         .collect();
     pipeline.limiter.reconfigure(&new.limits, &kept);
-    pipeline
-        .thresholds
-        .reconfigure(new.limits.threshold_max_groups, &kept);
-    pipeline
-        .recent
-        .reconfigure(&new.rules, new.limits.threshold_max_groups);
+    pipeline.detector.reconfigure(&new, &kept);
     pipeline.engine = Engine::new(new.rules.clone());
     pipeline.max_excerpt = new.output.max_excerpt_bytes;
     pipeline.dispatcher.set_policy(&new.output);
