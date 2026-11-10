@@ -250,6 +250,9 @@ For your own rules: capture the source from a position the service writes
 (the start of a web access log line, the end of an sshd line), not from the
 first place an address can appear, and limit the rule to its log with
 [`files`](REFERENCE.md#limiting-a-rule-to-some-inputs).
+[`types`](REFERENCE.md#typed-captures) (`src = "ip"`) additionally discards
+matches whose capture is not an address at all; it cannot tell a forged
+address from the real one, so it does not replace the anchor.
 
 ## What this cannot see
 

@@ -25,6 +25,8 @@ pub struct RuleReport {
     /// Lines the rule matched. For an `ignore` rule: lines it ended.
     pub matches: u64,
     pub excluded: u64,
+    /// Matches discarded by `types`.
+    pub mistyped: u64,
     /// `after` rules: matches without an earlier event of a named rule.
     pub unsequenced: u64,
     /// Threshold rules: matches counted without reaching the threshold.
@@ -80,6 +82,7 @@ pub fn run(cfg: &Config, sample: &mut dyn BufRead, input: &Path) -> io::Result<R
             }
             match detector.judge(i, r, input, &fields, now) {
                 Verdict::Excluded => stats.excluded += 1,
+                Verdict::Mistyped => stats.mistyped += 1,
                 Verdict::Unsequenced => stats.unsequenced += 1,
                 Verdict::Absorbed => stats.absorbed += 1,
                 Verdict::Event(fired) => {
@@ -153,8 +156,8 @@ impl Report {
         let width = rules.iter().map(|r| r.id.len()).max().unwrap_or(0).max(4);
         writeln!(
             out,
-            "\n{:width$}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
-            "rule", "matches", "excluded", "no_prior", "absorbed", "events"
+            "\n{:width$}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+            "rule", "matches", "mistyped", "excluded", "no_prior", "absorbed", "events"
         )?;
         let cell = |applies: bool, n: u64| match applies {
             true => n.to_string(),
@@ -169,9 +172,10 @@ impl Report {
             let emits = r.action == Action::Emit;
             writeln!(
                 out,
-                "{:width$}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}{}",
+                "{:width$}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}{}",
                 r.id,
                 s.matches,
+                cell(!r.types.is_empty(), s.mistyped),
                 cell(emits && !r.exclude.is_empty(), s.excluded),
                 cell(r.after.is_some(), s.unsequenced),
                 cell(r.threshold.is_some(), s.absorbed),

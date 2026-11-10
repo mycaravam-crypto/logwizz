@@ -340,6 +340,54 @@ Accepted password for b from 198.51.100.7
 }
 
 #[test]
+fn mistyped_captures_are_not_reported_or_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.log");
+    write_new(&auth, "");
+    let rule = r#"
+[[rules]]
+id = "ssh_bruteforce"
+match_type = "regex"
+pattern = 'Failed password for .*? from (?P<src>\S+)'
+severity = "warning"
+[rules.types]
+src = "ip"
+[rules.threshold]
+group_by = "src"
+count = 2
+window_secs = 60
+"#;
+    let mut d = Daemon::start(dir.path(), &config("", &[&auth], rule));
+    thread::sleep(Duration::from_millis(300));
+    // A user name of "x from root": two lines that would otherwise make a
+    // group called "root" reach the threshold.
+    append(
+        &auth,
+        "Failed password for invalid user x from root from 192.0.2.7 port 1
+Failed password for invalid user x from root from 192.0.2.7 port 2
+Failed password for a from 198.51.100.7 port 3
+Failed password for a from 198.51.100.7 port 4
+",
+    );
+    // RULES' ssh_failed_login reports each line; the threshold rule only
+    // the group with a real address.
+    let mut groups = Vec::new();
+    for _ in 0..5 {
+        let ev = d.event();
+        if ev["rule"] == "ssh_bruteforce" {
+            groups.push(ev["threshold"]["group"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(groups, ["198.51.100.7"]);
+    assert!(d.stdout.recv_timeout(Duration::from_millis(300)).is_err());
+    d.signal(libc::SIGUSR1);
+    let stats = d.wait_stderr("statistics");
+    assert!(stats.contains("matches_mistyped=2"), "{stats}");
+    assert!(stats.contains("threshold_fired=1"), "{stats}");
+    assert!(d.stop().success());
+}
+
+#[test]
 fn after_rule_reports_only_logins_from_earlier_scanners() {
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.log");
