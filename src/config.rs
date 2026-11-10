@@ -249,8 +249,15 @@ struct RawRule {
     #[serde(default)]
     types: BTreeMap<String, FieldType>,
     after: Option<RawAfter>,
+    silence: Option<RawSilence>,
     /// Inputs the rule is evaluated for; unset: all.
     files: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSilence {
+    after_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -528,6 +535,9 @@ pub struct Rule {
     pub types: Vec<(usize, FieldType)>,
     /// Set: matches count only after an event of another rule.
     pub after: Option<After>,
+    /// Set: the rule reports when it has matched nothing for this long,
+    /// and never a match itself.
+    pub silence: Option<Duration>,
     /// Set: the rule only sees lines from these inputs.
     pub files: Option<Scope>,
     pub matcher: Matcher,
@@ -546,6 +556,7 @@ impl Rule {
             && self.exclude == other.exclude
             && self.types == other.types
             && self.after == other.after
+            && self.silence == other.silence
             && self.files == other.files
     }
 
@@ -918,6 +929,10 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 Some(a) => Some(check_after(a, &r.id, r.action, &matcher)?),
                 None => None,
             };
+            let silence = match &r.silence {
+                Some(s) => Some(check_silence(s, &r)?),
+                None => None,
+            };
             let files = match &r.files {
                 Some(f) => Some(check_scope(
                     f,
@@ -927,11 +942,11 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                 )?),
                 None => None,
             };
-            Ok((matcher, threshold, exclude, types, after, files))
+            Ok((matcher, threshold, exclude, types, after, silence, files))
         });
         match compiled {
-            Ok((matcher, threshold, exclude, types, after, files)) if r.enabled => {
-                rules.push(Rule {
+            Ok((matcher, threshold, exclude, types, after, silence, files)) if r.enabled => rules
+                .push(Rule {
                     id: r.id,
                     description: r.description,
                     match_type: r.match_type,
@@ -942,10 +957,10 @@ fn validate(raw: RawConfig) -> Result<Config, Vec<String>> {
                     exclude,
                     types,
                     after,
+                    silence,
                     files,
                     matcher,
-                })
-            }
+                }),
             Ok(_) => disabled_rules += 1,
             Err(msg) => problems.push(format!("{label}: {msg}")),
         }
@@ -1250,6 +1265,27 @@ fn check_after(a: &RawAfter, id: &str, action: Action, matcher: &Matcher) -> Res
     })
 }
 
+/// Shortest `silence.after_secs`: silences are checked about once a second.
+pub const MIN_SILENCE_SECS: u64 = 10;
+
+fn check_silence(s: &RawSilence, r: &RawRule) -> Result<Duration, String> {
+    if r.action == Action::Ignore {
+        return Err("an ignore rule emits nothing, so it takes no silence".to_string());
+    }
+    if r.threshold.is_some() || r.after.is_some() {
+        return Err(
+            "silence reports the absence of matches, so it takes no threshold or after".to_string(),
+        );
+    }
+    if !(MIN_SILENCE_SECS..=MAX_WINDOW_SECS).contains(&s.after_secs) {
+        return Err(format!(
+            "silence.after_secs must be between {MIN_SILENCE_SECS} and {MAX_WINDOW_SECS}, got {}",
+            s.after_secs
+        ));
+    }
+    Ok(Duration::from_secs(s.after_secs))
+}
+
 /// The rules an enabled rule's `after` names must be enabled, emit events
 /// and capture the same field. `all_ids` includes disabled rules.
 fn check_after_references(rules: &[Rule], all_ids: &HashSet<String>, problems: &mut Vec<String>) {
@@ -1260,6 +1296,7 @@ fn check_after_references(rules: &[Rule], all_ids: &HashSet<String>, problems: &
         for name in &after.rules {
             let msg = match rules.iter().find(|o| &o.id == name) {
                 Some(o) if o.action == Action::Ignore => "is an ignore rule".to_string(),
+                Some(o) if o.silence.is_some() => "is a silence rule".to_string(),
                 Some(o) if o.matcher.group_index(&after.field).is_none() => {
                     format!("has no capture group named `{}`", after.field)
                 }
@@ -1738,6 +1775,40 @@ mod tests {
             t.rules[0].threshold.as_ref().unwrap().window_type,
             WindowType::Sliding
         );
+    }
+
+    #[test]
+    fn silence_rules() {
+        let rule = |extra: &str| {
+            format!(
+                "[[files]]\npath = \"/var/log/audit.log\"\n[[rules]]\nid = \"quiet\"\n\
+                 match_type = \"literal\"\npattern = 'type=SYSCALL'\n{extra}\n"
+            )
+        };
+        let cfg = parse_str(&rule(
+            "severity = \"critical\"\n[rules.silence]\nafter_secs = 600",
+        ))
+        .unwrap();
+        assert_eq!(cfg.rules[0].silence, Some(Duration::from_secs(600)));
+
+        let err = |extra: &str| parse_str(&rule(extra)).unwrap_err().to_string();
+        let info = "severity = \"info\"\n[rules.silence]\n";
+        for (extra, want) in [
+            (format!("{info}after_secs = 9"), "between 10 and 86400"),
+            (format!("{info}after_secs = 86401"), "between 10 and 86400"),
+            (
+                "action = \"ignore\"\n[rules.silence]\nafter_secs = 60".to_string(),
+                "takes no silence",
+            ),
+            (
+                format!("{info}after_secs = 60\n[rules.threshold]\ncount = 2\nwindow_secs = 10"),
+                "takes no threshold or after",
+            ),
+            (format!("{info}secs = 60"), "unknown field"),
+        ] {
+            let e = err(&extra);
+            assert!(e.contains(want), "{want}: {e}");
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@
 //! spawned and is inherited) and consumed only by `sigwait` in the signal
 //! thread, so no code runs in async-signal context.
 
+use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -107,7 +108,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
         ),
         None => None,
     };
-    let mut pipeline = Pipeline {
+    let pipeline = Pipeline {
         engine: Engine::new(cfg.rules.clone()),
         limiter: Limiter::new(&cfg.limits, cfg.rules.len()),
         detector: Detector::new(&cfg, Arc::clone(&metrics)),
@@ -117,6 +118,7 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
         rule_stats: Arc::clone(&rule_stats),
         meta,
         max_excerpt: cfg.output.max_excerpt_bytes,
+        no_file: Arc::from(Path::new("")),
     };
 
     info!(
@@ -128,6 +130,8 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
     );
 
     let mut running = cfg;
+    // Shared by the line and tick callbacks, which never run at once.
+    let pipeline = RefCell::new(pipeline);
     loop {
         let mut record = |files, journal| {
             if let Some(w) = &state_writer {
@@ -141,11 +145,16 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
         let checkpoints = state_writer
             .as_ref()
             .map(|_| (state_flush, &mut record as &mut dyn FnMut(_, _)));
+        // Only silence rules need the clock; without them the loop sleeps
+        // until an input changes.
+        let watching = pipeline.borrow().detector.watches_silence();
+        let mut tick = || pipeline.borrow_mut().tick();
         let stopped = monitor.run_with(
             &shutdown,
             Some(&reload),
-            &mut |file, line| pipeline.line(file, line),
+            &mut |file, line| pipeline.borrow_mut().line(file, line),
             checkpoints,
+            watching.then_some(&mut tick as &mut dyn FnMut()),
         );
         if stopped == Stopped::Shutdown {
             break;
@@ -154,10 +163,11 @@ pub fn run(cfg: Config, config_path: &Path) -> Result<(), RuntimeError> {
             config_path,
             &mut running,
             &mut monitor,
-            &mut pipeline,
+            &mut pipeline.borrow_mut(),
             &stats_interval,
         );
     }
+    let pipeline = pipeline.into_inner();
 
     info!("shutting down; flushing queued events");
     let final_checkpoint = Checkpoint {
@@ -189,9 +199,29 @@ struct Pipeline {
     rule_stats: Arc<RuleStats>,
     meta: Meta,
     max_excerpt: Option<usize>,
+    /// The `file` of events that no line produced (reported silences).
+    no_file: Arc<Path>,
 }
 
 impl Pipeline {
+    /// Reports the silence rules that have now waited long enough. Not
+    /// subject to `[limits]`: a silence is reported once until a match.
+    fn tick(&mut self) {
+        for rule in self.detector.silent(self.engine.rules(), Instant::now()) {
+            metrics::inc(&self.metrics.silences_reported);
+            metrics::inc(&self.rule_counts[rule].events);
+            self.dispatcher.send(Event {
+                time: SystemTime::now(),
+                file: Arc::clone(&self.no_file),
+                rule,
+                line: Box::default(),
+                truncated: false,
+                fields: Vec::new(),
+                threshold: None,
+            });
+        }
+    }
+
     fn line(&mut self, file: &Arc<Path>, line: Line<'_>) {
         let Pipeline {
             engine,
@@ -215,6 +245,7 @@ impl Pipeline {
                 Verdict::Event(threshold) => threshold,
                 Verdict::Excluded => return metrics::inc(&metrics.matches_excluded),
                 Verdict::Mistyped => return metrics::inc(&metrics.matches_mistyped),
+                Verdict::Seen => return metrics::inc(&metrics.silence_matches),
                 Verdict::Unsequenced => return metrics::inc(&metrics.after_unmatched),
                 Verdict::Absorbed => return metrics::inc(&metrics.threshold_absorbed),
             };

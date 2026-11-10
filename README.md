@@ -61,6 +61,7 @@ logwizz emits a structured event for the matching rule. Use `config/logwizz.exam
 - Matches literal strings or Rust regular expressions.
 - Supports bounded fixed and opt-in sliding threshold windows, including distinct-value counts for scans and brute force.
 - Correlates rule sequences using `[rules.after]`, for example a login following a scan from the same source.
+- Reports when an expected line stops appearing (`[rules.silence]`), for example audit records or a heartbeat.
 - Detects scans spanning multiple source addresses within one subnet and includes bounded samples of probed ports.
 - Uses journal entry timestamps for detection windows when catching up; file inputs use read time.
 - Excludes trusted sources (addresses, networks or exact values) per rule.

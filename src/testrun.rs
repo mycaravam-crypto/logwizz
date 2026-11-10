@@ -83,6 +83,8 @@ pub fn run(cfg: &Config, sample: &mut dyn BufRead, input: &Path) -> io::Result<R
             match detector.judge(i, r, input, &fields, now) {
                 Verdict::Excluded => stats.excluded += 1,
                 Verdict::Mistyped => stats.mistyped += 1,
+                // Time is not replayed, so no silence is ever reported.
+                Verdict::Seen => {}
                 Verdict::Unsequenced => stats.unsequenced += 1,
                 Verdict::Absorbed => stats.absorbed += 1,
                 Verdict::Event(fired) => {
@@ -179,8 +181,12 @@ impl Report {
                 cell(emits && !r.exclude.is_empty(), s.excluded),
                 cell(r.after.is_some(), s.unsequenced),
                 cell(r.threshold.is_some(), s.absorbed),
-                cell(emits, s.events),
-                if emits { "" } else { "  (ignore)" },
+                cell(emits && r.silence.is_none(), s.events),
+                match (emits, r.silence) {
+                    (false, _) => "  (ignore)",
+                    (true, Some(_)) => "  (silence)",
+                    (true, None) => "",
+                },
             )?;
         }
         let mut heading = "\nfirst match:";

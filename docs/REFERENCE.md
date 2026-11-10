@@ -277,6 +277,7 @@ matches = ["_TRANSPORT=kernel", "+", "SYSLOG_IDENTIFIER=sshd", "SYSLOG_IDENTIFIE
 | `exclude_file` | unset | Table of capture group → file listing more addresses and networks to exclude. See [Excluding trusted sources](#excluding-trusted-sources). |
 | `types` | unset | Table of capture group → what its value must be (`"ip"`); other matches are discarded. See [Typed captures](#typed-captures). |
 | `after` | unset | Count a match only after another rule reported the same source. See [Sequence rules](#sequence-rules). |
+| `silence` | unset | Report when the rule has matched nothing for a time, instead of each match. See [Silence rules](#silence-rules). |
 | `files` | unset: every input | List of inputs the rule is evaluated for. See [Limiting a rule to some inputs](#limiting-a-rule-to-some-inputs). |
 
 Rules are compiled once at startup. Every enabled rule is evaluated against
@@ -596,6 +597,51 @@ within_secs = 3600     # 1 – 86400
 Limits: the configuration file may be at most 1 MiB and must not be
 world-writable.
 
+#### Silence rules
+
+Some lines are expected: auditd records, a cron heartbeat, a backup's daily
+"finished". When they stop, a service has stopped or logging was tampered
+with. A `[rules.silence]` table turns a rule around: its matches produce no
+event, and it reports once when no line has matched for `after_secs`:
+
+```toml
+[[rules]]
+id = "auditd_silent"
+description = "No audit records"
+match_type = "literal"
+pattern = "type=SYSCALL"
+severity = "critical"
+files = ["/var/log/audit/audit.log"]
+[rules.silence]
+after_secs = 600       # 10 – 86400
+```
+
+```json
+{"v":1,"ts":"...","host":"web1","pid":812,"file":"","rule":"auditd_silent","description":"No audit records","severity":"critical","match_type":"literal","line":"","truncated":false,"silence":{"after_secs":600}}
+```
+
+- The wait starts when logwizz starts (or when the rule is added or
+  changed by a reload), and again at every match. A log that never
+  produces the line is therefore reported `after_secs` after startup,
+  and so is a log that is missing or unreadable.
+- A silence is reported once. The next match ends it, and a later silence
+  is reported again. There is no event when the line comes back.
+- The event has no line and no file (`"line": ""`, `"file": ""`); the
+  `silence` object marks it. It is not subject to `[limits]`.
+- Silence is measured from when a line was read, not from its log time, and
+  is checked about once a second.
+- Choose `after_secs` well above the line's normal interval: a quiet night
+  on a rarely used host is also a silence. The rule cannot tell why the
+  line stopped.
+- `exclude` and `types` apply first: an excluded or mistyped match does not
+  count as the line appearing. `threshold` and `after` cannot be combined
+  with `silence`, an `after` rule cannot name a silence rule, and it is not
+  allowed on `ignore` rules.
+- While logwizz itself is stopped nothing is reported; that is what a
+  watchdog on the service or on the notifier is for.
+- Versions before this key was added refuse a configuration that uses it.
+  Upgrade the binary first.
+
 ## Event format
 
 ### JSON Lines (`format = "json"`)
@@ -617,6 +663,8 @@ One JSON object per line. Schema version `1`:
 | `truncated` | boolean | `true` if `line` is incomplete (cut at `max_line_bytes` or `max_excerpt_bytes`). |
 | `fields` | object | Only for regex rules with named capture groups: each group that matched, name → value, in pattern order. Values are taken from the whole line (not the excerpt), cut to 256 bytes on a UTF-8 boundary, and converted like `line`. Example: `{"src":"192.0.2.7","dpt":"22"}`. |
 
+| `silence` | object | Only for the event of a [silence rule](#silence-rules): `{"after_secs": N}`, the time without a match. `file` and `line` are empty. |
+
 Consumers should ignore unknown fields; new fields may be added without a
 version bump.
 
@@ -628,7 +676,9 @@ version bump.
 
 Control characters in the line are escaped (`\u{1b}`), so log content cannot
 inject terminal escape sequences. A truncated line ends with ` [truncated]`.
-Captured fields follow as ` name=value`, escaped the same way.
+Captured fields follow as ` name=value`, escaped the same way. The event of
+a [silence rule](#silence-rules) has no file and line:
+`... CRITICAL [auditd_silent] no matching line for 600s`.
 
 ## Behaviour and guarantees
 
@@ -805,7 +855,7 @@ Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, on
 stderr:
 
 ```
-INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 matches_mistyped=0 after_unmatched=0 after_evictions=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
+INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 matches_mistyped=0 silence_matches=0 silences_reported=0 after_unmatched=0 after_evictions=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
 ```
 
 `files_monitored` is a gauge: files currently open, excluding rotated files
@@ -824,6 +874,8 @@ retry.
 | `rule_matches` | (line, rule) matches of emitting rules, before exclusions, thresholds, rate limiting and deduplication. |
 | `matches_excluded` | Matches discarded by a rule's `exclude` values. |
 | `matches_mistyped` | Matches discarded by a rule's [`types`](#typed-captures): a capture was not of its type. |
+| `silence_matches` | Matches of [silence rules](#silence-rules): the expected line appeared. |
+| `silences_reported` | Silences reported. Each one is an event that no match produced. |
 | `after_unmatched` | Matches of [sequence rules](#sequence-rules) without a recent event of a named rule for the same value. |
 | `after_evictions` | Values dropped because a sequence memory was full. |
 | `threshold_absorbed` | Matches of threshold rules that did not reach their threshold, fell into its cooldown, or lacked the grouping capture. |
@@ -841,8 +893,9 @@ retry.
 | `glob_matches_refused` | Files matching a glob that were not followed because of `max_glob_files`. Each file is counted once while it stays refused. |
 | `config_reloads`, `config_reload_failures` | Configuration reloads applied, and rejected (the running configuration was kept). |
 
-`rule_matches` = `matches_excluded` + `matches_mistyped` + `after_unmatched` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
-`events_rate_limited` + `events_deduplicated`.
+`rule_matches` + `silences_reported` = `matches_excluded` + `matches_mistyped` + `silence_matches` +
+`after_unmatched` + `threshold_absorbed` + `events_emitted` + `events_dropped` + `events_rate_limited` +
+`events_deduplicated`.
 
 A second line follows each statistics line, with two counters per rule in
 configuration order, as `id=matches/events`:
@@ -930,7 +983,9 @@ printed.
 - **Time is not replayed.** Every line counts as read at the same moment:
   `window_secs` and `within_secs` always hold, and a cooldown never ends, so
   a group with a cooldown reports once. The test answers "does this match,
-  and is it counted for the right group", not "is the window right".
+  and is it counted for the right group", not "is the window right". For the
+  same reason a [silence rule](#silence-rules) only shows its matches
+  (marked `(silence)`), never a reported silence.
 - **`[limits]` are not applied** (rate limiting, deduplication).
 - **Input names matter.** Rules with `files` only see the input named by
   `--as`, and `group_by = "file"` groups by it. Rules limited to other
