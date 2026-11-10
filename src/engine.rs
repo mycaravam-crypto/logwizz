@@ -121,19 +121,25 @@ impl Engine {
     }
 
     /// Calls `f` with the index of each emitting rule matching `line`, read
-    /// from `file`, up to the first matching `ignore` rule. Returns `true`
-    /// if one matched. Rules scoped to other inputs (`files`) are skipped.
+    /// from `file`, up to the first matching `ignore` rule. Returns the
+    /// index of that rule, if one matched. Rules scoped to other inputs
+    /// (`files`) are skipped.
     #[inline]
-    pub fn for_each_match(&self, file: &Path, line: &[u8], mut f: impl FnMut(usize)) -> bool {
+    pub fn for_each_match(
+        &self,
+        file: &Path,
+        line: &[u8],
+        mut f: impl FnMut(usize),
+    ) -> Option<usize> {
         for (i, rule) in self.rules.iter().enumerate() {
             if rule.applies_to(file) && rule.matcher.is_match(line) {
                 if rule.action == Action::Ignore {
-                    return true;
+                    return Some(i);
                 }
                 f(i);
             }
         }
-        false
+        None
     }
 }
 
@@ -269,11 +275,13 @@ mod tests {
         ));
         // An earlier emitting rule still fires; nothing after the ignore does.
         let mut ids = Vec::new();
-        assert!(e.for_each_match(Path::new(INPUT), b"CRON job", |i| {
+        let by = e.for_each_match(Path::new(INPUT), b"CRON job", |i| {
             ids.push(e.rules()[i].id.as_str())
-        }));
+        });
+        assert_eq!(by, Some(1));
         assert_eq!(ids, ["early"]);
-        assert!(e.for_each_match(Path::new(INPUT), b"ntpd sync", |_| panic!("ignored")));
+        let by = e.for_each_match(Path::new(INPUT), b"ntpd sync", |_| panic!("ignored"));
+        assert_eq!(by, Some(2));
         // The catch-all reports what no ignore rule knows.
         assert_eq!(matches(&e, b"sshd: something new"), ["unknown"]);
     }
@@ -316,7 +324,7 @@ mod tests {
             let ignored = e.for_each_match(Path::new(file), b"Failed password", |i| {
                 ids.push(e.rules()[i].id.as_str())
             });
-            (ids, ignored)
+            (ids, ignored.is_some())
         };
         // The ignore rule scoped to web.log does not hide auth.log lines.
         assert_eq!(run("/var/log/auth.log"), (vec!["auth", "any"], false));

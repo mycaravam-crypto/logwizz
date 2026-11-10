@@ -98,6 +98,7 @@ In a second terminal, `echo "ERROR disk full" >> demo.log`, and logwizz prints:
 
 ```
 logwizz [--config <PATH>] [--check-config]
+logwizz [--config <PATH>] --test <FILE> [--as <INPUT>]
 logwizz --version | --help
 ```
 
@@ -105,14 +106,16 @@ logwizz --version | --help
 |---|---|
 | `-c, --config <PATH>` | Configuration file. Default `/etc/logwizz/logwizz.toml`. |
 | `--check-config` | Load, validate and compile the configuration, print a summary and exit. Does not start monitoring. |
+| `--test <FILE>` | Run a sample log (`-`: standard input) through the rules once, print what each rule matched and exit. See [Testing rules](#testing-rules). |
+| `--as <INPUT>` | With `--test`: the configured input the sample stands for, as rules name it in `files` (a path, or `journal`). Default: the sample's own path. |
 | `-V, --version` / `-h, --help` | Print version or help. |
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | clean shutdown (`SIGTERM`, `SIGINT`), or `--check-config`: the configuration is valid |
-| `1` | runtime failure, for example the output became unwritable |
+| `0` | clean shutdown (`SIGTERM`, `SIGINT`), `--check-config`: the configuration is valid, or `--test`: the sample was read (whatever matched) |
+| `1` | runtime failure, for example the output became unwritable, or the `--test` sample could not be read |
 | `2` | invalid configuration, or invalid command-line arguments |
 
 Every configuration problem is listed, not only the first one:
@@ -758,8 +761,8 @@ they were matched with.
 
 ### Statistics
 
-Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, as one
-line on stderr:
+Logged on `SIGUSR1`, every `stats_interval_secs`, and at shutdown, on
+stderr:
 
 ```
 INFO statistics stats=files_monitored=2 bytes_read=10512 lines_processed=97 lines_truncated=0 bytes_skipped=0 partial_lines_flushed=0 lines_ignored=0 rule_matches=4 matches_excluded=0 after_unmatched=0 after_evictions=0 threshold_absorbed=0 threshold_fired=0 threshold_evictions=0 events_emitted=4 events_dropped=0 events_rate_limited=0 events_deduplicated=0 output_errors=0 read_errors=0 notify_overflows=0 rotations=1 truncations=0 state_saves=0 state_save_errors=0 glob_matches_refused=0 journal_entries_skipped=0 journal_restarts=0 config_reloads=0 config_reload_failures=0
@@ -800,6 +803,21 @@ retry.
 `rule_matches` = `matches_excluded` + `after_unmatched` + `threshold_absorbed` + `events_emitted` + `events_dropped` +
 `events_rate_limited` + `events_deduplicated`.
 
+A second line follows each statistics line, with two counters per rule in
+configuration order, as `id=matches/events`:
+
+```
+INFO rule counts rules=ssh_failed_login=37/35 ssh_bruteforce=37/1 cron=412/- kernel_error=0/0
+```
+
+`matches` are the lines the rule matched (for an `ignore` rule: the lines it
+ended, shown as `id=matches/-`). `events` are the matches that passed the
+rule's exclusions, sequence and threshold, before `[limits]`. A rule that
+stays at `0/0` on a busy log is worth a look: its pattern may no longer fit
+the log format ([`--test`](#testing-rules) shows what it matches). After a
+[configuration reload](#configuration-reload), rules whose definition is
+unchanged keep their counts and the others start at zero.
+
 ### Memory use
 
 Every buffer has a configured bound. The worst case is approximately:
@@ -825,6 +843,58 @@ whatever the log content, on top of a baseline of roughly 5 MiB. With the
 systemd unit's `MemoryMax=128M`, that leaves room for several hundred files.
 If you raise `max_line_bytes`, `max_queue_bytes`, the number of files or
 `dedup_max_entries`, check the sum against `MemoryMax`.
+
+### Testing rules
+
+`--test` runs a saved log through the configured rules once and reports what
+each rule made of it, so a pattern, an exclusion or a threshold can be
+checked without waiting for the real thing. Nothing is watched, no event is
+written, and no state is read or saved:
+
+```
+$ logwizz -c /etc/logwizz/logwizz.toml --test auth-sample.log --as /var/log/auth.log
+sample: auth-sample.log, read as /var/log/auth.log
+lines: 9 read, 0 truncated, 1 ignored, 1 matched no rule
+
+rule          matches   excluded   no_prior   absorbed     events
+failed              6          1          -          -          5
+bruteforce          6          -          -          5          1
+login               2          -          1          -          1
+cron                1          -          -          -          -  (ignore)
+
+first match:
+failed      line 1: user=root src=192.0.2.7
+bruteforce  line 1: src=192.0.2.7
+login       line 3: src=192.0.2.7
+
+thresholds reached:
+bruteforce  line 4: 192.0.2.7, count 3
+```
+
+| Column | Meaning |
+|---|---|
+| `matches` | Lines the rule matched. For an `ignore` rule: lines it ended. |
+| `excluded` | Matches discarded by `exclude` or `exclude_file`. |
+| `no_prior` | Matches of a [sequence rule](#sequence-rules) without an earlier event of a named rule. |
+| `absorbed` | Matches a threshold counted without reaching it, or during its cooldown. |
+| `events` | Events the daemon would emit, before `[limits]`. |
+
+`-` marks a column that does not apply to the rule. `first match` shows the
+captured values of each rule's first match, which is where a wrong capture
+group shows; `thresholds reached` lists the first five reports per rule.
+Captured values are escaped as in the human format, and log lines are never
+printed.
+
+- **Time is not replayed.** Every line counts as read at the same moment:
+  `window_secs` and `within_secs` always hold, and a cooldown never ends, so
+  a group with a cooldown reports once. The test answers "does this match,
+  and is it counted for the right group", not "is the window right".
+- **`[limits]` are not applied** (rate limiting, deduplication).
+- **Input names matter.** Rules with `files` only see the input named by
+  `--as`, and `group_by = "file"` groups by it. Rules limited to other
+  inputs are left out of the table and counted in a note. Test one input's
+  sample at a time.
+- Lines are cut at `max_line_bytes`, as the daemon does.
 
 ### Diagnostics
 
@@ -1021,9 +1091,11 @@ Layout:
 | `src/event.rs` | Event and severity types, timestamps, excerpts |
 | `src/dispatcher.rs` | Output thread, bounded queue, formats, rate limiting, dedup |
 | `src/daemon.rs` | Signals, statistics, wiring |
+| `src/detect.rs` | What becomes of a match: exclusions, sequences, thresholds |
+| `src/testrun.rs` | `--test`: a sample log through the rules once |
 | `src/notify.rs`, `src/notify/` | `logwizz-notify`: journal input, state file, aggregation, curl delivery |
 | `src/bin/logwizz-notify.rs` | The notifier's entry point |
-| `src/metrics.rs` | Atomic counters |
+| `src/metrics.rs` | Atomic counters, global and per rule |
 | `tests/` | Config, reader, rotation, monitoring loop, end-to-end, notifier and load tests |
 | `benches/` | Criterion benchmarks |
 

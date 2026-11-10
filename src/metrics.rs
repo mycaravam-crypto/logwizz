@@ -5,6 +5,9 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
+
+use crate::config::{Action, Rule};
 
 macro_rules! counters {
     ($($(#[$doc:meta])* $name:ident),* $(,)?) => {
@@ -117,9 +120,124 @@ pub fn dec(counter: &AtomicU64) {
     counter.fetch_sub(1, Ordering::Relaxed);
 }
 
+/// The counters of one rule.
+#[derive(Debug)]
+pub struct RuleCounters {
+    id: String,
+    emits: bool,
+    /// Lines the rule matched. For an `ignore` rule: lines it ended.
+    pub matches: AtomicU64,
+    /// Events before `[limits]`: matches that passed the rule's exclusions,
+    /// sequence and threshold.
+    pub events: AtomicU64,
+}
+
+/// Per-rule counters, in rule order: which rule is noisy, and which never
+/// matches (a pattern that no longer fits the log format).
+///
+/// The monitor thread counts through its own handle on the current table
+/// ([`RuleStats::table`]) without locking; the lock is only taken to log
+/// the table and to replace it on a configuration reload.
+#[derive(Debug)]
+pub struct RuleStats(RwLock<Arc<[RuleCounters]>>);
+
+impl RuleStats {
+    pub fn new(rules: &[Rule]) -> Self {
+        RuleStats(RwLock::new(Self::build(rules, &[], &[])))
+    }
+
+    fn build(rules: &[Rule], kept: &[Option<usize>], old: &[RuleCounters]) -> Arc<[RuleCounters]> {
+        let carried = |i: usize, counter: fn(&RuleCounters) -> &AtomicU64| {
+            let old = kept.get(i).copied().flatten().and_then(|k| old.get(k));
+            AtomicU64::new(old.map_or(0, |c| counter(c).load(Ordering::Relaxed)))
+        };
+        rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| RuleCounters {
+                id: r.id.clone(),
+                emits: r.action == Action::Emit,
+                matches: carried(i, |c| &c.matches),
+                events: carried(i, |c| &c.events),
+            })
+            .collect()
+    }
+
+    /// The current table, indexed like the rules it was built from.
+    pub fn table(&self) -> Arc<[RuleCounters]> {
+        Arc::clone(&self.0.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Replaces the table after a reload and returns the new one. `kept[i]`
+    /// is the old index of new rule `i` if its definition is unchanged;
+    /// such rules keep their counts, the others start at zero.
+    pub fn replace(&self, rules: &[Rule], kept: &[Option<usize>]) -> Arc<[RuleCounters]> {
+        let mut table = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        *table = Self::build(rules, kept, &table);
+        Arc::clone(&table)
+    }
+}
+
+/// `id=matches/events` per rule; `id=matches/-` for an `ignore` rule.
+impl fmt::Display for RuleStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, c) in self.table().iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{}={}/", c.id, c.matches.load(Ordering::Relaxed))?;
+            match c.emits {
+                true => write!(f, "{}", c.events.load(Ordering::Relaxed))?,
+                false => f.write_str("-")?,
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_stats_display_and_reload() {
+        let rule = |id: &str, extra: &str| {
+            format!(
+                "[[rules]]\nid = \"{id}\"\nmatch_type = \"literal\"\npattern = \"x\"\n{extra}\n"
+            )
+        };
+        let parse = |rules: &str| {
+            let text = format!("[[files]]\npath = \"/x\"\n{rules}");
+            crate::config::parse(&text, std::path::Path::new("t"))
+                .unwrap()
+                .rules
+        };
+        let emit = "severity = \"info\"";
+        let old = parse(&format!(
+            "{}{}{}",
+            rule("a", emit),
+            rule("noise", "action = \"ignore\""),
+            rule("b", emit)
+        ));
+        let stats = RuleStats::new(&old);
+        let table = stats.table();
+        add(&table[0].matches, 5);
+        add(&table[0].events, 2);
+        add(&table[1].matches, 7);
+        add(&table[2].matches, 1);
+        assert_eq!(stats.to_string(), "a=5/2 noise=7/- b=1/0");
+
+        // `b` changed (new rule), `a` moved: counts follow the definition.
+        let new = parse(&format!(
+            "{}{}",
+            rule("b", "severity = \"error\""),
+            rule("a", emit)
+        ));
+        let table = stats.replace(&new, &[None, Some(0)]);
+        assert_eq!(stats.to_string(), "b=0/0 a=5/2");
+        inc(&table[0].matches);
+        assert_eq!(stats.to_string(), "b=1/0 a=5/2");
+    }
 
     #[test]
     fn snapshot_and_display() {
