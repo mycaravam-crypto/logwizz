@@ -397,3 +397,46 @@ fn glob_limit_is_enforced_and_counted() {
     );
     assert_eq!(r.metrics.snapshot().glob_matches_refused, 1, "counted once");
 }
+
+/// The tick runs on the clock, also while nothing wakes the loop: no file
+/// changes and reconciliation is ten minutes away.
+#[test]
+fn tick_runs_while_the_inputs_are_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("idle.log");
+    write_new(&log, "");
+    let text = format!(
+        "[general]\nreconcile_interval_ms = 600000\n[[files]]\npath = {:?}\n\
+         [[rules]]\nid = \"r\"\nmatch_type = \"literal\"\npattern = \"x\"\nseverity = \"info\"\n",
+        log.display().to_string()
+    );
+    let cfg = config::parse(&text, Path::new("t")).unwrap();
+    let mut monitor = Monitor::new(&cfg, Arc::new(Metrics::default()), true);
+    let waker = monitor.waker();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&shutdown);
+    let (tx, ticks) = channel();
+    let handle = thread::spawn(move || {
+        let mut tick = || {
+            let _ = tx.send(Instant::now());
+        };
+        monitor.run_with(&flag, None, &mut |_, _| {}, None, Some(&mut tick));
+    });
+
+    let start = Instant::now();
+    let first = ticks.recv_timeout(Duration::from_secs(5)).expect("no tick");
+    let second = ticks
+        .recv_timeout(Duration::from_secs(5))
+        .expect("no second tick");
+    // About a second apart, and not before the first interval has passed.
+    assert!(first.duration_since(start) >= Duration::from_millis(900));
+    let gap = second.duration_since(first);
+    assert!(
+        (Duration::from_millis(900)..Duration::from_secs(3)).contains(&gap),
+        "{gap:?}"
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    waker.wake();
+    handle.join().unwrap();
+}
