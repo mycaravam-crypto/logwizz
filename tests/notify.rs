@@ -270,7 +270,7 @@ fn webhook_summary_on_stop_and_resume_after_cursor() {
     assert!(args.contains("--config\n-\n"), "{args}");
 
     let jargs = fs::read_to_string(w.path.join("journalctl.args")).unwrap();
-    assert!(jargs.contains("--namespace=logwizz\n") && jargs.contains("--priority=4\n"));
+    assert!(jargs.contains("--namespace=logwizz\n") && jargs.contains("--priority=5\n"));
     assert!(jargs.contains("--lines=0\n"), "{jargs}");
 
     // A restart continues after the saved cursor: nothing is counted again.
@@ -427,7 +427,7 @@ fn closed_windows_are_sent_without_stopping() {
     let text = form.iter().find_map(|f| f.strip_prefix("text=")).unwrap();
     assert!(form.contains(&"parse_mode=HTML"));
     assert!(
-        text.contains("\n<b>Event:</b> <code>ssh</code>\n<b>Severity:</b> warning\n<b>Host:</b> 🟥 <code>test-host</code>\n"),
+        text.contains("\n<b>Event:</b> <code>ssh</code>\n<b>Severity:</b> warning\n<b>Host:</b> 🟦 <code>test-host</code>\n"),
         "{text}"
     );
     assert!(

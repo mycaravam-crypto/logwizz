@@ -9,7 +9,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use super::action::BanReport;
-use super::aggregate::Summary;
+use super::aggregate::{Digest, Summary};
 
 /// Where summaries go.
 #[derive(Clone, PartialEq, Eq)]
@@ -34,12 +34,15 @@ impl std::fmt::Debug for Kind {
 pub trait Deliver {
     fn deliver(&mut self, summary: &Summary, partial: bool) -> Result<(), String>;
     fn deliver_action(&mut self, action: &BanReport) -> Result<(), String>;
+    fn deliver_digest(&mut self, digest: &Digest) -> Result<(), String>;
 }
 
 /// Telegram's reply is small; anything bigger is not a Telegram reply.
 const MAX_RESPONSE_BYTES: &str = "65536";
 /// ntfy priority 4 is its high-priority notification level.
 const NTFY_PRIORITY_HIGH: &str = "4";
+/// ntfy priority 2 does not vibrate or make a sound.
+const NTFY_PRIORITY_LOW: &str = "2";
 
 #[derive(Debug)]
 pub struct Curl {
@@ -74,17 +77,18 @@ impl Curl {
                 opt("max-filesize", MAX_RESPONSE_BYTES);
             }
             Kind::Ntfy { url } => {
+                // critical is urgent, high is high, warning the default.
                 let priority = match s.severity.syslog_priority() {
                     0..=2 => "5",
-                    3 | 4 => "4",
-                    5 => "3",
-                    6 => "2",
+                    3 => "4",
+                    4 => "3",
+                    5 => "2",
                     _ => "1",
                 };
                 opt("url", url);
                 opt("header", &format!("Title: logwizz {}: {}", s.host, s.rule));
                 opt("header", &format!("Priority: {priority}"));
-                opt("header", &format!("Tags: {}", s.severity));
+                opt("header", &format!("Tags: {}", s.severity.label()));
                 opt("data-binary", &s.to_text(partial));
                 opt("output", "/dev/null");
             }
@@ -92,6 +96,53 @@ impl Curl {
                 opt("url", url);
                 opt("header", "Content-Type: application/json");
                 opt("data-binary", &s.to_json(partial).to_string());
+                opt("output", "/dev/null");
+            }
+        }
+        if let Some(auth) = &self.auth {
+            opt("header", &format!("Authorization: {auth}"));
+        }
+        c
+    }
+
+    /// The periodic summary of everything below the alert level.
+    pub fn request_digest(&self, d: &Digest) -> String {
+        let mut c = String::new();
+        let mut opt = |name: &str, value: &str| {
+            c.push_str(name);
+            c.push_str(" = \"");
+            c.push_str(&quote(value));
+            c.push_str("\"\n");
+        };
+        match &self.kind {
+            Kind::Telegram { token, chat_id } => {
+                opt(
+                    "url",
+                    &format!("https://api.telegram.org/bot{token}/sendMessage"),
+                );
+                opt("data-urlencode", &format!("chat_id={chat_id}"));
+                opt("data-urlencode", &format!("text={}", d.to_telegram_html()));
+                opt("data-urlencode", "parse_mode=HTML");
+                opt("data-urlencode", "disable_web_page_preview=true");
+                // A summary is not urgent: deliver it without a sound.
+                opt("data-urlencode", "disable_notification=true");
+                opt("max-filesize", MAX_RESPONSE_BYTES);
+            }
+            Kind::Ntfy { url } => {
+                opt("url", url);
+                opt(
+                    "header",
+                    &format!("Title: logwizz {}: {} summary", d.host(), d.name()),
+                );
+                opt("header", &format!("Priority: {NTFY_PRIORITY_LOW}"));
+                opt("header", "Tags: bar_chart");
+                opt("data-binary", &d.to_text());
+                opt("output", "/dev/null");
+            }
+            Kind::Webhook { url } => {
+                opt("url", url);
+                opt("header", "Content-Type: application/json");
+                opt("data-binary", &d.to_json().to_string());
                 opt("output", "/dev/null");
             }
         }
@@ -226,6 +277,10 @@ impl Deliver for Curl {
     fn deliver_action(&mut self, action: &BanReport) -> Result<(), String> {
         self.send_config(self.request_action(action))
     }
+
+    fn deliver_digest(&mut self, digest: &Digest) -> Result<(), String> {
+        self.send_config(self.request_digest(digest))
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +385,41 @@ mod tests {
     }
 
     #[test]
+    fn digest_requests_are_quiet() {
+        let s = summary();
+        let digest = Digest {
+            start: 1_793_577_600,
+            period_secs: 604_800,
+            rules: vec![&s],
+        };
+        let curl = |kind| Curl { kind, auth: None };
+        let r = curl(Kind::Ntfy {
+            url: "https://ntfy.sh/topic".into(),
+        })
+        .request_digest(&digest);
+        assert!(
+            r.contains("header = \"Title: logwizz web1: weekly summary\"\n"),
+            "{r}"
+        );
+        assert!(r.contains("header = \"Priority: 2\"\n"), "{r}");
+        let r = curl(Kind::Telegram {
+            token: "123:ABC".into(),
+            chat_id: "-100123".into(),
+        })
+        .request_digest(&digest);
+        assert!(
+            r.contains("text=📊 <b>Logwizz weekly summary</b>\\n"),
+            "{r}"
+        );
+        assert!(r.contains("disable_notification=true"), "{r}");
+        let r = curl(Kind::Webhook {
+            url: "https://example.invalid/hook".into(),
+        })
+        .request_digest(&digest);
+        assert!(r.contains("logwizz.digest/v1"), "{r}");
+    }
+
+    #[test]
     fn ntfy_and_telegram_requests() {
         let mut s = summary();
         let ntfy = Curl {
@@ -344,7 +434,11 @@ mod tests {
         assert!(r.contains("header = \"Tags: critical\"\n"));
         assert!(r.contains("\\nPartial window"));
         s.severity = Severity::Notice;
-        assert!(ntfy.request(&s, false).contains("Priority: 3"));
+        assert!(ntfy.request(&s, false).contains("Priority: 2"));
+        s.severity = Severity::Error;
+        let r = ntfy.request(&s, false);
+        assert!(r.contains("Priority: 4") && r.contains("Tags: high"), "{r}");
+        s.severity = Severity::Notice;
 
         let tg = Curl {
             kind: Kind::Telegram {

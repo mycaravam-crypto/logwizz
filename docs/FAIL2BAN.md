@@ -255,8 +255,10 @@ sample log lines; a ban by this jail on a live host has not been verified.
 
 The supplied `config/detection.toml` monitors `/var/log/fail2ban.log` and has a
 `fail2ban_ban` rule. A Fail2ban `Ban <ip>` log entry produces a separate Logwizz
-notification (after its aggregation window), whereas the original detection
-notification alone says nothing about a ban. This also works for other
+event, whereas the original detection alone says nothing about a ban. Its
+severity is `notice`: by default bans are counted in the notifier's weekly
+summary; set the rule's `severity = "warning"` for a notification per ban
+(after its aggregation window). This also works for other
 Fail2ban jails; no source-rule attribution is attempted. A Fail2ban `Ban` log
 is a report from Fail2ban, **not proof that a firewall rule took effect**.
 If there is no follow-up notification, do not infer the IP was not blocked:

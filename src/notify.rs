@@ -10,6 +10,9 @@
 //! state file, so after a crash reading resumes exactly where the saved
 //! summaries end: no event is counted twice, and a summary sent but not yet
 //! removed from the saved state is sent again (at-least-once delivery).
+//!
+//! Events below `NOTIFY_MIN_PRIORITY` (down to `notice`) are not alerts:
+//! they are counted per rule into one digest per week or day.
 
 pub mod action;
 pub mod aggregate;
@@ -32,15 +35,16 @@ use tracing::{info, warn};
 use crate::event::Severity;
 use crate::journal::read_line;
 use action::BanReport;
-use aggregate::{Aggregator, Detection, Key, NotAnEvent, Recorded, Summary};
+use aggregate::{Aggregator, Detection, Digest, Key, NotAnEvent, Recorded, Summary};
 use transport::{Curl, Deliver, Kind};
 
 /// Stable, random-looking host marker for Telegram messages.
 /// Telegram Bot API HTML does not support arbitrary font/background colors.
 /// Using a fixed palette avoids unreadable colors and a host changing color
 /// across notifier restarts. This is visual identification, not authentication.
+/// Red, orange, yellow and green are left out: those colors mean severity.
 fn host_badge(host: &str) -> &'static str {
-    const PALETTE: [&str; 6] = ["🟥", "🟧", "🟩", "🟦", "🟪", "🟫"];
+    const PALETTE: [&str; 5] = ["🟪", "🟦", "🟫", "⬛", "⬜"];
     if host.is_empty() || host == "unknown" || host == "multiple" {
         return "🔳";
     }
@@ -59,10 +63,10 @@ mod host_badge_tests {
 
     #[test]
     fn stable_badge_per_host() {
-        assert_eq!(host_badge("webdbapilogdb"), "🟧");
+        assert_eq!(host_badge("webdbapilogdb"), "⬜");
         assert_eq!(host_badge("web1"), "🟪");
         assert_eq!(host_badge("WEB1"), host_badge("web1"));
-        assert_eq!(host_badge("web2"), "🟧");
+        assert_eq!(host_badge("web2"), "⬛");
         assert_eq!(host_badge("multiple"), "🔳");
         assert_eq!(host_badge("unknown"), "🔳");
         assert_eq!(host_badge(""), "🔳");
@@ -82,6 +86,18 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Time allowed for delivering pending summaries at shutdown; systemd's
 /// TimeoutStopSec must be longer.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
+/// Least severe events counted in the digest.
+const DIGEST_FLOOR: Severity = Severity::Notice;
+/// Rule/period entries kept for digests; further rules are not counted.
+const DIGEST_MAX_PENDING: usize = 512;
+const DAY_SECS: u64 = 86_400;
+const WEEK_SECS: u64 = 7 * DAY_SECS;
+/// The epoch was a Thursday; weekly digests run Monday to Monday (UTC).
+const WEEK_OFFSET_SECS: u64 = 4 * DAY_SECS;
+
+fn digest_aggregator(period_secs: u64, saved: Vec<Summary>) -> Aggregator {
+    Aggregator::new(period_secs, DIGEST_MAX_PENDING, saved).with_offset(WEEK_OFFSET_SECS)
+}
 
 /// Journal input compatibility mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +149,8 @@ pub struct Settings {
     pub window_secs: u64,
     pub max_pending: usize,
     pub min_priority: Severity,
+    /// Length of the digest period (NOTIFY_DIGEST); `None` for no digest.
+    pub digest_secs: Option<u64>,
     pub journal_mode: JournalMode,
     pub state_dir: PathBuf,
     /// Captures that may leave the host (NOTIFY_FIELDS).
@@ -195,9 +213,15 @@ impl Settings {
         let min_priority = match var("NOTIFY_MIN_PRIORITY") {
             None => Severity::Warning,
             Some(p) => p.parse().map_err(|()| {
-                "NOTIFY_MIN_PRIORITY must be debug, info, notice, warning, error or critical"
+                "NOTIFY_MIN_PRIORITY must be debug, info, notice, warning, high (or error) or critical"
                     .to_string()
             })?,
+        };
+        let digest_secs = match var("NOTIFY_DIGEST").as_deref().unwrap_or("weekly") {
+            "weekly" => Some(WEEK_SECS),
+            "daily" => Some(DAY_SECS),
+            "off" => None,
+            _ => return Err("NOTIFY_DIGEST must be weekly, daily or off".into()),
         };
         let fields: Vec<String> = var("NOTIFY_FIELDS")
             .as_deref()
@@ -243,6 +267,7 @@ impl Settings {
             window_secs: number("NOTIFY_WINDOW_SECS", 60, 10, 3600)?,
             max_pending: number("NOTIFY_MAX_PENDING", 4096, 1, 65536)? as usize,
             min_priority,
+            digest_secs,
             journal_mode: JournalMode::parse(
                 var("NOTIFY_JOURNAL_MODE").as_deref().unwrap_or("auto"),
             )?,
@@ -262,6 +287,9 @@ struct State {
     summaries: Vec<Summary>,
     #[serde(default)]
     actions: Vec<BanReport>,
+    /// Counts for the digest: one summary per rule and period.
+    #[serde(default)]
+    digest: Vec<Summary>,
 }
 
 fn load_state(dir: &Path, window_secs: u64) -> io::Result<State> {
@@ -398,12 +426,14 @@ fn save_state(
     cursor: Option<&str>,
     agg: &Aggregator,
     actions: &[BanReport],
+    digest: &Aggregator,
 ) -> io::Result<()> {
     let state = State {
         v: STATE_VERSION,
         cursor: cursor.map(String::from),
         summaries: agg.summaries().cloned().collect(),
         actions: actions.to_vec(),
+        digest: digest.summaries().cloned().collect(),
     };
     let mut bytes = serde_json::to_vec(&state).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -419,6 +449,8 @@ struct Entry {
     time: Option<u64>,
     is_ban_report: bool,
     host: String,
+    /// The journal's `PRIORITY` (0 most severe).
+    priority: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -435,6 +467,8 @@ struct RawEntry {
     uid: Option<String>,
     #[serde(rename = "_HOSTNAME", default)]
     host: Option<String>,
+    #[serde(rename = "PRIORITY", default)]
+    priority: Option<String>,
 }
 
 fn parse_entry(json: &[u8]) -> Option<Entry> {
@@ -454,6 +488,7 @@ fn parse_entry(json: &[u8]) -> Option<Entry> {
         is_ban_report: raw.identifier.as_deref() == Some(action::IDENTIFIER)
             && raw.uid.as_deref() == Some("0"),
         host: raw.host.unwrap_or_else(|| "unknown".into()),
+        priority: raw.priority.and_then(|p| p.parse().ok()),
     })
 }
 
@@ -579,6 +614,11 @@ struct Notifier<D> {
     fields: Vec<String>,
     rules: Option<Vec<String>>,
     max_pending: usize,
+    /// Events below this severity are not alerts.
+    min_priority: Severity,
+    /// Counts of those events, when a digest is configured.
+    digest: Aggregator,
+    digest_enabled: bool,
     actions: Vec<BanReport>,
     cursor: Option<String>,
     dirty: bool,
@@ -597,6 +637,7 @@ impl<D: Deliver> Notifier<D> {
             self.cursor.as_deref(),
             &self.agg,
             &self.actions,
+            &self.digest,
         ) {
             Ok(()) => {
                 self.dirty = false;
@@ -682,9 +723,53 @@ impl<D: Deliver> Notifier<D> {
         ok
     }
 
+    /// Sends one digest per period that is over. A failed one stays pending
+    /// with the same backoff as a summary.
+    fn send_digests(&mut self, now: u64, by_clock: bool) {
+        let mut periods: Vec<(u64, u64)> = self
+            .digest
+            .due(now, by_clock)
+            .into_iter()
+            .map(|(bucket, secs, _)| (bucket, secs))
+            .collect();
+        periods.dedup();
+        for (start, period_secs) in periods {
+            let keys: Vec<Key> = self
+                .digest
+                .keys()
+                .into_iter()
+                .filter(|k| (k.0, k.1) == (start, period_secs))
+                .collect();
+            let digest = Digest {
+                start,
+                period_secs,
+                rules: keys.iter().filter_map(|k| self.digest.get(k)).collect(),
+            };
+            match self.deliver.deliver_digest(&digest) {
+                Ok(()) => keys.iter().for_each(|k| self.digest.remove(k)),
+                Err(e) => {
+                    let delay = keys
+                        .iter()
+                        .map(|k| self.digest.failed(k, now))
+                        .max()
+                        .unwrap_or(0);
+                    warn!(error = %e, retry_in_secs = delay, "digest delivery failed; kept for retry");
+                }
+            }
+            self.dirty = true;
+            self.save(true);
+        }
+    }
+
     fn consume(&mut self, entry: &Entry) -> Recorded {
         if let Some(message) = &entry.message {
-            if entry.is_ban_report {
+            // With a digest the journal is read below the alert level.
+            let below_alert_level = entry
+                .priority
+                .is_some_and(|p| p > self.min_priority.syslog_priority());
+            if entry.is_ban_report && below_alert_level {
+                // As when journalctl filtered it out.
+            } else if entry.is_ban_report {
                 // Only _UID=0 with the dedicated identifier reaches here.
                 // A report is not a firewall-enforcement verification.
                 if let Some(report) =
@@ -708,7 +793,13 @@ impl<D: Deliver> Notifier<D> {
                             if fallback {
                                 warn!(rule = %d.rule, "event has no valid timestamp; using the journal's");
                             }
-                            if self.agg.record(&d) == Recorded::Full {
+                            if d.severity < self.min_priority {
+                                // Counted, never an alert. A full digest
+                                // table must not hold up the alerts.
+                                if self.digest_enabled && d.severity >= DIGEST_FLOOR {
+                                    self.digest.record(&d);
+                                }
+                            } else if self.agg.record(&d) == Recorded::Full {
                                 return Recorded::Full;
                             }
                         }
@@ -763,6 +854,9 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         fields: settings.fields,
         rules: settings.rules,
         max_pending: settings.max_pending,
+        min_priority: settings.min_priority,
+        digest: digest_aggregator(settings.digest_secs.unwrap_or(WEEK_SECS), state.digest),
+        digest_enabled: settings.digest_secs.is_some(),
         actions: state.actions,
         cursor: state.cursor,
         dirty: !legacy.is_empty(),
@@ -773,12 +867,18 @@ pub fn run(settings: Settings) -> io::Result<Exit> {
         transport = ?n.deliver.kind,
         window_secs = settings.window_secs,
         min_priority = %settings.min_priority,
+        digest_secs = settings.digest_secs.unwrap_or(0),
         pending = n.agg.len(),
         pending_actions = n.actions.len(),
         journal_mode = ?mode,
         "logwizz-notify started"
     );
-    let rx = spawn_journal(n.cursor.as_deref(), settings.min_priority, mode)?;
+    // The digest counts what is below the alert level, so read that too.
+    let read_from = match settings.digest_secs {
+        Some(_) => settings.min_priority.min(DIGEST_FLOOR),
+        None => settings.min_priority,
+    };
+    let rx = spawn_journal(n.cursor.as_deref(), read_from, mode)?;
     Ok(main_loop(&mut n, &rx, &stop))
 }
 
@@ -827,6 +927,7 @@ fn main_loop<D: Deliver>(n: &mut Notifier<D>, rx: &Receiver<Entry>, stop: &Atomi
             if !due.is_empty() {
                 n.send(&due, now, None, None);
             }
+            n.send_digests(now, quiet || paused);
         }
         n.save(false);
         if paused && !stop.load(Ordering::Relaxed) {
@@ -898,6 +999,7 @@ mod tests {
         .unwrap();
         assert_eq!((s.window_secs, s.max_pending), (60, 4096));
         assert_eq!(s.min_priority, Severity::Warning);
+        assert_eq!(s.digest_secs, Some(WEEK_SECS));
         assert_eq!(s.state_dir, Path::new("/var/lib/logwizz-notify"));
         assert_eq!(s.fields, ["login"]);
         assert!(s.rules.is_none());
@@ -931,6 +1033,16 @@ mod tests {
             with(("STATE_DIRECTORY", "/a:/b")).unwrap().state_dir,
             Path::new("/a")
         );
+        assert_eq!(
+            with(("NOTIFY_MIN_PRIORITY", "high")).unwrap().min_priority,
+            Severity::Error
+        );
+        assert_eq!(
+            with(("NOTIFY_DIGEST", "daily")).unwrap().digest_secs,
+            Some(DAY_SECS)
+        );
+        assert_eq!(with(("NOTIFY_DIGEST", "off")).unwrap().digest_secs, None);
+        assert!(with(("NOTIFY_DIGEST", "hourly")).is_err());
         assert!(err(&[("NOTIFY_KIND", "email")]).contains("NOTIFY_KIND"));
         assert_eq!(
             with(("NOTIFY_FIELDS", "login, key,tool")).unwrap().fields,
@@ -983,6 +1095,7 @@ mod tests {
                 cursor: Some("saved-cursor".into()),
                 summaries: Vec::new(),
                 actions: Vec::new(),
+                digest: Vec::new(),
             })
             .unwrap(),
         )
@@ -1018,6 +1131,7 @@ mod tests {
     struct Fake {
         sent: Vec<(String, u64, bool)>,
         actions: Vec<String>,
+        digests: Vec<(u64, Vec<(String, u64)>)>,
         fail: bool,
     }
 
@@ -1037,6 +1151,15 @@ mod tests {
             self.actions.push(a.ip.clone());
             Ok(())
         }
+
+        fn deliver_digest(&mut self, d: &Digest) -> Result<(), String> {
+            if self.fail {
+                return Err("down".into());
+            }
+            let rules = d.rules.iter().map(|s| (s.rule.clone(), s.count)).collect();
+            self.digests.push((d.start, rules));
+            Ok(())
+        }
     }
 
     fn event_entry(cursor: &str, ts: u64, rule: &str) -> Entry {
@@ -1049,6 +1172,7 @@ mod tests {
             time: None,
             is_ban_report: false,
             host: "unknown".into(),
+            priority: None,
         }
     }
 
@@ -1063,6 +1187,9 @@ mod tests {
             fields: vec!["login".into()],
             rules: None,
             max_pending,
+            min_priority: Severity::Warning,
+            digest: digest_aggregator(WEEK_SECS, Vec::new()),
+            digest_enabled: true,
             actions: Vec::new(),
             cursor: None,
             dirty: false,
@@ -1087,6 +1214,7 @@ mod tests {
             time: None,
             is_ban_report: false,
             host: "unknown".into(),
+            priority: None,
         })
         .unwrap();
         // Stop once the queued entries have been consumed.
@@ -1169,9 +1297,80 @@ mod tests {
             time: None,
             is_ban_report: false,
             host: "unknown".into(),
+            priority: None,
         };
         assert_eq!(n.consume(&other), Recorded::Yes);
         assert_eq!(n.cursor.as_deref(), Some("c"));
+    }
+
+    fn quiet_entry(cursor: &str, ts: u64, rule: &str, severity: &str) -> Entry {
+        let mut e = event_entry(cursor, ts, rule);
+        e.message = e
+            .message
+            .map(|m| m.replace("\"warning\"", &format!("\"{severity}\"")));
+        e
+    }
+
+    #[test]
+    fn events_below_the_alert_level_go_to_one_digest_per_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = notifier(dir.path(), 10, false);
+        let monday = 1_793_577_600; // 2026-11-02T00:00:00Z
+        for (i, rule) in ["port_scan", "port_scan", "ssh_probe"].iter().enumerate() {
+            let e = quiet_entry(&format!("c{i}"), monday + 60, rule, "notice");
+            assert_eq!(n.consume(&e), Recorded::Yes);
+        }
+        // Below the digest floor: not counted. At the alert level: an alert.
+        n.consume(&quiet_entry("c3", monday + 60, "chatter", "info"));
+        n.consume(&event_entry("c4", monday + 60, "ssh_bruteforce"));
+        assert_eq!(n.agg.len(), 1);
+        assert_eq!(n.digest.len(), 2);
+
+        // The week is not over: nothing is sent, and the counts are saved.
+        n.send_digests(monday + WEEK_SECS - 1, true);
+        assert!(n.deliver.digests.is_empty());
+        n.save(true);
+        let saved = load_state(dir.path(), 60).unwrap();
+        assert_eq!(saved.digest.len(), 2);
+
+        // A failed digest is kept and retried after its delay.
+        n.deliver.fail = true;
+        n.send_digests(monday + WEEK_SECS, true);
+        assert_eq!(n.digest.len(), 2);
+        n.deliver.fail = false;
+        n.send_digests(monday + WEEK_SECS + 1, true);
+        assert!(n.deliver.digests.is_empty(), "still backing off");
+        n.send_digests(monday + WEEK_SECS + 2, true);
+        assert_eq!(
+            n.deliver.digests,
+            [(
+                monday,
+                vec![("port_scan".to_string(), 2), ("ssh_probe".to_string(), 1)]
+            )]
+        );
+        assert!(n.digest.is_empty());
+        assert!(n.deliver.sent.is_empty(), "no alert was due");
+    }
+
+    #[test]
+    fn digest_off_and_quiet_ban_reports_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = notifier(dir.path(), 10, false);
+        n.digest_enabled = false;
+        let now = now_secs();
+        n.consume(&quiet_entry("a", now, "port_scan", "notice"));
+        assert!(n.digest.is_empty() && n.agg.is_empty());
+        let report = Entry {
+            cursor: "b".into(),
+            message: Some("LOGWIZZ_BAN_V1 jail=logwizz ip=198.51.100.24 bantime=3600".into()),
+            time: Some(now),
+            is_ban_report: true,
+            host: "web1".into(),
+            priority: Some(5),
+        };
+        assert_eq!(n.consume(&report), Recorded::Yes);
+        assert!(n.actions.is_empty());
+        assert_eq!(n.cursor.as_deref(), Some("b"));
     }
 
     #[test]
@@ -1189,6 +1388,7 @@ mod tests {
             time: Some(now),
             is_ban_report: true,
             host: "web1".into(),
+            priority: Some(4),
         };
         assert_eq!(n.consume(&report), Recorded::Yes);
         assert_eq!(n.cursor.as_deref(), Some("b"));

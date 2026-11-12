@@ -19,11 +19,23 @@ pub enum Severity {
     Info,
     Notice,
     Warning,
+    /// Shown as `high` in notifications; `high` is accepted as its name too.
+    #[serde(alias = "high")]
     Error,
     Critical,
 }
 
 impl Severity {
+    /// The name shown to people. `error` is a syslog name that says
+    /// nothing about a security event, so it reads `high`; the wire name
+    /// ([`Severity::as_str`]) stays `error`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Severity::Error => "high",
+            other => other.as_str(),
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Severity::Debug => "debug",
@@ -52,14 +64,15 @@ impl Severity {
 impl std::str::FromStr for Severity {
     type Err = ();
 
-    /// Severity names, plus the syslog spellings `crit` and `err`.
+    /// Severity names, plus the syslog spellings `crit` and `err`, and `high`
+    /// for `error`.
     fn from_str(s: &str) -> Result<Self, ()> {
         Ok(match s {
             "debug" => Severity::Debug,
             "info" => Severity::Info,
             "notice" => Severity::Notice,
             "warning" => Severity::Warning,
-            "error" | "err" => Severity::Error,
+            "error" | "err" | "high" => Severity::Error,
             "critical" | "crit" => Severity::Critical,
             _ => return Err(()),
         })

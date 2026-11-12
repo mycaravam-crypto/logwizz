@@ -33,6 +33,7 @@ logwizz detects locally. The separate `logwizz-notify` service reads structured 
    TELEGRAM_CHAT_ID=-1001234567890
    NOTIFY_WINDOW_SECS=60
    NOTIFY_MIN_PRIORITY=warning
+   NOTIFY_DIGEST=weekly
    NOTIFY_MAX_PENDING=4096
    ```
 
@@ -54,12 +55,71 @@ Keep `notify.env` owned by root and mode `0600`. The bot token, endpoint URLs an
 | `NOTIFY_URL` | required for ntfy and webhook | HTTPS endpoint. |
 | `NOTIFY_AUTH` | unset | Value of an `Authorization` header, such as `Bearer token`. |
 | `NOTIFY_WINDOW_SECS` | `60` | Aggregation window, 10–3600 seconds. |
-| `NOTIFY_MIN_PRIORITY` | `warning` | Lowest severity forwarded: `debug`, `info`, `notice`, `warning`, `error` (or `err`), `critical` (or `crit`). |
+| `NOTIFY_MIN_PRIORITY` | `warning` | Lowest severity sent as an alert: `debug`, `info`, `notice`, `warning`, `high` (or `error`, `err`), `critical` (or `crit`). See [Severity classes](#severity-classes). |
+| `NOTIFY_DIGEST` | `weekly` | One summary of the events below `NOTIFY_MIN_PRIORITY`: `weekly`, `daily` or `off`. See [Weekly summary](#weekly-summary). |
 | `NOTIFY_MAX_PENDING` | `4096` | Maximum pending rule/window summaries, 1–65536. |
 | `NOTIFY_FIELDS` | `login` | Captures that may be sent, comma-separated (up to 16 names of `a-z`, `0-9`, `_`). See [Sources and fields](#sources-and-fields). |
 | `NOTIFY_RULES` | unset (all) | Comma-separated detection rule allowlist (1–64 IDs). Empty or invalid values exit 2; actionban reports bypass this filter. |
 
 Invalid settings stop the notifier with exit code 2 and a message that names the variable but never its value.
+
+## Severity classes
+
+A rule's severity says how close the event is to a compromise, not how loud
+it is. A port scan the firewall dropped is noise; a login is the one event
+that means someone is in. `config/detection.toml` uses:
+
+| Class | Icon | Meaning | Rules |
+|---|---|---|---|
+| `critical` | 🔴 | Someone is in. Check that it was you. | `ssh_login`, `login_after_scan` |
+| `high` | 🟠 | Access or privileges changed, or were tried from inside. | `account_change`, `sudo_auth_failure` |
+| `warning` | 🟡 | An attack on a real service is under way, not yet successful. | `ssh_bruteforce`, `ssh_user_enumeration`, `ssh_distributed_bruteforce`, `log_flood` |
+| `notice` | 🔵 | Background noise that was already turned away. | `port_scan`, `fast_scan`, `slow_scan`, `subnet_scan`, `tcp_flag_scan`, `ssh_probe`, `scanner_user_agent`, `fail2ban_ban` |
+
+`high` is the name shown for the severity `error` (a syslog name that says
+nothing about a security event). Both spellings are accepted in rules and in
+`NOTIFY_MIN_PRIORITY`; events and webhook JSON keep `"severity": "error"`.
+
+With the default `NOTIFY_MIN_PRIORITY=warning`, the `notice` rules send no
+alert. They are still written to the journal, still feed `login_after_scan`
+and the Fail2ban bridge, and are counted in the weekly summary. To be alerted
+of every scan as well, set `NOTIFY_MIN_PRIORITY=notice`, or raise a single
+rule's `severity`.
+
+## Weekly summary
+
+Events below `NOTIFY_MIN_PRIORITY`, down to `notice`, are counted per rule
+and sent as one message per period: a week from Monday 00:00 UTC
+(`NOTIFY_DIGEST=weekly`, the default) or a UTC day (`daily`). `off` sends
+none and does not read those events.
+
+```text
+📊 Logwizz weekly summary
+Host: 🟪 web1
+Period (UTC): 2026-11-02 00:00 – 2026-11-09 00:00
+Events below the alert level: 465
+
+port_scan × 412 · ~32 sources · top 203.0.113.8 × 40
+ssh_probe × 53 · 17 sources · top 198.51.100.4 × 9
+```
+
+- A count is the number of events: a threshold rule reports a source once
+  per cooldown, so `port_scan × 412` is 412 reported scans, not 412 packets.
+- Up to 15 rules are listed, most severe and most frequent first; each shows
+  its tracked sources (at most 32, `~` when there were more) and the most
+  frequent one. `NOTIFY_RULES` and `NOTIFY_FIELDS` apply as for alerts.
+- The summary is sent once the period is over, silently on Telegram
+  (`disable_notification`) and with priority 2 on ntfy. A period without
+  such events sends nothing.
+- The counts are saved in the state file with the journal cursor, so they
+  survive restarts; a failed delivery is retried like an alert. At shutdown
+  the running period is kept, not sent.
+- Webhooks receive schema `logwizz.digest/v1`: `period` (`weekly`, `daily`),
+  `host`, `period_start`, `period_end`, `count` and `rules`, each with
+  `rule`, `description`, `severity`, `count`, `sources`, `distinct_sources`
+  and `sources_approximate`.
+- Events that arrived while the notifier ran with `NOTIFY_DIGEST=off`, or
+  before this version, are not counted afterwards.
 
 ## Telegram message format
 
@@ -81,11 +141,14 @@ Source: 203.0.113.8
 Window (UTC): 2026-10-25 13:40 – 2026-10-25 13:41
 ```
 
+The first icon is the severity: 🔴 critical, 🟠 high, 🟡 warning, 🔵 notice.
+
 Host labels include a stable, pseudo-random-looking colored-square emoji. The
-marker comes from a deterministic hostname hash using a fixed palette (red,
-orange, green, blue, purple, brown). It does not change across restarts;
+marker comes from a deterministic hostname hash using a fixed palette (purple,
+blue, brown, black, white). Red, orange, yellow and green are not used for
+hosts: those colors mean severity. It does not change across restarts;
 unknown/multiple hosts use a neutral marker. Host color is only a visual cue:
-severity retains its separate icon, host text remains explicit, and different
+host text remains explicit, and different
 hosts may map to the same color. Telegram HTML does not support arbitrary
 text colors or backgrounds. This does not change webhook JSON or ntfy output.
 
@@ -105,14 +168,7 @@ path supplied evidence; a report is not proof of blocked packets.
 
 ## Fail2ban ban feedback
 
-A detection alert such as `port_scan` or `ssh_bruteforce` means **a rule fired**, not that an IP was blocked. The bundled `config/detection.toml` now also watches `/var/log/fail2ban.log`: when Fail2ban logs a `fail2ban.actions ... Ban <ip>` entry, the existing `fail2ban_ban` rule produces a **separate** notification after the normal aggregation window:
-
-```text
-🟡 Fail2ban reported a Ban action
-fail2ban_ban · warning · web1
-
-1× from 198.51.100.24
-```
+A detection alert such as `ssh_bruteforce` means **a rule fired**, not that an IP was blocked. The bundled `config/detection.toml` also watches `/var/log/fail2ban.log`: when Fail2ban logs a `fail2ban.actions ... Ban <ip>` entry, the `fail2ban_ban` rule produces a **separate** event. Its severity is `notice`: a ban is a defence that worked, so by default it is counted in the [weekly summary](#weekly-summary) and sends no alert. Set the rule's `severity = "warning"` for an alert per ban after the normal aggregation window.
 
 This is positive feedback that **Fail2ban reported a ban**; it is not a firewall-rule verification. The event can come from any Fail2ban jail, not necessarily the Logwizz bridge. Detection and ban messages are deliberately **not correlated**. Absence of a ban message does not prove no ban happened (log not available, another log location, delivery/filtering, or no ban). Check the actual jail state with `sudo fail2ban-client status logwizz` when certainty is required.
 
@@ -176,14 +232,14 @@ passwords into the username prompt.
 
 The same aggregate summary is supported by:
 
-- `NOTIFY_KIND=ntfy` with `NOTIFY_URL=https://ntfy.sh/your-topic`. The text message goes in the body, with `Title: logwizz <host>: <rule>`, a `Priority` from the severity (critical 5, error and warning 4, notice 3, info 2) and the severity as `Tags`.
+- `NOTIFY_KIND=ntfy` with `NOTIFY_URL=https://ntfy.sh/your-topic`. The text message goes in the body, with `Title: logwizz <host>: <rule>`, a `Priority` from the severity (critical 5, high 4, warning 3, notice 2, below that 1) and the severity as `Tags`.
 - `NOTIFY_KIND=webhook` with `NOTIFY_URL=https://your-endpoint.example/path`. The body is the JSON below.
 
 For these transports, `NOTIFY_AUTH` can contain an Authorization header value, such as `Bearer token`.
 
 ## Delivery and failure semantics
 
-- The journal cursor and the pending summaries are saved together in one state file, `/var/lib/logwizz-notify/state.json` (under the service's `StateDirectory`, written atomically, mode `0600`), at most once a second and after every delivery. After a crash, reading resumes after the saved cursor, into the saved summaries: no event is counted twice or skipped.
+- The journal cursor, the pending summaries and the weekly summary's counts are saved together in one state file, `/var/lib/logwizz-notify/state.json` (under the service's `StateDirectory`, written atomically, mode `0600`), at most once a second and after every delivery. After a crash, reading resumes after the saved cursor, into the saved summaries: no event is counted twice or skipped.
 - Delivery uses bounded curl timeouts and retries (10 seconds per attempt, 3 retries), then an exponential backoff between attempts (2 seconds up to 300 seconds). A failed summary stays pending for a later attempt; it does not block log detection in the core daemon.
 - Delivery is **at least once**, not exactly once. A crash after a remote endpoint accepts a summary but before the state file is saved can produce a duplicate. Consumers should tolerate duplicate summaries.
 - On normal window rollover, one summary is sent per rule/window. Shutdown or delayed delivery can produce a partial summary, marked with `partial: true` in webhook JSON and labelled in text transports.
