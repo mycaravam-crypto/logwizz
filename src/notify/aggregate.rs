@@ -340,7 +340,7 @@ impl Summary {
         }
         s.push_str(&format!(
             "\nSeverity: {}\nMatches: {}\nWindow: {} - {}",
-            self.severity,
+            self.severity.label(),
             self.count,
             format_rfc3339_secs(self.bucket),
             format_rfc3339_secs(self.window_end()),
@@ -386,7 +386,7 @@ impl Summary {
              <b>Host:</b> {} <code>{}</code>\n\
              <b>Events:</b> {}\n",
             html(&self.rule),
-            self.severity,
+            self.severity.label(),
             super::host_badge(&self.host),
             html(&self.host),
             self.count,
@@ -431,6 +431,154 @@ fn yes() -> bool {
     true
 }
 
+/// Rules listed in a digest; the rest are counted.
+pub const DIGEST_RULES: usize = 15;
+
+/// Everything below the alert level in one period (a week or a day): one
+/// message with a line per rule, instead of one alert per rule and window.
+#[derive(Debug)]
+pub struct Digest<'a> {
+    /// Period start, seconds since the epoch.
+    pub start: u64,
+    pub period_secs: u64,
+    /// One summary per rule, each spanning the whole period.
+    pub rules: Vec<&'a Summary>,
+}
+
+impl Digest<'_> {
+    /// `weekly`, `daily` or `periodic`.
+    pub fn name(&self) -> &'static str {
+        match self.period_secs {
+            604_800 => "weekly",
+            86_400 => "daily",
+            _ => "periodic",
+        }
+    }
+
+    /// The host of every event, or `multiple`.
+    pub fn host(&self) -> &str {
+        match self.rules.split_first() {
+            Some((first, rest)) if rest.iter().all(|s| s.host == first.host) => &first.host,
+            Some(_) => "multiple",
+            None => "unknown",
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.rules.iter().map(|s| s.count).sum()
+    }
+
+    /// Most severe first, then most frequent.
+    fn ordered(&self) -> Vec<&Summary> {
+        let mut rules = self.rules.clone();
+        rules.sort_by(|a, b| {
+            (b.severity, b.count)
+                .cmp(&(a.severity, a.count))
+                .then_with(|| a.rule.cmp(&b.rule))
+        });
+        rules
+    }
+
+    /// The webhook payload, schema `logwizz.digest/v1`.
+    pub fn to_json(&self) -> Value {
+        let rules: Vec<Value> = self
+            .ordered()
+            .iter()
+            .map(|s| {
+                json!({
+                    "rule": s.rule,
+                    "description": s.description,
+                    "severity": s.severity,
+                    "count": s.count,
+                    "sources": s.top_sources(),
+                    "distinct_sources": s.sources.len(),
+                    "sources_approximate": s.sources_overflowed,
+                })
+            })
+            .collect();
+        json!({
+            "schema": "logwizz.digest/v1",
+            "period": self.name(),
+            "host": self.host(),
+            "period_start": format_rfc3339_secs(self.start),
+            "period_end": format_rfc3339_secs(self.start + self.period_secs),
+            "count": self.total(),
+            "rules": rules,
+        })
+    }
+
+    /// The plain-text message for ntfy.
+    pub fn to_text(&self) -> String {
+        let mut s = format!(
+            "logwizz {} summary - {}\nPeriod: {} - {}\nEvents below the alert level: {}",
+            self.name(),
+            self.host(),
+            format_rfc3339_secs(self.start),
+            format_rfc3339_secs(self.start + self.period_secs),
+            self.total(),
+        );
+        let rules = self.ordered();
+        for r in rules.iter().take(DIGEST_RULES) {
+            s.push_str(&format!(
+                "\n{}: {} ({})",
+                r.rule,
+                r.count,
+                r.severity.label()
+            ));
+            if let Some(top) = r.top_sources().first() {
+                let approx = if r.sources_overflowed { "~" } else { "" };
+                s.push_str(&format!(
+                    ", {approx}{} sources, top {} ({})",
+                    r.sources.len(),
+                    top.source,
+                    top.count
+                ));
+            }
+        }
+        if rules.len() > DIGEST_RULES {
+            s.push_str(&format!("\nand {} more rules", rules.len() - DIGEST_RULES));
+        }
+        s
+    }
+
+    /// Fixed English labels, as in [`Summary::to_telegram_html`].
+    pub fn to_telegram_html(&self) -> String {
+        let day = |t: u64| format_rfc3339_secs(t)[..16].replace('T', " ");
+        let mut s = format!(
+            "📊 <b>Logwizz {} summary</b>\n\
+             <b>Host:</b> {} <code>{}</code>\n\
+             <b>Period (UTC):</b> {} – {}\n\
+             <b>Events below the alert level:</b> {}\n",
+            self.name(),
+            super::host_badge(self.host()),
+            html(self.host()),
+            day(self.start),
+            day(self.start + self.period_secs),
+            self.total(),
+        );
+        let rules = self.ordered();
+        for r in rules.iter().take(DIGEST_RULES) {
+            s.push_str(&format!("\n<code>{}</code> × {}", html(&r.rule), r.count));
+            if let Some(top) = r.top_sources().first() {
+                let approx = if r.sources_overflowed { "~" } else { "" };
+                s.push_str(&format!(
+                    " · {approx}{} sources · top <code>{}</code> × {}",
+                    r.sources.len(),
+                    html(&top.source),
+                    top.count
+                ));
+            }
+        }
+        if rules.len() > DIGEST_RULES {
+            s.push_str(&format!(
+                "\n… and {} more rules",
+                rules.len() - DIGEST_RULES
+            ));
+        }
+        s
+    }
+}
+
 /// Escapes text for Telegram HTML.
 fn html(v: &str) -> String {
     v.replace('&', "&amp;")
@@ -458,6 +606,8 @@ pub struct Aggregator {
     /// Newest window an event has been seen in. Older windows are complete
     /// even if the clock says otherwise (a backlog being read, or skew).
     latest_bucket: u64,
+    /// Windows start at this many seconds past a multiple of `window_secs`.
+    offset: u64,
 }
 
 impl Aggregator {
@@ -468,6 +618,7 @@ impl Aggregator {
             max_pending,
             summaries: BTreeMap::new(),
             latest_bucket: 0,
+            offset: 0,
         };
         for s in saved {
             a.latest_bucket = a.latest_bucket.max(s.bucket);
@@ -477,8 +628,16 @@ impl Aggregator {
         a
     }
 
+    /// Shifts the window starts, for example to Monday for weekly windows
+    /// (the epoch was a Thursday).
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.offset = offset % self.window_secs;
+        self
+    }
+
     pub fn record(&mut self, d: &Detection) -> Recorded {
-        let bucket = d.time / self.window_secs * self.window_secs;
+        let bucket =
+            d.time.saturating_sub(self.offset) / self.window_secs * self.window_secs + self.offset;
         let key = (bucket, self.window_secs, d.rule.clone());
         if !self.summaries.contains_key(&key) && self.summaries.len() >= self.max_pending {
             return Recorded::Full;
@@ -896,6 +1055,87 @@ mod tests {
              Severity: warning\nMatches: 1\nWindow: 2026-10-25T12:40:00Z - 2026-10-25T12:41:00Z\n\
              Source: 203.0.113.8\nPartial window (shutdown or delayed delivery)"
         );
+    }
+
+    #[test]
+    fn error_reads_high_for_people_only() {
+        let mut d = det(0, "sudo_auth_failure", None);
+        d.severity = Severity::Error;
+        let mut s = Summary::new(&d, 0, 60);
+        s.add(&d);
+        assert!(s.to_text(false).contains("\nSeverity: high\n"));
+        assert!(s.to_telegram_html(false).starts_with("🟠 "));
+        assert!(
+            s.to_telegram_html(false)
+                .contains("<b>Severity:</b> high\n")
+        );
+        assert_eq!(s.to_json(false)["severity"], "error");
+        assert_eq!("high".parse(), Ok(Severity::Error));
+    }
+
+    #[test]
+    fn weekly_windows_start_on_monday() {
+        const WEEK: u64 = 604_800;
+        let mut a = Aggregator::new(WEEK, 10, Vec::new()).with_offset(4 * 86_400);
+        let monday = 1_793_577_600; // 2026-11-02T00:00:00Z
+        a.record(&det(monday - 1, "scan", None));
+        a.record(&det(monday, "scan", None));
+        a.record(&det(monday + WEEK - 1, "scan", None));
+        let buckets: Vec<_> = a.summaries().map(|s| (s.bucket, s.count)).collect();
+        assert_eq!(buckets, [(monday - WEEK, 1), (monday, 2)]);
+    }
+
+    #[test]
+    fn digest_lists_rules_by_severity_and_count() {
+        let start = 1_793_577_600; // 2026-11-02T00:00:00Z
+        let mut a = Aggregator::new(604_800, 10, Vec::new()).with_offset(4 * 86_400);
+        let mut notice = |rule: &str, src: &str, n: usize| {
+            let mut d = det(start + 5, rule, Some(src));
+            d.severity = Severity::Notice;
+            for _ in 0..n {
+                a.record(&d);
+            }
+        };
+        notice("ssh_probe", "192.0.2.1", 2);
+        notice("port_scan", "203.0.113.8", 40);
+        notice("port_scan", "<b>", 3);
+        let digest = Digest {
+            start,
+            period_secs: 604_800,
+            rules: a.summaries().collect(),
+        };
+        assert_eq!(
+            digest.to_text(),
+            "logwizz weekly summary - web1\n\
+             Period: 2026-11-02T00:00:00Z - 2026-11-09T00:00:00Z\n\
+             Events below the alert level: 45\n\
+             port_scan: 43 (notice), 2 sources, top 203.0.113.8 (40)\n\
+             ssh_probe: 2 (notice), 1 sources, top 192.0.2.1 (2)"
+        );
+        let html = digest.to_telegram_html();
+        assert!(
+            html.starts_with("📊 <b>Logwizz weekly summary</b>\n"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<b>Period (UTC):</b> 2026-11-02 00:00 – 2026-11-09 00:00\n"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "\n<code>port_scan</code> × 43 · 2 sources · top <code>203.0.113.8</code> × 40"
+            ),
+            "{html}"
+        );
+        assert!(
+            !html.contains("<b>\n") && !html.contains("<code><b>"),
+            "{html}"
+        );
+        let v = digest.to_json();
+        assert_eq!(v["schema"], "logwizz.digest/v1");
+        assert_eq!((&v["period"], &v["count"]), (&json!("weekly"), &json!(45)));
+        assert_eq!(v["rules"][0]["rule"], "port_scan");
+        assert_eq!(v["rules"][1]["distinct_sources"], 1);
     }
 
     #[test]

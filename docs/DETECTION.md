@@ -20,14 +20,20 @@ makes scans visible, and the rules in
 | `scanner_user_agent` | Requests with the user agent of nmap NSE, masscan, zgrab, sqlmap, nikto or nuclei | a web access log (combined format or Caddy JSON) |
 | `ssh_login` | Every successful SSH login, with its source | `auth.log` |
 | `login_after_scan` | A successful SSH login from a source any of the rules above reported within the hour | `auth.log` |
-| `fail2ban_ban` | Fail2ban reporting a Ban action (separate alert, not firewall verification) | `fail2ban.log` |
+| `fail2ban_ban` | Fail2ban reporting a Ban action (separate event, not firewall verification) | `fail2ban.log` |
 | `log_flood` | More than 5000 lines in a minute in any watched file | – |
 
 Each detector reports a source once and then stays silent for that source
-for its cooldown (10 minutes to an hour), so one scan is one notification.
+for its cooldown (10 minutes to an hour), so one scan is one event.
 `ssh_distributed_bruteforce` reports an account, not a source, and then
 stays silent for that account for six hours.
 Send them to your phone with [logwizz-notify](NOTIFICATIONS.md).
+
+Severities rank events by how close they are to a compromise: logins are
+`critical`, account and sudo events `error` (shown as "high"), attacks on
+SSH `warning`, and scans, probes and Fail2ban bans `notice`. By default
+logwizz-notify alerts from `warning` up and counts the rest in a weekly
+summary; see [Severity classes](NOTIFICATIONS.md#severity-classes).
 
 ## 1. Make the firewall log scans
 
@@ -123,7 +129,7 @@ systemctl restart logwizz
 
 Adjust the `[[files]]` paths to your distribution (comments in the file),
 and enable the web access log if you run a web server. The bundled profile
-watches `/var/log/fail2ban.log` to send separate `fail2ban_ban` notifications;
+watches `/var/log/fail2ban.log` to count Fail2ban's bans (`fail2ban_ban`);
 set its `enabled = false` if Fail2ban is not installed (or change the path if
 its log is elsewhere). On systems without
 rsyslog, use the `[journal]` source instead of enabling file paths for the
@@ -158,7 +164,7 @@ journalctl --namespace=logwizz -u logwizz -o cat -f
 ```
 
 ```json
-{"v":1,"ts":"...","host":"web1","pid":812,"file":"/var/log/kern.log","rule":"port_scan","description":"One source probed many closed ports","severity":"critical","match_type":"regex","line":"... logwizz-drop: ... SRC=203.0.113.66 ... DPT=443 ...","truncated":false,"fields":{"src":"203.0.113.66","dpt":"443"},"threshold":{"group":"203.0.113.66","count":20,"window_secs":60,"distinct":"dpt","values":["21","22","23","25","53","80","110","111"]}}
+{"v":1,"ts":"...","host":"web1","pid":812,"file":"/var/log/kern.log","rule":"port_scan","description":"One source probed many closed ports","severity":"notice","match_type":"regex","line":"... logwizz-drop: ... SRC=203.0.113.66 ... DPT=443 ...","truncated":false,"fields":{"src":"203.0.113.66","dpt":"443"},"threshold":{"group":"203.0.113.66","count":20,"window_secs":60,"distinct":"dpt","values":["21","22","23","25","53","80","110","111"]}}
 ```
 
 The host check (`tests/host/run-vm.sh`, and the **host** CI workflow) does
